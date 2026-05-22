@@ -1,9 +1,11 @@
 mod auth;
 mod claude;
+mod compare;
 mod sheets;
 
 use auth::AuthState;
 use claude::ClaudeState;
+use compare::CompareState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -11,6 +13,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AuthState::new())
         .manage(ClaudeState::new())
+        .manage(CompareState::new())
         .invoke_handler(tauri::generate_handler![
             auth::check_auth,
             auth::start_login,
@@ -23,9 +26,17 @@ pub fn run() {
             sheets::get_presentation_slides,
             sheets::get_cache_size,
             sheets::clear_cache,
+            sheets::find_latest_export,
+            sheets::upload_xlsx_to_drive,
+            sheets::upload_xlsx_bytes_to_drive,
             claude::run_claude_task,
             claude::send_claude_input,
             claude::get_claude_status,
+            claude::stop_claude,
+            claude::get_claude_account,
+            compare::export_sheet_html,
+            compare::run_diff_skill,
+            compare::open_in_chrome,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -173,6 +173,7 @@ pub async fn start_login(state: State<'_, AuthState>) -> Result<UserInfo, String
     let scopes = "openid email profile \
         https://www.googleapis.com/auth/spreadsheets \
         https://www.googleapis.com/auth/drive.readonly \
+        https://www.googleapis.com/auth/drive.file \
         https://www.googleapis.com/auth/presentations.readonly";
 
     let mut auth_url =

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 interface DriveFile {
   id: string;
@@ -38,6 +39,76 @@ const error = ref("");
 const pasteUrl = ref("");
 
 const confirmed = ref<{ spreadsheetId: string; tabName: string } | null>(null);
+
+const fileInput = ref<HTMLInputElement | null>(null);
+const uploading = ref(false);
+const uploadStatus = ref("");
+
+function triggerUpload() {
+  fileInput.value?.click();
+}
+
+async function handleFileSelected(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const all = Array.from(input.files ?? []);
+  input.value = "";
+  if (all.length === 0) return;
+
+  const xlsx = all.filter((f) => f.name.toLowerCase().endsWith(".xlsx"));
+  const skipped = all.length - xlsx.length;
+  if (xlsx.length === 0) {
+    error.value = "Please select .xlsx file(s)";
+    return;
+  }
+
+  uploading.value = true;
+  error.value = "";
+  const succeeded: string[] = [];
+  const failed: { name: string; reason: string }[] = [];
+
+  try {
+    for (let i = 0; i < xlsx.length; i++) {
+      const file = xlsx[i];
+      uploadStatus.value = `Uploading ${i + 1}/${xlsx.length}: ${file.name}`;
+      try {
+        const buf = await file.arrayBuffer();
+        const bytes = Array.from(new Uint8Array(buf));
+        await invoke("upload_xlsx_bytes_to_drive", {
+          fileName: file.name,
+          bytes,
+          convertToSheets: true,
+          folderName: "tester-app",
+        });
+        succeeded.push(file.name);
+      } catch (err: any) {
+        failed.push({ name: file.name, reason: String(err) });
+      }
+    }
+
+    await loadFiles();
+    if (succeeded.length > 0) {
+      window.dispatchEvent(new CustomEvent("drive-files-updated"));
+    }
+
+    const parts: string[] = [];
+    if (succeeded.length > 0) parts.push(`Uploaded ${succeeded.length}/${xlsx.length}`);
+    if (failed.length > 0) parts.push(`${failed.length} failed`);
+    if (skipped > 0) parts.push(`${skipped} skipped (not .xlsx)`);
+    uploadStatus.value = parts.join(" · ");
+
+    if (failed.length > 0) {
+      error.value = failed.map((f) => `${f.name}: ${f.reason}`).join("\n");
+    }
+
+    setTimeout(() => {
+      if (uploadStatus.value.startsWith("Uploaded") || uploadStatus.value.includes("skipped")) {
+        uploadStatus.value = "";
+      }
+    }, 3000);
+  } finally {
+    uploading.value = false;
+  }
+}
 
 onMounted(() => loadFiles());
 
@@ -123,9 +194,13 @@ async function handlePasteUrl() {
   await selectFile({ id, name: "Pasted Sheet", modified_time: "", mime_type: "" });
 }
 
-function openInBrowser() {
-  if (sheetData.value?.spreadsheet_url) {
-    window.open(sheetData.value.spreadsheet_url, "_blank");
+async function openInBrowser() {
+  const url = sheetData.value?.spreadsheet_url;
+  if (!url) return;
+  try {
+    await openUrl(url);
+  } catch (e: any) {
+    error.value = `Failed to open browser: ${String(e)}`;
   }
 }
 
@@ -159,6 +234,25 @@ function formatDate(iso: string) {
           @keyup.enter="handlePasteUrl"
         />
         <button @click="handlePasteUrl" :disabled="!pasteUrl">Go</button>
+      </div>
+      <div class="upload-section">
+        <input
+          ref="fileInput"
+          type="file"
+          accept=".xlsx"
+          multiple
+          style="display: none"
+          @change="handleFileSelected"
+        />
+        <button
+          class="upload-btn"
+          @click="triggerUpload"
+          :disabled="uploading"
+          :title="uploading ? 'Uploading...' : 'Upload one or more .xlsx (auto-converts to Google Sheets)'"
+        >
+          {{ uploading ? "Uploading..." : "+ Upload xlsx" }}
+        </button>
+        <div v-if="uploadStatus" class="upload-status">{{ uploadStatus }}</div>
       </div>
       <div class="divider">
         <span>or select recent</span>
@@ -332,6 +426,37 @@ function formatDate(iso: string) {
   border-radius: 6px;
   background: white;
   cursor: pointer;
+}
+.upload-section {
+  margin-bottom: 8px;
+}
+.upload-btn {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px dashed #667eea;
+  border-radius: 6px;
+  background: white;
+  color: #667eea;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.upload-btn:hover:not(:disabled) {
+  background: #eef2ff;
+}
+.upload-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.upload-status {
+  margin-top: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: #276749;
+  background: #f0fff4;
+  border-radius: 4px;
+  word-break: break-all;
 }
 .divider {
   display: flex;

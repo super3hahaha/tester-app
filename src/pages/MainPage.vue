@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import SheetsPage from "./SheetsPage.vue";
 import SlidesPage from "./SlidesPage.vue";
 import GeneratePage from "./GeneratePage.vue";
+import ComparePage from "./ComparePage.vue";
 import SettingsPage from "./SettingsPage.vue";
 
 interface UserInfo {
@@ -44,6 +45,7 @@ const navItems: NavItem[] = [
       { id: "sheets", label: "Google Sheets", icon: "📊" },
       { id: "slides", label: "Google Slides", icon: "📑" },
       { id: "generate", label: "Generate", icon: "▶" },
+      { id: "compare", label: "compare", icon: "🔀" },
     ],
   },
   {
@@ -156,6 +158,9 @@ function onSlidesSelect(files: SlidesSelection[]) {
           v-show="activeOption === 'generate'"
           :sheetSelection="sheetSelection"
           :slidesSelection="slidesSelection"
+        />
+        <ComparePage
+          v-show="activeOption === 'compare'"
         />
         <SettingsPage
           v-show="activeOption === 'settings-general'"

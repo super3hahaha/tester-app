@@ -25,3 +25,6 @@ dist-ssr
 
 # Credentials
 src-tauri/credentials/
+
+# Claude Code local config
+.claude/

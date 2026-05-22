@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 interface SheetSelection {
   spreadsheetId: string;
@@ -21,30 +22,142 @@ const props = defineProps<{
   slidesSelection: SlidesSelection[];
 }>();
 
+interface LogEvent {
+  text: string;
+  kind: string;
+  tool?: string;
+  duration_ms?: number;
+  timestamp: string;
+}
+
+function nowHms(): string {
+  const d = new Date();
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function pushLog(text: string, kind = "text", tool?: string, duration_ms?: number) {
+  logs.value.push({ text, kind, tool, duration_ms, timestamp: nowHms() });
+}
+
+function iconFor(kind: string): string {
+  switch (kind) {
+    case "tool":
+      return "🔧";
+    case "tool_done":
+      return "✓";
+    case "error":
+      return "✗";
+    case "system":
+      return "ℹ";
+    case "result":
+      return "✓";
+    case "user":
+      return "›";
+    case "info":
+      return "·";
+    default:
+      return " ";
+  }
+}
+
+function formatLogText(log: LogEvent): string {
+  if (log.kind === "tool_done") {
+    const dur = log.duration_ms != null ? ` (${(log.duration_ms / 1000).toFixed(1)}s)` : "";
+    const trimmed = log.text.trim();
+    if (!trimmed) {
+      return `${log.tool || "Tool"} completed with no output${dur}`;
+    }
+    const first = trimmed.split("\n")[0];
+    const more = trimmed.includes("\n") ? " …" : "";
+    return `${first}${more}${dur}`;
+  }
+  return log.text;
+}
+
 const generating = ref(false);
 const progress = ref("");
-const logs = ref<string[]>([]);
+const logs = ref<LogEvent[]>([]);
 const error = ref("");
 const done = ref(false);
 const hasSession = ref(false);
 const userInput = ref("");
 const sending = ref(false);
 const logPanel = ref<HTMLElement | null>(null);
+const stopping = ref(false);
+
+interface ModelOption {
+  id: string;
+  label: string;
+}
+const MODELS: ModelOption[] = [
+  { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+  { id: "claude-opus-4-7", label: "Opus 4.7" },
+  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+];
+const selectedModel = ref<string>(MODELS[0].id);
+
+interface ExportInfo {
+  path: string;
+  name: string;
+}
+interface UploadResult {
+  drive_id: string;
+  web_url: string;
+  converted: boolean;
+}
+const latestExport = ref<ExportInfo | null>(null);
+const uploading = ref(false);
+const uploadResult = ref<UploadResult | null>(null);
+const uploadError = ref("");
+
+const idleSeconds = ref(0);
+const idleActive = ref(false);
+const IDLE_THRESHOLD = 3;
+let idleTimer: ReturnType<typeof setInterval> | null = null;
+let idleStart = 0;
+
+function startIdleWatch() {
+  stopIdleWatch();
+  idleStart = Date.now();
+  idleSeconds.value = 0;
+  idleActive.value = true;
+  idleTimer = setInterval(() => {
+    idleSeconds.value = Math.floor((Date.now() - idleStart) / 1000);
+  }, 1000);
+}
+
+function stopIdleWatch() {
+  if (idleTimer) {
+    clearInterval(idleTimer);
+    idleTimer = null;
+  }
+  idleActive.value = false;
+  idleSeconds.value = 0;
+}
+
+const showIdle = computed(
+  () => generating.value && idleActive.value && idleSeconds.value >= IDLE_THRESHOLD
+);
 
 let unlisten: UnlistenFn | null = null;
 
 onMounted(async () => {
-  unlisten = await listen<{ text: string; kind: string; done: boolean }>(
+  unlisten = await listen<{ text: string; kind: string; tool?: string; duration_ms?: number; done: boolean }>(
     "claude-log",
     (event) => {
-      const { text, done: isDone } = event.payload;
-      logs.value.push(text);
+      const { text, kind, tool, duration_ms, done: isDone } = event.payload;
+      pushLog(text, kind, tool, duration_ms);
       if (isDone) {
         done.value = true;
         generating.value = false;
         sending.value = false;
         progress.value = "Done!";
+        stopIdleWatch();
         checkSession();
+        refreshLatestExport();
+      } else {
+        startIdleWatch();
       }
       nextTick(() => {
         if (logPanel.value) {
@@ -59,6 +172,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   unlisten?.();
+  stopIdleWatch();
 });
 
 async function checkSession() {
@@ -67,6 +181,32 @@ async function checkSession() {
     generating.value = running;
     hasSession.value = session;
   } catch {}
+}
+
+async function refreshLatestExport() {
+  try {
+    latestExport.value = await invoke<ExportInfo | null>("find_latest_export");
+  } catch {
+    latestExport.value = null;
+  }
+}
+
+async function handleUploadToDrive() {
+  if (!latestExport.value || uploading.value) return;
+  uploading.value = true;
+  uploadError.value = "";
+  uploadResult.value = null;
+  try {
+    uploadResult.value = await invoke<UploadResult>("upload_xlsx_to_drive", {
+      filePath: latestExport.value.path,
+      convertToSheets: true,
+      folderName: "tester-app",
+    });
+  } catch (e: any) {
+    uploadError.value = String(e);
+  } finally {
+    uploading.value = false;
+  }
 }
 
 const canGenerate = computed(
@@ -85,38 +225,42 @@ async function handleGenerate() {
   done.value = false;
   hasSession.value = false;
   logs.value = [];
+  latestExport.value = null;
+  uploadResult.value = null;
+  uploadError.value = "";
+  startIdleWatch();
 
   try {
     progress.value = "Exporting Sheet as CSV...";
-    logs.value.push(
-      `[1/3] Exporting "${props.sheetSelection.spreadsheetName}" > "${props.sheetSelection.tabName}" as CSV`
+    pushLog(
+      `[1/3] Exporting "${props.sheetSelection.spreadsheetName}" > "${props.sheetSelection.tabName}" as CSV`,
+      "info"
     );
 
     const csvPath = await invoke<string>("export_sheet_csv", {
       spreadsheetId: props.sheetSelection.spreadsheetId,
       range: props.sheetSelection.tabName,
     });
-    logs.value.push(`  -> ${csvPath}`);
+    pushLog(`  -> ${csvPath}`);
 
     const pptxPaths: string[] = [];
     for (let i = 0; i < props.slidesSelection.length; i++) {
       const slide = props.slidesSelection[i];
       progress.value = `Exporting PPTX ${i + 1}/${props.slidesSelection.length}...`;
-      logs.value.push(`[2/3] Exporting "${slide.name}" as PPTX`);
+      pushLog(`[2/3] Exporting "${slide.name}" as PPTX`, "info");
 
       const pptxPath = await invoke<string>("export_slides_pptx", {
         presentationId: slide.id,
         name: slide.name,
       });
       pptxPaths.push(pptxPath);
-      logs.value.push(`  -> ${pptxPath}`);
+      pushLog(`  -> ${pptxPath}`);
     }
 
     progress.value = "Generating test cases with Claude...";
-    logs.value.push("[3/3] Launching Claude CLI with /test-case-generator skill");
-    logs.value.push(`  CSV: ${csvPath}`);
-    logs.value.push(`  PPTX: ${pptxPaths.join(", ")}`);
-    logs.value.push("");
+    pushLog("[3/3] Launching Claude CLI with /test-case-generator skill", "info");
+    pushLog(`  CSV: ${csvPath}`);
+    pushLog(`  PPTX: ${pptxPaths.join(", ")}`);
 
     const pageSelections = props.slidesSelection.map((s) => ({
       name: s.name,
@@ -127,6 +271,7 @@ async function handleGenerate() {
       csvPath,
       pptxPaths,
       pageSelections,
+      model: selectedModel.value,
     });
   } catch (e: any) {
     error.value = String(e);
@@ -146,12 +291,11 @@ async function handleSendInput() {
   error.value = "";
   progress.value = "Sending to Claude...";
 
-  logs.value.push("");
-  logs.value.push(`> ${input}`);
-  logs.value.push("");
+  pushLog(`> ${input}`, "user");
+  startIdleWatch();
 
   try {
-    await invoke("send_claude_input", { input });
+    await invoke("send_claude_input", { input, model: selectedModel.value });
   } catch (e: any) {
     error.value = String(e);
     sending.value = false;
@@ -164,6 +308,19 @@ function handleInputKeydown(e: KeyboardEvent) {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     handleSendInput();
+  }
+}
+
+async function handleStop() {
+  if (!generating.value || stopping.value) return;
+  stopping.value = true;
+  try {
+    await invoke("stop_claude");
+    pushLog("Stop requested — terminating Claude process...", "info");
+  } catch (e: any) {
+    error.value = String(e);
+  } finally {
+    stopping.value = false;
   }
 }
 </script>
@@ -218,12 +375,26 @@ function handleInputKeydown(e: KeyboardEvent) {
 
     <!-- Generate button -->
     <div class="action-area">
+      <div class="model-picker">
+        <label>Model</label>
+        <select v-model="selectedModel" :disabled="generating">
+          <option v-for="m in MODELS" :key="m.id" :value="m.id">{{ m.label }}</option>
+        </select>
+      </div>
       <button
         class="generate-btn"
         :disabled="!canGenerate || generating"
         @click="handleGenerate"
       >
         {{ generating ? progress : "Generate Test Cases" }}
+      </button>
+      <button
+        v-if="generating"
+        class="stop-btn"
+        :disabled="stopping"
+        @click="handleStop"
+      >
+        {{ stopping ? "Stopping..." : "■ Stop" }}
       </button>
       <span v-if="!canGenerate && !generating" class="action-hint">
         Select both a Sheet and at least one Slides to continue
@@ -241,8 +412,45 @@ function handleInputKeydown(e: KeyboardEvent) {
         <span v-else-if="done && hasSession" class="log-waiting">Waiting for input...</span>
         <span v-else-if="generating" class="log-running">Running...</span>
       </div>
-      <pre ref="logPanel" class="log-content"><template v-for="(line, i) in logs" :key="i">{{ line }}
-</template></pre>
+      <div ref="logPanel" class="log-content">
+        <div
+          v-for="(log, i) in logs"
+          :key="i"
+          class="log-line"
+          :class="`log-${log.kind}`"
+        >
+          <span class="log-ts">{{ log.timestamp }}</span>
+          <span class="log-icon" :class="`icon-${log.kind}`">{{ iconFor(log.kind) }}</span>
+          <span v-if="log.tool" class="log-tool">{{ log.tool }}</span>
+          <span class="log-text">{{ formatLogText(log) }}</span>
+        </div>
+        <div v-if="showIdle" class="log-line log-idle">
+          <span class="log-icon idle-pulse">⏳</span>
+          <span class="log-text">Claude is thinking… ({{ idleSeconds }}s)</span>
+        </div>
+      </div>
+
+      <!-- Drive upload panel -->
+      <div v-if="done && latestExport" class="drive-panel">
+        <div class="drive-row">
+          <span class="drive-icon">📤</span>
+          <span class="drive-file">{{ latestExport.name }}</span>
+          <button
+            class="drive-btn"
+            :disabled="uploading"
+            @click="handleUploadToDrive"
+          >
+            {{ uploading ? "Uploading..." : "Upload to Drive" }}
+          </button>
+        </div>
+        <div v-if="uploadResult" class="drive-success">
+          ✅ Uploaded
+          <a href="#" @click.prevent="openUrl(uploadResult.web_url)">
+            Open in Google Sheets ↗
+          </a>
+        </div>
+        <div v-if="uploadError" class="drive-error">{{ uploadError }}</div>
+      </div>
 
       <!-- Input area for Claude interaction -->
       <div v-if="hasSession && done" class="input-area">
@@ -371,6 +579,49 @@ h3 {
   font-size: 12px;
   color: #bbb;
 }
+.model-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.model-picker label {
+  font-size: 12px;
+  color: #666;
+}
+.model-picker select {
+  padding: 6px 10px;
+  font-size: 13px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+  outline: none;
+}
+.model-picker select:focus {
+  border-color: #667eea;
+}
+.model-picker select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.stop-btn {
+  padding: 10px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  color: white;
+  background: #e53e3e;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.stop-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+.stop-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .error {
   color: #e53e3e;
   font-size: 13px;
@@ -404,60 +655,170 @@ h3 {
   color: #ecc94b;
 }
 .log-content {
-  padding: 12px 14px;
-  font-size: 12px;
-  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
-  line-height: 1.6;
-  background: #1e1e2e;
-  color: #cdd6f4;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  line-height: 1.7;
+  background: #ffffff;
+  color: #2d3748;
   max-height: 400px;
   overflow-y: auto;
   margin: 0;
+}
+.log-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   white-space: pre-wrap;
-  word-break: break-all;
+  word-break: break-word;
+}
+.log-ts {
+  color: #a0a0a0;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.log-icon {
+  width: 1.1em;
+  flex-shrink: 0;
+  text-align: center;
+  user-select: none;
+}
+.icon-tool { color: #c96342; }
+.icon-tool_done,
+.icon-result { color: #48bb78; }
+.icon-error { color: #e53e3e; }
+.icon-system { color: #667eea; }
+.icon-user { color: #667eea; }
+.log-tool {
+  font-weight: 600;
+  color: #c96342;
+  flex-shrink: 0;
+}
+.log-text {
+  flex: 1;
+  min-width: 0;
+}
+.log-tool_done .log-text { color: #888; }
+.log-error .log-text { color: #c53030; }
+.log-system .log-text { color: #4a5568; }
+.log-info .log-text { color: #718096; }
+.log-user .log-text { color: #2d3748; font-weight: 500; }
+.log-idle .log-text {
+  color: #888;
+  font-style: italic;
+}
+.idle-pulse {
+  animation: idle-pulse 1.4s ease-in-out infinite;
+}
+@keyframes idle-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
 }
 .input-area {
   display: flex;
   gap: 8px;
-  padding: 10px 14px;
-  background: #2a2a3a;
-  border-top: 1px solid #3a3a4a;
+  padding: 12px 14px;
+  background: #fafafa;
+  border-top: 1px solid #e0e0e0;
 }
 .claude-input {
   flex: 1;
-  padding: 8px 12px;
+  padding: 10px 12px;
   font-size: 13px;
-  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
-  background: #1e1e2e;
-  color: #cdd6f4;
-  border: 1px solid #3a3a4a;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  background: #ffffff;
+  color: #2d3748;
+  border: 1px solid #d4d4d8;
   border-radius: 6px;
   resize: none;
   outline: none;
+  transition: border-color 0.15s;
 }
 .claude-input:focus {
-  border-color: #667eea;
+  border-color: #c96342;
 }
 .claude-input:disabled {
   opacity: 0.5;
+  background: #f5f5f5;
 }
 .send-btn {
-  padding: 8px 20px;
+  padding: 8px 18px;
   font-size: 13px;
   font-weight: 600;
   color: white;
-  background: linear-gradient(135deg, #667eea, #764ba2);
+  background: #c96342;
   border: none;
   border-radius: 6px;
   cursor: pointer;
   align-self: flex-end;
-  transition: opacity 0.2s;
+  transition: background 0.15s;
 }
 .send-btn:hover:not(:disabled) {
-  opacity: 0.9;
+  background: #b85838;
 }
 .send-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+.drive-panel {
+  padding: 12px 14px;
+  background: #fafafa;
+  border-top: 1px solid #e0e0e0;
+  color: #2d3748;
+  font-size: 13px;
+}
+.drive-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.drive-icon {
+  font-size: 16px;
+}
+.drive-file {
+  flex: 1;
+  font-size: 12px;
+  color: #6b7280;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drive-btn {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: white;
+  background: #34a853;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.drive-btn:hover:not(:disabled) {
+  background: #2d9248;
+}
+.drive-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.drive-success {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #2d9248;
+}
+.drive-success a {
+  color: #c96342;
+  margin-left: 6px;
+  text-decoration: none;
+}
+.drive-success a:hover {
+  text-decoration: underline;
+}
+.drive-error {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #c53030;
+  word-break: break-all;
 }
 </style>

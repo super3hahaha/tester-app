@@ -56,6 +56,17 @@ fn get_token(state: &State<'_, AuthState>) -> Result<String, String> {
     state.get_access_token().ok_or_else(|| "Not logged in".into())
 }
 
+fn err_chain<E: std::error::Error + ?Sized>(e: &E) -> String {
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(c) = src {
+        s.push_str(" -> ");
+        s.push_str(&c.to_string());
+        src = c.source();
+    }
+    s
+}
+
 #[tauri::command]
 pub async fn list_drive_files(
     mime_type: String,
@@ -76,7 +87,7 @@ pub async fn list_drive_files(
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|e| format!("Drive API failed: {}", e))?;
+        .map_err(|e| format!("Drive API failed: {}", err_chain(&e)))?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -87,7 +98,7 @@ pub async fn list_drive_files(
     let list: DriveFileList = resp
         .json()
         .await
-        .map_err(|e| format!("Drive parse failed: {}", e))?;
+        .map_err(|e| format!("Drive parse failed: {}", err_chain(&e)))?;
 
     Ok(list
         .files
@@ -119,7 +130,7 @@ pub async fn get_sheet_tabs(
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|e| format!("Sheets API failed: {}", e))?;
+        .map_err(|e| format!("Sheets API failed: {}", err_chain(&e)))?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -130,7 +141,7 @@ pub async fn get_sheet_tabs(
     let meta: SpreadsheetMeta = resp
         .json()
         .await
-        .map_err(|e| format!("Sheets parse failed: {}", e))?;
+        .map_err(|e| format!("Sheets parse failed: {}", err_chain(&e)))?;
 
     Ok(meta
         .sheets
@@ -159,7 +170,7 @@ pub async fn read_sheet(
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|e| format!("Sheets API failed: {}", e))?;
+        .map_err(|e| format!("Sheets API failed: {}", err_chain(&e)))?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -170,7 +181,7 @@ pub async fn read_sheet(
     let data: SheetsValueRange = resp
         .json()
         .await
-        .map_err(|e| format!("Sheets parse failed: {}", e))?;
+        .map_err(|e| format!("Sheets parse failed: {}", err_chain(&e)))?;
 
     let values = data.values.unwrap_or_default();
     if values.is_empty() {
@@ -216,7 +227,7 @@ pub async fn export_sheet_csv(
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|e| format!("Sheets API failed: {}", e))?;
+        .map_err(|e| format!("Sheets API failed: {}", err_chain(&e)))?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -227,7 +238,7 @@ pub async fn export_sheet_csv(
     let data: SheetsValueRange = resp
         .json()
         .await
-        .map_err(|e| format!("Sheets parse failed: {}", e))?;
+        .map_err(|e| format!("Sheets parse failed: {}", err_chain(&e)))?;
 
     let values = data.values.unwrap_or_default();
 
@@ -254,7 +265,7 @@ pub async fn export_sheet_csv(
     let filename = format!("sheet_{}.csv", spreadsheet_id.chars().take(8).collect::<String>());
     let path = dir.join(&filename);
     std::fs::write(&path, &csv)
-        .map_err(|e| format!("Write CSV failed: {}", e))?;
+        .map_err(|e| format!("Write CSV failed: {}", err_chain(&e)))?;
 
     Ok(path.to_string_lossy().to_string())
 }
@@ -278,7 +289,7 @@ pub async fn export_slides_pptx(
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|e| format!("Drive export failed: {}", e))?;
+        .map_err(|e| format!("Drive export failed: {}", err_chain(&e)))?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -289,7 +300,7 @@ pub async fn export_slides_pptx(
     let bytes = resp
         .bytes()
         .await
-        .map_err(|e| format!("Download failed: {}", e))?;
+        .map_err(|e| format!("Download failed: {}", err_chain(&e)))?;
 
     let dir = data_dir().join("exports");
     std::fs::create_dir_all(&dir).ok();
@@ -297,7 +308,7 @@ pub async fn export_slides_pptx(
     let filename = format!("{}.pptx", safe_name);
     let path = dir.join(&filename);
     std::fs::write(&path, &bytes)
-        .map_err(|e| format!("Write PPTX failed: {}", e))?;
+        .map_err(|e| format!("Write PPTX failed: {}", err_chain(&e)))?;
 
     Ok(path.to_string_lossy().to_string())
 }
@@ -328,7 +339,7 @@ pub async fn get_presentation_slides(
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|e| format!("Slides API failed: {}", e))?;
+        .map_err(|e| format!("Slides API failed: {}", err_chain(&e)))?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -339,7 +350,7 @@ pub async fn get_presentation_slides(
     let pres: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("Slides parse failed: {}", e))?;
+        .map_err(|e| format!("Slides parse failed: {}", err_chain(&e)))?;
 
     let slides = pres
         .get("slides")
@@ -466,7 +477,7 @@ pub async fn get_cache_size() -> Result<u64, String> {
 pub async fn clear_cache() -> Result<(), String> {
     let dir = data_dir().join("thumbs");
     if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("Failed to clear cache: {}", e))?;
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("Failed to clear cache: {}", err_chain(&e)))?;
     }
     Ok(())
 }
@@ -491,4 +502,207 @@ fn dir_size(path: &PathBuf) -> u64 {
 
 fn data_dir() -> PathBuf {
     dirs::home_dir().unwrap().join(".tester-app")
+}
+
+#[derive(Serialize)]
+pub struct ExportInfo {
+    path: String,
+    name: String,
+}
+
+#[tauri::command]
+pub fn find_latest_export() -> Result<Option<ExportInfo>, String> {
+    let dir = data_dir().join("exports");
+    if !dir.exists() {
+        return Ok(None);
+    }
+    let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("xlsx") {
+            let meta = entry.metadata().map_err(|e| e.to_string())?;
+            let modified = meta.modified().map_err(|e| e.to_string())?;
+            if latest.as_ref().map_or(true, |(_, t)| modified > *t) {
+                latest = Some((path, modified));
+            }
+        }
+    }
+    Ok(latest.map(|(p, _)| ExportInfo {
+        name: p.file_name().unwrap().to_string_lossy().to_string(),
+        path: p.to_string_lossy().to_string(),
+    }))
+}
+
+#[derive(Serialize)]
+pub struct UploadResult {
+    drive_id: String,
+    web_url: String,
+    converted: bool,
+}
+
+async fn find_or_create_folder(token: &str, name: &str) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let q = format!(
+        "name='{}' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+        name.replace('\'', "\\'")
+    );
+    let search_url = format!(
+        "https://www.googleapis.com/drive/v3/files?q={}&fields=files(id,name)&pageSize=1",
+        urlencoding::encode(&q)
+    );
+    let resp = client
+        .get(&search_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("Drive search failed: {}", err_chain(&e)))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Drive search {}: {}", status, body));
+    }
+    let list: DriveFileList = resp
+        .json()
+        .await
+        .map_err(|e| format!("Drive parse failed: {}", err_chain(&e)))?;
+    if let Some(files) = list.files {
+        if let Some(f) = files.first() {
+            return Ok(f.id.clone());
+        }
+    }
+
+    let body = serde_json::json!({
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+    });
+    let resp = client
+        .post("https://www.googleapis.com/drive/v3/files?fields=id")
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Drive folder create failed: {}", err_chain(&e)))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Drive folder create {}: {}", status, body));
+    }
+    let created: DriveFileRaw = resp
+        .json()
+        .await
+        .map_err(|e| format!("Folder parse failed: {}", err_chain(&e)))?;
+    Ok(created.id)
+}
+
+async fn upload_bytes_to_drive(
+    token: &str,
+    file_name: &str,
+    bytes: Vec<u8>,
+    convert_to_sheets: bool,
+    folder_name: Option<String>,
+) -> Result<UploadResult, String> {
+    let folder = folder_name.unwrap_or_else(|| "tester-app".to_string());
+    let folder_id = find_or_create_folder(token, &folder).await?;
+
+    let mut metadata = serde_json::json!({
+        "name": file_name,
+        "parents": [folder_id],
+    });
+    if convert_to_sheets {
+        metadata["mimeType"] = serde_json::json!("application/vnd.google-apps.spreadsheet");
+    }
+
+    let boundary = "tester_app_boundary_8a3c";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    body.extend_from_slice(b"Content-Type: application/json; charset=UTF-8\r\n\r\n");
+    body.extend_from_slice(metadata.to_string().as_bytes());
+    body.extend_from_slice(format!("\r\n--{}\r\n", boundary).as_bytes());
+    body.extend_from_slice(
+        b"Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n\r\n",
+    );
+    body.extend_from_slice(&bytes);
+    body.extend_from_slice(format!("\r\n--{}--\r\n", boundary).as_bytes());
+
+    let resp = reqwest::Client::new()
+        .post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink,mimeType")
+        .bearer_auth(token)
+        .header(
+            "Content-Type",
+            format!("multipart/related; boundary={}", boundary),
+        )
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("Upload failed: {}", err_chain(&e)))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Drive upload {}: {}", status, body));
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct UploadResp {
+        id: String,
+        web_view_link: Option<String>,
+        mime_type: Option<String>,
+    }
+    let parsed: UploadResp = resp
+        .json()
+        .await
+        .map_err(|e| format!("Upload parse failed: {}", err_chain(&e)))?;
+
+    let web_url = parsed.web_view_link.unwrap_or_else(|| {
+        if convert_to_sheets {
+            format!("https://docs.google.com/spreadsheets/d/{}/edit", parsed.id)
+        } else {
+            format!("https://drive.google.com/file/d/{}/view", parsed.id)
+        }
+    });
+
+    Ok(UploadResult {
+        drive_id: parsed.id,
+        web_url,
+        converted: parsed
+            .mime_type
+            .as_deref()
+            .map(|m| m == "application/vnd.google-apps.spreadsheet")
+            .unwrap_or(convert_to_sheets),
+    })
+}
+
+#[tauri::command]
+pub async fn upload_xlsx_to_drive(
+    file_path: String,
+    convert_to_sheets: bool,
+    folder_name: Option<String>,
+    state: State<'_, AuthState>,
+) -> Result<UploadResult, String> {
+    let token = get_token(&state)?;
+    let path = std::path::Path::new(&file_path);
+    if !path.is_file() {
+        return Err(format!("File not found: {}", file_path));
+    }
+    let file_name = path
+        .file_name()
+        .ok_or("Bad file path")?
+        .to_string_lossy()
+        .to_string();
+    let bytes = std::fs::read(path).map_err(|e| format!("Read file failed: {}", err_chain(&e)))?;
+
+    upload_bytes_to_drive(&token, &file_name, bytes, convert_to_sheets, folder_name).await
+}
+
+#[tauri::command]
+pub async fn upload_xlsx_bytes_to_drive(
+    file_name: String,
+    bytes: Vec<u8>,
+    convert_to_sheets: bool,
+    folder_name: Option<String>,
+    state: State<'_, AuthState>,
+) -> Result<UploadResult, String> {
+    let token = get_token(&state)?;
+    upload_bytes_to_drive(&token, &file_name, bytes, convert_to_sheets, folder_name).await
 }
