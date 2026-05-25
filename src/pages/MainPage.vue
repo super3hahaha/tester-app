@@ -260,8 +260,8 @@ function onSlidesSelect(files: SlidesSelection[]) {
 
 /* Level 2: Options */
 .options-bar {
-  width: 140px;
-  min-width: 140px;
+  width: 168px;
+  min-width: 168px;
   background: #2a2a3a;
   display: flex;
   flex-direction: column;
@@ -287,9 +287,14 @@ function onSlidesSelect(files: SlidesSelection[]) {
 }
 .opt-icon {
   font-size: 16px;
+  flex-shrink: 0;
 }
 .opt-label {
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
 }
 .opt-badge {
   background: #667eea;
@@ -303,6 +308,7 @@ function onSlidesSelect(files: SlidesSelection[]) {
   justify-content: center;
   margin-left: auto;
   padding: 0 4px;
+  flex-shrink: 0;
 }
 
 .page-content {

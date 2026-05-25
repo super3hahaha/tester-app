@@ -21,6 +21,17 @@ onMounted(async () => {
   } finally {
     checking.value = false;
   }
+
+  // Silent background skill sync on startup. Fire-and-forget — never blocks UI,
+  // failures are logged to console only (manual trigger in Settings is the
+  // user-visible path for surfacing problems).
+  invoke("sync_all_skills")
+    .then((results) => {
+      console.log("[skill-sync]", results);
+    })
+    .catch((e) => {
+      console.warn("[skill-sync] failed:", e);
+    });
 });
 </script>
 

@@ -150,9 +150,7 @@ pub async fn export_sheet_html(
     role: String, // "ai" or "human" — used only to make filename distinguishable
     state: State<'_, AuthState>,
 ) -> Result<String, String> {
-    let token = state
-        .get_access_token()
-        .ok_or_else(|| "Not logged in".to_string())?;
+    let token = crate::auth::get_valid_access_token(&state).await?;
 
     let url = format!(
         "https://www.googleapis.com/drive/v3/files/{}/export?mimeType=application/zip",

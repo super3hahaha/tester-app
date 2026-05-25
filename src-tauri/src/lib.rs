@@ -1,7 +1,10 @@
 mod auth;
 mod claude;
 mod compare;
+mod feedback;
+mod manifest;
 mod sheets;
+mod skill_sync;
 
 use auth::AuthState;
 use claude::ClaudeState;
@@ -37,6 +40,14 @@ pub fn run() {
             compare::export_sheet_html,
             compare::run_diff_skill,
             compare::open_in_chrome,
+            manifest::write_generate_manifest,
+            feedback::is_feedback_configured,
+            feedback::send_feedback,
+            feedback::retry_pending_feedback,
+            skill_sync::check_skill_updates,
+            skill_sync::sync_all_skills,
+            skill_sync::sync_skill,
+            skill_sync::get_skill_local_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

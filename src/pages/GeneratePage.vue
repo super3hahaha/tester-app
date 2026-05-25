@@ -111,6 +111,29 @@ const uploading = ref(false);
 const uploadResult = ref<UploadResult | null>(null);
 const uploadError = ref("");
 
+// Snapshot of the generation context — captured at handleGenerate time and used
+// when writing the manifest after Drive upload. Keeps the link between the
+// uploaded sheet (Drive ID) and its source files (CSV + PPTX + page selections).
+interface GenContext {
+  csvPath: string | null;
+  pptxPaths: string[];
+  slidePages: { name: string; pages: number[] }[];
+  model: string;
+}
+const lastGenContext = ref<GenContext | null>(null);
+
+async function resolveSkillVersion(): Promise<string> {
+  try {
+    const ver = await invoke<string | null>("get_skill_local_version", {
+      name: "test-case-generator",
+    });
+    if (ver) {
+      return `test-case-generator@${ver}`;
+    }
+  } catch {}
+  return "test-case-generator@unknown";
+}
+
 const idleSeconds = ref(0);
 const idleActive = ref(false);
 const IDLE_THRESHOLD = 3;
@@ -202,6 +225,25 @@ async function handleUploadToDrive() {
       convertToSheets: true,
       folderName: "tester-app",
     });
+    // Write manifest linking the uploaded Drive sheet back to its source files,
+    // so the feedback flow in ComparePage can pull source CSV/PPTX into the zip.
+    // Silent on failure — manifest is non-critical; compare-feedback degrades to "no sources".
+    if (uploadResult.value && lastGenContext.value) {
+      try {
+        const skillVersion = await resolveSkillVersion();
+        await invoke("write_generate_manifest", {
+          driveId: uploadResult.value.drive_id,
+          webUrl: uploadResult.value.web_url,
+          sourceCsvPath: lastGenContext.value.csvPath,
+          pptxPaths: lastGenContext.value.pptxPaths,
+          slidePages: lastGenContext.value.slidePages,
+          model: lastGenContext.value.model,
+          skillVersion,
+        });
+      } catch (e) {
+        console.warn("write_generate_manifest failed:", e);
+      }
+    }
   } catch (e: any) {
     uploadError.value = String(e);
   } finally {
@@ -210,7 +252,7 @@ async function handleUploadToDrive() {
 }
 
 const canGenerate = computed(
-  () => props.sheetSelection && props.slidesSelection.length > 0
+  () => props.slidesSelection.length > 0
 );
 
 const canSendInput = computed(
@@ -218,7 +260,7 @@ const canSendInput = computed(
 );
 
 async function handleGenerate() {
-  if (!props.sheetSelection || props.slidesSelection.length === 0) return;
+  if (props.slidesSelection.length === 0) return;
 
   generating.value = true;
   error.value = "";
@@ -231,17 +273,22 @@ async function handleGenerate() {
   startIdleWatch();
 
   try {
-    progress.value = "Exporting Sheet as CSV...";
-    pushLog(
-      `[1/3] Exporting "${props.sheetSelection.spreadsheetName}" > "${props.sheetSelection.tabName}" as CSV`,
-      "info"
-    );
+    let csvPath: string | null = null;
+    if (props.sheetSelection) {
+      progress.value = "Exporting Sheet as CSV...";
+      pushLog(
+        `[1/3] Exporting "${props.sheetSelection.spreadsheetName}" > "${props.sheetSelection.tabName}" as CSV`,
+        "info"
+      );
 
-    const csvPath = await invoke<string>("export_sheet_csv", {
-      spreadsheetId: props.sheetSelection.spreadsheetId,
-      range: props.sheetSelection.tabName,
-    });
-    pushLog(`  -> ${csvPath}`);
+      csvPath = await invoke<string>("export_sheet_csv", {
+        spreadsheetId: props.sheetSelection.spreadsheetId,
+        range: props.sheetSelection.tabName,
+      });
+      pushLog(`  -> ${csvPath}`);
+    } else {
+      pushLog("[1/3] No Sheet selected — generating from requirements only", "info");
+    }
 
     const pptxPaths: string[] = [];
     for (let i = 0; i < props.slidesSelection.length; i++) {
@@ -259,13 +306,20 @@ async function handleGenerate() {
 
     progress.value = "Generating test cases with Claude...";
     pushLog("[3/3] Launching Claude CLI with /test-case-generator skill", "info");
-    pushLog(`  CSV: ${csvPath}`);
+    if (csvPath) pushLog(`  CSV: ${csvPath}`);
     pushLog(`  PPTX: ${pptxPaths.join(", ")}`);
 
     const pageSelections = props.slidesSelection.map((s) => ({
       name: s.name,
       pages: s.pages,
     }));
+
+    lastGenContext.value = {
+      csvPath,
+      pptxPaths,
+      slidePages: pageSelections,
+      model: selectedModel.value,
+    };
 
     await invoke("run_claude_task", {
       csvPath,
@@ -348,7 +402,7 @@ async function handleStop() {
           </div>
         </div>
         <div v-else class="sel-empty">
-          No sheet selected — go to Google Sheets tab and select one
+          No sheet selected (optional) — pick one in the Google Sheets tab to update existing cases
         </div>
       </div>
 
@@ -397,7 +451,7 @@ async function handleStop() {
         {{ stopping ? "Stopping..." : "■ Stop" }}
       </button>
       <span v-if="!canGenerate && !generating" class="action-hint">
-        Select both a Sheet and at least one Slides to continue
+        Select at least one Slides to continue (Sheet is optional)
       </span>
     </div>
 

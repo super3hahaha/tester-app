@@ -50,6 +50,22 @@ const reportPath = ref<string | null>(null);
 const errorMsg = ref("");
 const logPanel = ref<HTMLElement | null>(null);
 
+// Paths of the two HTML files exported for the most recent compare run.
+// Kept around so the feedback action can bundle them without re-exporting.
+const lastAiHtmlPath = ref<string | null>(null);
+const lastHumanHtmlPath = ref<string | null>(null);
+
+// Feedback state.
+const feedbackConfigured = ref(false);
+const showFeedbackModal = ref(false);
+const feedbackIssueType = ref<"missing_case" | "wrong_expected" | "wrong_module" | "other">(
+  "missing_case"
+);
+const feedbackNote = ref("");
+const feedbackSending = ref(false);
+const feedbackResult = ref<string | null>(null);
+const feedbackError = ref("");
+
 let unlisten: UnlistenFn | null = null;
 const onDriveFilesUpdated = () => {
   loadFiles();
@@ -83,6 +99,11 @@ onMounted(async () => {
       }
     }
   );
+  try {
+    feedbackConfigured.value = await invoke<boolean>("is_feedback_configured");
+  } catch {
+    feedbackConfigured.value = false;
+  }
 });
 
 onUnmounted(() => {
@@ -150,6 +171,10 @@ async function handleCompare() {
   logs.value = [];
   reportPath.value = null;
   errorMsg.value = "";
+  lastAiHtmlPath.value = null;
+  lastHumanHtmlPath.value = null;
+  feedbackResult.value = null;
+  feedbackError.value = "";
 
   try {
     progress.value = "Exporting AI version as HTML...";
@@ -159,6 +184,7 @@ async function handleCompare() {
       tabName: ai.value.tab,
       role: "ai",
     });
+    lastAiHtmlPath.value = aiPath;
     pushLog(`  -> ${aiPath}`);
 
     progress.value = "Exporting Human version as HTML...";
@@ -168,6 +194,7 @@ async function handleCompare() {
       tabName: human.value.tab,
       role: "human",
     });
+    lastHumanHtmlPath.value = humanPath;
     pushLog(`  -> ${humanPath}`);
 
     progress.value = "Running diff skill via Claude CLI...";
@@ -191,6 +218,63 @@ async function handleOpenInChrome() {
     await invoke("open_in_chrome", { path: reportPath.value });
   } catch (e: any) {
     errorMsg.value = String(e);
+  }
+}
+
+function openFeedbackModal() {
+  feedbackIssueType.value = "missing_case";
+  feedbackNote.value = "";
+  feedbackError.value = "";
+  feedbackResult.value = null;
+  showFeedbackModal.value = true;
+}
+
+function closeFeedbackModal() {
+  if (feedbackSending.value) return;
+  showFeedbackModal.value = false;
+}
+
+async function handleSubmitFeedback() {
+  if (
+    feedbackSending.value ||
+    !reportPath.value ||
+    !lastAiHtmlPath.value ||
+    !lastHumanHtmlPath.value ||
+    !ai.value.file ||
+    !human.value.file
+  )
+    return;
+  feedbackSending.value = true;
+  feedbackError.value = "";
+  feedbackResult.value = null;
+  try {
+    const result = await invoke<{ ok: boolean; had_sources: boolean; message: string }>(
+      "send_feedback",
+      {
+        input: {
+          ai_drive_id: ai.value.file.id,
+          ai_html_path: lastAiHtmlPath.value,
+          human_html_path: lastHumanHtmlPath.value,
+          report_path: reportPath.value,
+          issue_type: feedbackIssueType.value,
+          note: feedbackNote.value,
+          ai_sheet_name: ai.value.file.name,
+          ai_tab_name: ai.value.tab,
+          human_sheet_name: human.value.file.name,
+          human_tab_name: human.value.tab,
+        },
+      }
+    );
+    feedbackResult.value = result.had_sources
+      ? "✅ 已发送（含源文件）"
+      : "✅ 已发送（无源文件 — 该 AI Sheet 没有关联的 manifest）";
+    setTimeout(() => {
+      showFeedbackModal.value = false;
+    }, 1200);
+  } catch (e: any) {
+    feedbackError.value = String(e);
+  } finally {
+    feedbackSending.value = false;
   }
 }
 
@@ -326,6 +410,69 @@ function formatDate(iso: string) {
       >
         🌐 在 Chrome 中打开
       </button>
+      <button
+        v-if="reportPath && feedbackConfigured"
+        class="feedback-btn"
+        @click="openFeedbackModal"
+        title="把这次的样本发给开发者用于优化 skill"
+      >
+        📝 反馈
+      </button>
+    </div>
+
+    <!-- Feedback modal -->
+    <div v-if="showFeedbackModal" class="modal-backdrop" @click.self="closeFeedbackModal">
+      <div class="modal">
+        <div class="modal-header">
+          <h4>反馈这次结果</h4>
+          <button class="modal-close" @click="closeFeedbackModal" :disabled="feedbackSending">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-hint">
+            会上传 AI 版本 / 人工版本 / diff 报告 + 关联的需求源文件（PPTX/CSV，如有）+ 你的备注给开发者。
+          </p>
+          <div class="form-group">
+            <label>问题类型</label>
+            <div class="radio-group">
+              <label class="radio-item">
+                <input type="radio" v-model="feedbackIssueType" value="missing_case" />
+                漏用例 / 应有未生成
+              </label>
+              <label class="radio-item">
+                <input type="radio" v-model="feedbackIssueType" value="wrong_expected" />
+                预期写得不准
+              </label>
+              <label class="radio-item">
+                <input type="radio" v-model="feedbackIssueType" value="wrong_module" />
+                模块分类错
+              </label>
+              <label class="radio-item">
+                <input type="radio" v-model="feedbackIssueType" value="other" />
+                其他
+              </label>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>补充说明（可选）</label>
+            <textarea
+              v-model="feedbackNote"
+              rows="3"
+              placeholder="例如：边界场景考虑不全，缺少异常路径用例…"
+              :disabled="feedbackSending"
+            ></textarea>
+          </div>
+          <div v-if="feedbackError" class="error modal-error">{{ feedbackError }}</div>
+          <div v-if="feedbackResult" class="modal-success">{{ feedbackResult }}</div>
+        </div>
+        <div class="modal-footer">
+          <button class="cancel-btn" @click="closeFeedbackModal" :disabled="feedbackSending">
+            取消
+          </button>
+          <button class="submit-btn" @click="handleSubmitFeedback" :disabled="feedbackSending">
+            {{ feedbackSending ? "发送中..." : "发送给开发者" }}
+          </button>
+        </div>
+      </div>
     </div>
 
     <div v-if="errorMsg" class="error global-error">{{ errorMsg }}</div>
@@ -584,6 +731,184 @@ function formatDate(iso: string) {
 .chrome-btn:hover {
   background: #4285f4;
   color: white;
+}
+.feedback-btn {
+  padding: 8px 14px;
+  font-size: 13px;
+  border: 1px solid #c96342;
+  border-radius: 6px;
+  background: white;
+  color: #c96342;
+  cursor: pointer;
+  font-weight: 500;
+}
+.feedback-btn:hover {
+  background: #c96342;
+  color: white;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal {
+  background: white;
+  border-radius: 10px;
+  width: 480px;
+  max-width: 92vw;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid #eee;
+}
+.modal-header h4 {
+  margin: 0;
+  font-size: 15px;
+}
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 22px;
+  color: #888;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 4px;
+}
+.modal-close:hover:not(:disabled) {
+  color: #333;
+}
+.modal-close:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.modal-body {
+  padding: 16px 18px;
+  overflow-y: auto;
+  font-size: 13px;
+  color: #2d3748;
+}
+.modal-hint {
+  margin: 0 0 14px 0;
+  font-size: 12px;
+  color: #718096;
+  line-height: 1.5;
+}
+.form-group {
+  margin-bottom: 14px;
+}
+.form-group > label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a5568;
+  margin-bottom: 6px;
+}
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.radio-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  font-weight: normal;
+}
+.radio-item input[type="radio"] {
+  margin: 0;
+}
+.form-group textarea {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+}
+.form-group textarea:focus {
+  border-color: #c96342;
+}
+.form-group textarea:disabled {
+  background: #f5f5f5;
+  opacity: 0.6;
+}
+.modal-error {
+  background: #fff5f5;
+  border: 1px solid #fed7d7;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #c53030;
+  margin-top: 6px;
+  word-break: break-all;
+}
+.modal-success {
+  font-size: 13px;
+  color: #2d9248;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin-top: 6px;
+}
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid #eee;
+  background: #fafafa;
+}
+.cancel-btn {
+  padding: 7px 14px;
+  font-size: 13px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #4a5568;
+  cursor: pointer;
+}
+.cancel-btn:hover:not(:disabled) {
+  background: #f5f5f5;
+}
+.cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.submit-btn {
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  border-radius: 6px;
+  background: #c96342;
+  color: white;
+  cursor: pointer;
+}
+.submit-btn:hover:not(:disabled) {
+  background: #b85838;
+}
+.submit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .error {

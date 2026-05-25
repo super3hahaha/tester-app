@@ -52,8 +52,8 @@ struct SpreadsheetMeta {
     sheets: Option<Vec<SheetInfo>>,
 }
 
-fn get_token(state: &State<'_, AuthState>) -> Result<String, String> {
-    state.get_access_token().ok_or_else(|| "Not logged in".into())
+async fn get_token(state: &State<'_, AuthState>) -> Result<String, String> {
+    crate::auth::get_valid_access_token(state).await
 }
 
 fn err_chain<E: std::error::Error + ?Sized>(e: &E) -> String {
@@ -72,7 +72,7 @@ pub async fn list_drive_files(
     mime_type: String,
     state: State<'_, AuthState>,
 ) -> Result<Vec<DriveFile>, String> {
-    let token = get_token(&state)?;
+    let token = get_token(&state).await?;
 
     let query = format!("mimeType='{}'", mime_type);
     let url = format!(
@@ -118,7 +118,7 @@ pub async fn get_sheet_tabs(
     spreadsheet_id: String,
     state: State<'_, AuthState>,
 ) -> Result<Vec<String>, String> {
-    let token = get_token(&state)?;
+    let token = get_token(&state).await?;
 
     let url = format!(
         "https://sheets.googleapis.com/v4/spreadsheets/{}?fields=sheets.properties.title",
@@ -157,7 +157,7 @@ pub async fn read_sheet(
     range: String,
     state: State<'_, AuthState>,
 ) -> Result<SheetData, String> {
-    let token = get_token(&state)?;
+    let token = get_token(&state).await?;
 
     let url = format!(
         "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}",
@@ -214,7 +214,7 @@ pub async fn export_sheet_csv(
     range: String,
     state: State<'_, AuthState>,
 ) -> Result<String, String> {
-    let token = get_token(&state)?;
+    let token = get_token(&state).await?;
 
     let url = format!(
         "https://sheets.googleapis.com/v4/spreadsheets/{}/values/{}",
@@ -276,7 +276,7 @@ pub async fn export_slides_pptx(
     name: String,
     state: State<'_, AuthState>,
 ) -> Result<String, String> {
-    let token = get_token(&state)?;
+    let token = get_token(&state).await?;
 
     // Drive API: export Google Slides as PPTX
     let url = format!(
@@ -326,11 +326,11 @@ pub async fn get_presentation_slides(
     app: AppHandle,
     state: State<'_, AuthState>,
 ) -> Result<Vec<SlidePageInfo>, String> {
-    let token = get_token(&state)?;
+    let token = get_token(&state).await?;
     let client = reqwest::Client::new();
 
     let url = format!(
-        "https://slides.googleapis.com/v1/presentations/{}?fields=slides.objectId",
+        "https://slides.googleapis.com/v1/presentations/{}?fields=slides.objectId,revisionId",
         presentation_id
     );
 
@@ -352,6 +352,12 @@ pub async fn get_presentation_slides(
         .await
         .map_err(|e| format!("Slides parse failed: {}", err_chain(&e)))?;
 
+    let remote_revision = pres
+        .get("revisionId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
     let slides = pres
         .get("slides")
         .and_then(|s| s.as_array())
@@ -360,7 +366,21 @@ pub async fn get_presentation_slides(
     let cache_dir = data_dir()
         .join("thumbs")
         .join(&presentation_id);
+    let revision_file = cache_dir.join(".revision");
+
+    // 比对 revisionId：变了就把这个 presentation 的整个缓存目录清掉，
+    // 让后面所有 slide 走重新下载逻辑
+    let local_revision = std::fs::read_to_string(&revision_file).unwrap_or_default();
+    let revision_changed = !remote_revision.is_empty() && local_revision != remote_revision;
+    if revision_changed && cache_dir.exists() {
+        std::fs::remove_dir_all(&cache_dir).ok();
+    }
     std::fs::create_dir_all(&cache_dir).ok();
+    // 提前写新 revision：若下载过程中崩了，下次启动时已落地的 png 仍属于这个 revision，
+    // 只补缺失的几张即可，不必再全清重拉
+    if revision_changed && !remote_revision.is_empty() {
+        std::fs::write(&revision_file, &remote_revision).ok();
+    }
 
     let mut page_ids: Vec<(usize, String)> = Vec::new();
     let mut pages: Vec<SlidePageInfo> = Vec::new();
@@ -371,7 +391,9 @@ pub async fn get_presentation_slides(
             .ok_or("Missing objectId")?
             .to_string();
 
-        let cached_file = cache_dir.join(format!("{}.png", i + 1));
+        // 缓存 key 用 objectId 而不是页码：slide 重排/插入/删除后位置变了，
+        // 但 objectId 不变，原图仍可命中
+        let cached_file = cache_dir.join(format!("{}.png", page_id));
         let thumb = if cached_file.exists() {
             match std::fs::read(&cached_file) {
                 Ok(bytes) => {
@@ -433,7 +455,7 @@ pub async fn get_presentation_slides(
                         }
                         let bytes = img_resp.bytes().await.ok()?;
 
-                        let cached_file = cache_clone.join(format!("{}.png", page_num));
+                        let cached_file = cache_clone.join(format!("{}.png", page_id));
                         std::fs::write(&cached_file, &bytes).ok();
 
                         let b64 = base64::Engine::encode(
@@ -680,7 +702,7 @@ pub async fn upload_xlsx_to_drive(
     folder_name: Option<String>,
     state: State<'_, AuthState>,
 ) -> Result<UploadResult, String> {
-    let token = get_token(&state)?;
+    let token = get_token(&state).await?;
     let path = std::path::Path::new(&file_path);
     if !path.is_file() {
         return Err(format!("File not found: {}", file_path));
@@ -703,6 +725,6 @@ pub async fn upload_xlsx_bytes_to_drive(
     folder_name: Option<String>,
     state: State<'_, AuthState>,
 ) -> Result<UploadResult, String> {
-    let token = get_token(&state)?;
+    let token = get_token(&state).await?;
     upload_bytes_to_drive(&token, &file_name, bytes, convert_to_sheets, folder_name).await
 }

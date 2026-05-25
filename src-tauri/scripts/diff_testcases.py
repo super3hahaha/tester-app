@@ -273,10 +273,8 @@ def _diff(a, b):
 # ── 行匹配 ────────────────────────────────────────────────
 
 
-# 模糊匹配阈值：匹配分数超过该值才视为同一条用例。
-#
-# 这里的分数不是简单文本相似度，而是综合“用例名变体、描述、预期、整行包含度”
-# 后的身份分数。阈值略高于 0.5，避免只因为通用词（视频/开关/效果）重复就错配。
+# 模糊匹配阈值：身份分数（用例名 + 整行正文加权）超过该值才视为同一条用例。
+# 略高于 0.5，避免只因通用词（视频/开关/效果）重复就错配。
 FUZZY_MATCH_THRESHOLD = 0.62
 
 
@@ -318,21 +316,6 @@ def _name_variants(name):
         variants.add(parts[-1])
         variants.add("".join(parts[1:]))
 
-    # 去掉常见非身份前缀，让“特殊处理-真HDR...”能和“真HDR...”匹配。
-    for prefix in (
-        "特殊处理",
-        "applytoallvideos",
-        "settings页",
-        "仅当前视频生效",
-        "试用",
-        "试用期间",
-        "试用结束",
-        "付费效果卡片",
-        "入口位置",
-    ):
-        if raw.startswith(prefix):
-            variants.add(raw[len(prefix) :].lstrip("-:"))
-
     return sorted(v for v in variants if v)
 
 
@@ -365,113 +348,21 @@ def _best_similarity(a_values, b_values):
 def _row_similarity(a_row, b_row):
     """计算两行是否为同一条用例的身份分数。
 
-    人工改动经常会改模块、改标题前缀、把短步骤扩写成完整场景，因此这里不再
-    只看普通 ratio，而是把“标题变体相似度”和“描述/预期包含度”一起纳入。
+    只看两个信号：用例名变体相似度 和 整行正文相似度。
+    标题强一致时，body 仅作辅助加成 —— 描述被扩写也仍判为同一条。
     """
     name = _best_similarity(a_row["name_variants"], b_row["name_variants"])
-    module = _similarity(a_row["module"], b_row["module"])
-    desc = _similarity(a_row["cells"][2]["full_text"], b_row["cells"][2]["full_text"])
-    expt = _similarity(a_row["cells"][3]["full_text"], b_row["cells"][3]["full_text"])
-    note = _similarity(a_row["cells"][4]["full_text"], b_row["cells"][4]["full_text"])
     body = _similarity(a_row["body_text"], b_row["body_text"])
 
-    title_driven = name * 0.52 + desc * 0.20 + expt * 0.18 + body * 0.07 + module * 0.03
-    content_driven = name * 0.34 + body * 0.48 + desc * 0.08 + expt * 0.08 + note * 0.02
-    score = max(title_driven, content_driven)
-
-    # 标题几乎一致时，即使描述被扩写，也应优先认为是同一条用例。
-    if name >= 0.92:
-        score = max(score, 0.70 + body * 0.20)
-
-    # 标题很弱且整行内容也弱时，常常只是共享“视频/效果/开关”等通用词。
-    if name < 0.35 and body < 0.45:
-        score *= 0.75
-
-    return score
-
-
-def _max_weight_pairs(ai_rows, hu_rows, threshold):
-    """全局最大权二分匹配。
-
-    每条可疑配对的收益是 score - threshold；收益为正才参与图匹配。
-    用最短路增广找最大收益集合，避免贪心把高质量候选的 partner 抢走。
-    """
-    n_ai, n_hu = len(ai_rows), len(hu_rows)
-    if not n_ai or not n_hu:
-        return []
-
-    source = 0
-    ai_base = 1
-    hu_base = ai_base + n_ai
-    sink = hu_base + n_hu
-    size = sink + 1
-    graph = [[] for _ in range(size)]
-
-    def add_edge(u, v, cap, cost):
-        graph[u].append([v, cap, cost, len(graph[v])])
-        graph[v].append([u, 0, -cost, len(graph[u]) - 1])
-
-    for i in range(n_ai):
-        add_edge(source, ai_base + i, 1, 0)
-    for j in range(n_hu):
-        add_edge(hu_base + j, sink, 1, 0)
-
-    for i, ai in enumerate(ai_rows):
-        for j, hu in enumerate(hu_rows):
-            score = _row_similarity(ai, hu)
-            surplus = score - threshold
-            if surplus > 0:
-                # cost 越小越好；乘 10000 保留足够排序精度。
-                add_edge(ai_base + i, hu_base + j, 1, -int(surplus * 10000))
-
-    pairs = []
-    while True:
-        dist = [10**12] * size
-        prev_v = [-1] * size
-        prev_e = [-1] * size
-        inq = [False] * size
-        queue = [source]
-        inq[source] = True
-        dist[source] = 0
-
-        while queue:
-            u = queue.pop(0)
-            inq[u] = False
-            for ei, e in enumerate(graph[u]):
-                v, cap, cost, _ = e
-                if cap <= 0 or dist[v] <= dist[u] + cost:
-                    continue
-                dist[v] = dist[u] + cost
-                prev_v[v] = u
-                prev_e[v] = ei
-                if not inq[v]:
-                    queue.append(v)
-                    inq[v] = True
-
-        if prev_v[sink] == -1 or dist[sink] >= 0:
-            break
-
-        v = sink
-        path_ai = path_hu = None
-        while v != source:
-            u = prev_v[v]
-            ei = prev_e[v]
-            e = graph[u][ei]
-            e[1] -= 1
-            graph[v][e[3]][1] += 1
-            if ai_base <= u < ai_base + n_ai and hu_base <= v < hu_base + n_hu:
-                path_ai = u - ai_base
-                path_hu = v - hu_base
-            v = u
-        if path_ai is not None and path_hu is not None:
-            pairs.append((path_ai, path_hu))
-
-    return pairs
+    if name >= 0.9:
+        return 0.7 + 0.3 * body
+    return 0.5 * name + 0.5 * body
 
 
 def _match_rows(ai_rows, hu_rows):
-    """全局匹配 AI 行与人工行。
+    """匹配 AI 行与人工行。
 
+    所有过阈值的候选对按分数降序贪心吃掉；冲突极少，足够好。
     返回 pairs: list of (ai_idx | None, hu_idx | None)，按 AI 行顺序，
     末尾追加未匹配上的人工新增行。
     """
@@ -479,9 +370,18 @@ def _match_rows(ai_rows, hu_rows):
     ai_to_hu = [None] * n_ai
     hu_used = [False] * n_hu
 
-    for i, j in _max_weight_pairs(ai_rows, hu_rows, FUZZY_MATCH_THRESHOLD):
-        ai_to_hu[i] = j
-        hu_used[j] = True
+    candidates = []
+    for i, ai in enumerate(ai_rows):
+        for j, hu in enumerate(hu_rows):
+            s = _row_similarity(ai, hu)
+            if s >= FUZZY_MATCH_THRESHOLD:
+                candidates.append((s, i, j))
+    candidates.sort(reverse=True)
+
+    for _s, i, j in candidates:
+        if ai_to_hu[i] is None and not hu_used[j]:
+            ai_to_hu[i] = j
+            hu_used[j] = True
 
     pairs = [(i, ai_to_hu[i]) for i in range(n_ai)]
     for j in range(n_hu):

@@ -19,6 +19,31 @@ interface ClaudeAccountInfo {
 const claudeInfo = ref<ClaudeAccountInfo | null>(null);
 const claudeLoading = ref(false);
 
+interface SkillStatus {
+  name: string;
+  owner: string;
+  repo: string;
+  local_version: string | null;
+  remote_version: string | null;
+  up_to_date: boolean;
+  updated: boolean;
+  backup_path: string | null;
+  error: string | null;
+}
+
+const skillStatuses = ref<SkillStatus[]>([]);
+const skillChecking = ref(false);
+const skillSyncing = ref(false);
+const skillMessage = ref("");
+
+function repoUrl(s: SkillStatus): string {
+  return `https://github.com/${s.owner}/${s.repo}`;
+}
+
+function releasesUrl(s: SkillStatus): string {
+  return `https://github.com/${s.owner}/${s.repo}/releases`;
+}
+
 const claudeStatus = computed<"ok" | "no-login" | "no-install" | "unknown">(() => {
   const info = claudeInfo.value;
   if (!info) return "unknown";
@@ -30,7 +55,44 @@ const claudeStatus = computed<"ok" | "no-login" | "no-install" | "unknown">(() =
 onMounted(() => {
   refreshCacheSize();
   refreshClaude();
+  refreshSkillStatuses();
 });
+
+async function refreshSkillStatuses() {
+  skillChecking.value = true;
+  skillMessage.value = "";
+  try {
+    skillStatuses.value = await invoke<SkillStatus[]>("check_skill_updates");
+  } catch (e: any) {
+    skillMessage.value = "检查失败：" + String(e);
+  } finally {
+    skillChecking.value = false;
+  }
+}
+
+async function handleSyncSkills() {
+  skillSyncing.value = true;
+  skillMessage.value = "";
+  try {
+    const results = await invoke<SkillStatus[]>("sync_all_skills");
+    skillStatuses.value = results;
+    const updated = results.filter((s) => s.updated);
+    const failed = results.filter((s) => s.error);
+    if (failed.length > 0) {
+      skillMessage.value = `部分失败：${failed.map((s) => s.name).join(", ")}`;
+    } else if (updated.length > 0) {
+      skillMessage.value = `已更新：${updated
+        .map((s) => `${s.name} → ${s.local_version ?? "—"}`)
+        .join(", ")}`;
+    } else {
+      skillMessage.value = "所有 skill 都是最新的";
+    }
+  } catch (e: any) {
+    skillMessage.value = "更新失败：" + String(e);
+  } finally {
+    skillSyncing.value = false;
+  }
+}
 
 async function refreshCacheSize() {
   loading.value = true;
@@ -164,6 +226,78 @@ function formatBytes(bytes: number): string {
         >
           Claude Code 文档 ↗
         </a>
+      </div>
+    </div>
+
+    <!-- Skill 更新 -->
+    <div class="section">
+      <div class="section-title">Skill 更新</div>
+      <div class="section-desc">
+        App 启动时会自动从 GitHub 拉取 skill 最新版本到 <code>~/.claude/skills/</code>。也可以在这里手动检查。
+      </div>
+
+      <div v-if="skillChecking && skillStatuses.length === 0" class="skill-loading">
+        正在检查 skill 状态...
+      </div>
+
+      <div v-for="s in skillStatuses" :key="s.name" class="skill-row">
+        <div class="skill-row-main">
+          <span class="skill-icon" :class="{
+            ok: s.up_to_date && !s.error,
+            warn: !s.up_to_date && !s.error,
+            err: !!s.error,
+          }">
+            {{ s.error ? "✗" : s.up_to_date ? "✓" : "⟳" }}
+          </span>
+          <div class="skill-info">
+            <div class="skill-name-row">
+              <span class="skill-name">{{ s.name }}</span>
+              <span class="skill-version">{{ s.local_version ?? "未安装" }}</span>
+              <span v-if="s.updated" class="updated-badge">刚刚更新</span>
+              <span
+                v-else-if="!s.up_to_date && s.remote_version && s.local_version && !s.error"
+                class="outdated-badge"
+                :title="`本地 ${s.local_version} → 远程 ${s.remote_version}`"
+              >
+                可更新到 {{ s.remote_version }}
+              </span>
+            </div>
+            <div class="skill-meta">
+              <a href="#" @click.prevent="openUrl(repoUrl(s))">
+                {{ s.owner }}/{{ s.repo }}
+              </a>
+              ·
+              <a href="#" @click.prevent="openUrl(releasesUrl(s))">Releases</a>
+              <template v-if="s.remote_version && s.remote_version !== s.local_version">
+                <span class="skill-remote-hint">
+                  最新发布: <code>{{ s.remote_version }}</code>
+                </span>
+              </template>
+            </div>
+            <div v-if="s.error" class="skill-error">{{ s.error }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="skill-actions">
+        <button
+          class="refresh-btn"
+          @click="refreshSkillStatuses"
+          :disabled="skillChecking || skillSyncing"
+        >
+          {{ skillChecking ? "检查中..." : "重新检查" }}
+        </button>
+        <button
+          class="sync-btn"
+          @click="handleSyncSkills"
+          :disabled="skillChecking || skillSyncing"
+        >
+          {{ skillSyncing ? "更新中..." : "立即更新" }}
+        </button>
+      </div>
+
+      <div v-if="skillMessage" class="message" :class="{ error: skillMessage.includes('失败') }">
+        {{ skillMessage }}
       </div>
     </div>
 
@@ -405,5 +539,144 @@ h3 {
 .message.error {
   color: #e53e3e;
   background: #fff5f5;
+}
+
+/* Skill update section */
+.skill-loading {
+  font-size: 12px;
+  color: #888;
+  padding: 8px 0;
+}
+.skill-row {
+  padding: 8px 0;
+  border-bottom: 1px solid #f3f3f3;
+}
+.skill-row:last-of-type {
+  border-bottom: none;
+}
+.skill-row-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.skill-icon {
+  width: 20px;
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.skill-icon.ok {
+  background: #c6f6d5;
+  color: #22543d;
+}
+.skill-icon.warn {
+  background: #feebc8;
+  color: #7b341e;
+}
+.skill-icon.err {
+  background: #fed7d7;
+  color: #c53030;
+}
+.skill-info {
+  flex: 1;
+  min-width: 0;
+}
+.skill-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.skill-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #2d3748;
+}
+.skill-version {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  background: #ebf4ff;
+  color: #4c51bf;
+  border-radius: 4px;
+}
+.skill-meta {
+  font-size: 11px;
+  color: #888;
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.skill-meta a {
+  color: #667eea;
+  text-decoration: none;
+}
+.skill-meta a:hover {
+  text-decoration: underline;
+}
+.skill-remote-hint {
+  margin-left: 4px;
+}
+.skill-remote-hint code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  background: #f5f5f5;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+  color: #555;
+}
+.updated-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  background: #48bb78;
+  color: white;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+}
+.outdated-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  background: #ed8936;
+  color: white;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+}
+.skill-error {
+  font-size: 11px;
+  color: #c53030;
+  margin-top: 4px;
+  word-break: break-all;
+}
+.skill-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.sync-btn {
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #667eea;
+  border-radius: 6px;
+  background: #667eea;
+  color: white;
+  cursor: pointer;
+}
+.sync-btn:hover:not(:disabled) {
+  background: #5a67d8;
+  border-color: #5a67d8;
+}
+.sync-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

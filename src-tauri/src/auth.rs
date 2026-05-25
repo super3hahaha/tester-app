@@ -52,9 +52,38 @@ impl AuthState {
             user: Mutex::new(load_user_from_disk()),
         }
     }
+}
 
-    pub fn get_access_token(&self) -> Option<String> {
-        self.tokens.lock().unwrap().as_ref().map(|t| t.access_token.clone())
+/// Returns a non-expired access_token, refreshing if necessary.
+/// On refresh failure due to `invalid_grant` (refresh_token revoked / expired),
+/// clears persisted auth and returns an error starting with "NEED_RELOGIN:"
+/// so the frontend can route the user back to the login page.
+pub async fn get_valid_access_token(state: &State<'_, AuthState>) -> Result<String, String> {
+    // Snapshot current tokens; do NOT hold the std::sync::Mutex across .await.
+    let current = state.tokens.lock().unwrap().clone();
+    let Some(tokens) = current else {
+        return Err("NEED_RELOGIN: not logged in".into());
+    };
+
+    if tokens.expires_at > now_ts() + 60 {
+        return Ok(tokens.access_token);
+    }
+
+    match refresh_access_token(&tokens).await {
+        Ok(new_tokens) => {
+            save_tokens_to_disk(&new_tokens);
+            let access = new_tokens.access_token.clone();
+            *state.tokens.lock().unwrap() = Some(new_tokens);
+            Ok(access)
+        }
+        Err(e) if e.starts_with("invalid_grant") => {
+            *state.tokens.lock().unwrap() = None;
+            *state.user.lock().unwrap() = None;
+            std::fs::remove_file(data_dir().join("auth-tokens.json")).ok();
+            std::fs::remove_file(data_dir().join("auth-user.json")).ok();
+            Err(format!("NEED_RELOGIN: {}", e))
+        }
+        Err(e) => Err(format!("Token refresh failed: {}", e)),
     }
 }
 
@@ -211,9 +240,14 @@ pub async fn start_login(state: State<'_, AuthState>) -> Result<UserInfo, String
         .await
         .map_err(|e| format!("Token parse failed: {}", e))?;
 
+    let refresh_token = token_resp.refresh_token.ok_or_else(|| {
+        "Google did not return a refresh_token. Fully revoke access at \
+         https://myaccount.google.com/permissions and log in again."
+            .to_string()
+    })?;
     let tokens = AuthTokens {
         access_token: token_resp.access_token.clone(),
-        refresh_token: token_resp.refresh_token.unwrap_or_default(),
+        refresh_token,
         expires_at: now_ts() + token_resp.expires_in,
     };
 
@@ -305,10 +339,13 @@ async fn send_html(stream: &mut tokio::net::TcpStream, html: &str) {
 }
 
 async fn refresh_access_token(tokens: &AuthTokens) -> Result<AuthTokens, String> {
+    if tokens.refresh_token.is_empty() {
+        return Err("invalid_grant: no refresh_token stored locally".into());
+    }
     let config = load_oauth_config()?;
     let client = reqwest::Client::new();
 
-    let resp: TokenResponse = client
+    let resp = client
         .post("https://oauth2.googleapis.com/token")
         .form(&[
             ("refresh_token", tokens.refresh_token.as_str()),
@@ -318,14 +355,29 @@ async fn refresh_access_token(tokens: &AuthTokens) -> Result<AuthTokens, String>
         ])
         .send()
         .await
-        .map_err(|e| format!("Refresh failed: {}", e))?
-        .json()
+        .map_err(|e| format!("Refresh request failed: {}", e))?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
         .await
-        .map_err(|e| format!("Refresh parse failed: {}", e))?;
+        .map_err(|e| format!("Refresh body read failed: {}", e))?;
+
+    if !status.is_success() {
+        // Google returns 400 with { "error": "invalid_grant", ... } when the
+        // refresh_token is revoked / expired / from another client.
+        if body.contains("invalid_grant") {
+            return Err(format!("invalid_grant: {}", body));
+        }
+        return Err(format!("Refresh {}: {}", status, body));
+    }
+
+    let parsed: TokenResponse = serde_json::from_str(&body)
+        .map_err(|e| format!("Refresh parse failed: {}: body={}", e, body))?;
 
     Ok(AuthTokens {
-        access_token: resp.access_token,
+        access_token: parsed.access_token,
         refresh_token: tokens.refresh_token.clone(),
-        expires_at: now_ts() + resp.expires_in,
+        expires_at: now_ts() + parsed.expires_in,
     })
 }

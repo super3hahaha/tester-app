@@ -462,7 +462,7 @@ pub struct PageSelection {
 
 #[tauri::command]
 pub async fn run_claude_task(
-    csv_path: String,
+    csv_path: Option<String>,
     pptx_paths: Vec<String>,
     page_selections: Vec<PageSelection>,
     model: Option<String>,
@@ -484,9 +484,13 @@ pub async fn run_claude_task(
         args.push(m.clone());
     }
 
+    let csv_path = csv_path.filter(|s| !s.is_empty());
+
     let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    if let Some(parent) = std::path::Path::new(&csv_path).parent() {
-        dirs.insert(parent.to_string_lossy().to_string());
+    if let Some(csv) = csv_path.as_ref() {
+        if let Some(parent) = std::path::Path::new(csv).parent() {
+            dirs.insert(parent.to_string_lossy().to_string());
+        }
     }
     for p in &pptx_paths {
         if let Some(parent) = std::path::Path::new(p).parent() {
@@ -499,7 +503,11 @@ pub async fn run_claude_task(
     }
 
     let mut prompt = String::from("/test-case-generator\n\n");
-    prompt.push_str(&format!("CSV (existing test cases): {}\n", csv_path));
+    if let Some(csv) = csv_path.as_ref() {
+        prompt.push_str(&format!("CSV (existing test cases): {}\n", csv));
+    } else {
+        prompt.push_str("No existing CSV — treat as brand-new requirements.\n");
+    }
     for p in &pptx_paths {
         prompt.push_str(&format!("PPTX (new requirements): {}\n", p));
     }

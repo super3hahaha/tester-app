@@ -38,7 +38,10 @@ tester-app/
 │   │   ├── auth.rs              # Google OAuth 2.0 + PKCE 认证、令牌刷新与持久化
 │   │   ├── sheets.rs            # Google Drive / Sheets / Slides API 封装与导出
 │   │   ├── claude.rs            # Claude CLI 子进程管理、流式 JSON 解析与会话续接
-│   │   └── compare.rs           # 对比流程：导出 Sheet 为 HTML、直接跑 Python diff 脚本、在 Chrome 打开报告
+│   │   ├── compare.rs           # 对比流程：导出 Sheet 为 HTML、直接跑 Python diff 脚本、在 Chrome 打开报告
+│   │   ├── manifest.rs          # 生成-上传 manifest 落盘：记录 Drive ID ↔ 源文件（CSV/PPTX/页码）的映射
+│   │   ├── feedback.rs          # 反馈打包：zip + Telegram sendDocument 上传 + 本地归档 / pending 重试
+│   │   └── skill_sync.rs        # Skill 热更新：从 GitHub 拉取 zipball 同步到 ~/.claude/skills/，启动时静默 + Settings 手动
 │   ├── scripts/                 # 内嵌资源（编译期 include_str!）
 │   │   └── diff_testcases.py    # 来自 testcase-eval-visual-report skill 的纯 Python diff 脚本
 │   ├── capabilities/            # Tauri 权限能力
@@ -65,17 +68,24 @@ tester-app/
 ~/.tester-app/
 ├── auth-tokens.json             # OAuth access_token / refresh_token / 过期时间
 ├── auth-user.json               # 用户信息（email、name、picture）
+├── telegram.json                # （可选）反馈上传配置：{ bot_token, chat_id }；compile-time env var 未设时的运行时兜底
 ├── exports/                     # 导出文件
 │   ├── sheet_*.csv              # Google Sheets CSV 导出
 │   ├── *.pptx                   # Google Slides PPTX 导出
 │   ├── compare_{ai|human}_*.html # 对比页用：单 Tab 的 Sheet HTML 导出（waffle 格式）
 │   └── diff_report_*.html       # 对比页用：diff_testcases.py 生成的报告
+├── manifests/                   # 生成-上传 manifest：每个上传到 Drive 的结果对应一份
+│   └── {drive_id}.json          # 字段：drive_id, web_url, source_csv_path, pptx_paths, slide_pages, model, skill_version
+├── feedback_pending/            # 反馈 zip 落盘暂存；上传成功移走，上传失败留存等待重试
+├── feedback_sent/               # 上传成功的反馈 zip 归档（本地备份，方便回看自己提过什么）
+├── skill_backups/               # skill 热更新前的旧版备份；目录名 {skill_name}_{old_version}_{ts}
 ├── scripts/                     # 内嵌脚本运行时落地位置
 │   └── diff_testcases.py        # 每次启动对比时由 Rust 覆盖写入
-└── thumbs/                      # 幻灯片缩略图缓存
+└── thumbs/                      # 幻灯片缩略图缓存（按 objectId 索引，配合 revisionId 失效）
     └── {presentation_id}/
-        ├── 1.png
-        ├── 2.png
+        ├── .revision            # 上次缓存对应的 presentation revisionId；不一致即整目录失效
+        ├── {objectId_a}.png     # key 是 slide 的稳定 objectId，对页面重排/插入/删除天然鲁棒
+        ├── {objectId_b}.png
         └── ...
 ```
 
@@ -101,6 +111,9 @@ tester-app/
 | Google API | `sheets.rs` | Drive 文件列表、Sheets 读取与 CSV 导出、xlsx 上传（路径或字节、自动转 Google 表格、归入 `tester-app` 文件夹）、Slides 幻灯片获取与 PPTX 导出、缩略图异步缓存 |
 | Claude 集成 | `claude.rs` | 定位 Claude CLI 路径、子进程管理、stream-json 输出解析、会话 ID 续接、实时事件推送 |
 | 对比流程 | `compare.rs` | 单 Tab Sheet 导出 HTML（`docs.google.com/.../export?format=html&gid=`）、内嵌脚本写盘后直接执行 `python diff_testcases.py`、在 Chrome 打开报告（`compare-log` 事件流，独立于 `claude-log`） |
+| 生成-上传 manifest | `manifest.rs` | `write_generate_manifest` command：把"生成的 xlsx 上传到 Drive 后的 drive_id"和"用来生成它的源文件（CSV + PPTX + 页码）"绑定写盘；compare 页反馈时按 ai_drive_id 反查 |
+| 反馈上传 | `feedback.rs` | `send_feedback` command：反查 manifest → 打包 zip（ai.html + human.html + report.html + 源文件 + meta.json）→ Telegram sendDocument multipart 上传 → 成功移到 `feedback_sent/`，失败留 `feedback_pending/`；`retry_pending_feedback` 重试；`is_feedback_configured` 探测是否配置好 token |
+| Skill 热更新 | `skill_sync.rs` | 内置 skill 列表（owner/repo）；用 GitHub Releases API（`/releases/latest`）拿 tag_name 做版本判断；`check_skill_updates` 比对本地 `.tester-app-version` 与远程 tag；`sync_all_skills` / `sync_skill` 下载 release zipball → 备份旧版 → 解压覆盖到 `~/.claude/skills/{name}/` → 写新版本；`get_skill_local_version` 给前端取版本号写进反馈 manifest |
 
 # 依赖库
 
@@ -166,6 +179,48 @@ compare（ComparePage）
        │         → stdout/stderr → compare-log 事件
        │         → 校验报告文件存在 → 返回 report_path
        └─ open_in_chrome(report_path) → 启动 Chrome 打开报告
+
+生成 manifest 链路
+  GeneratePage:
+    handleGenerate() 时把 csvPath / pptxPaths / slidePages / model 存入 lastGenContext
+    handleUploadToDrive() 上传 xlsx 拿到 drive_id + web_url 后，调
+      write_generate_manifest({ drive_id, web_url, source_csv_path, pptx_paths, slide_pages, model, skill_version })
+        → ~/.tester-app/manifests/{drive_id}.json
+
+反馈链路（ComparePage 报告生成后）
+  用户点"反馈"→ 弹窗选问题类型 + 备注 → send_feedback({...})
+    1. resolve_telegram_config()
+         compile-time env (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID) → 否则 ~/.tester-app/telegram.json
+    2. read_manifest(ai_drive_id)  → 可能为 None（旧数据或粘贴 URL 选的 sheet）
+    3. load_user()                 → 从 auth-user.json 拿 email + name 塞 meta.json
+    4. build_feedback_zip()        → zip 含 ai.html / human.html / report.html / sources/* / meta.json
+    5. upload_to_telegram()        → POST sendDocument multipart，校验 {"ok":true}
+    6. 成功 → move_to_sent()       → 失败 → 留在 feedback_pending/，错误回传前端
+
+按钮可见性
+  ComparePage onMounted → is_feedback_configured()，false 时按钮隐藏
+
+Skill 热更新链路
+  App.vue onMounted（启动时，静默）
+    → invoke("sync_all_skills")
+       对 SKILLS 列表里的每个条目：
+       1. GET https://api.github.com/repos/{owner}/{repo}/releases/latest → 拿 tag_name + zipball_url
+       2. 对比 ~/.claude/skills/{name}/.tester-app-version
+       3. 一致 → 跳过；不一致 →
+            ├─ GET <zipball_url>
+            ├─ 把 ~/.claude/skills/{name}/ 重命名到 ~/.tester-app/skill_backups/{name}_{old_version}_{ts}/
+            ├─ 解压 zipball 到 ~/.claude/skills/{name}/（剥掉 zipball 自带的顶层目录）
+            ├─ 写新版本到 .tester-app-version（例如 "v1.8.0"）
+            └─ 失败 → 回滚备份
+       结果存 console，不阻塞 UI
+
+  Releases-based 而非 commit-based：维护者 push 普通 commit 不会触发更新，
+    只有在 GitHub 上 cut 一个 release（打 tag）才会被用户拉取。给维护者明确的"发布"动作。
+
+  SettingsPage：手动 "重新检查" / "立即更新" 按钮 + 每个 skill 当前版本 / 最新版本显示
+
+  GeneratePage 写 manifest 时调 get_skill_local_version("test-case-generator")
+    → "test-case-generator@v1.8.0" 作为 skill_version 字段，反馈样本精确定位版本
 ```
 
 # 关键决策

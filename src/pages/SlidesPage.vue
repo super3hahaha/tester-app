@@ -79,6 +79,10 @@ async function loadFiles() {
 async function selectFile(file: DriveFile) {
   if (activeFileId.value === file.id) return;
   activeFileId.value = file.id;
+  await loadSlides(file.id);
+}
+
+async function loadSlides(fileId: string) {
   slidePages.value = [];
   focusedPage.value = null;
   loadingSlides.value = true;
@@ -86,7 +90,7 @@ async function selectFile(file: DriveFile) {
 
   try {
     slidePages.value = await invoke<SlidePageInfo[]>("get_presentation_slides", {
-      presentationId: file.id,
+      presentationId: fileId,
     });
     if (slidePages.value.length > 0) {
       focusedPage.value = slidePages.value[0];
@@ -96,6 +100,14 @@ async function selectFile(file: DriveFile) {
   } finally {
     loadingSlides.value = false;
   }
+}
+
+async function refreshActiveSlides() {
+  if (!activeFileId.value || loadingSlides.value) return;
+  // 选中状态保留：后端会比对 revisionId，若内容没变则秒返回；
+  // 若变了则后端清缓存重拉，已选页码若对应的 objectId 还在仍然有意义，
+  // 但若用户删了被选的页，这里也无法智能修复——交给用户重新确认
+  await loadSlides(activeFileId.value);
 }
 
 function focusPage(page: SlidePageInfo) {
@@ -140,6 +152,26 @@ function deselectAllPages() {
   pageSelections.value = map;
   emitSelection();
 }
+
+function selectInterval() {
+  if (!activeFileId.value) return;
+  const current = pageSelections.value.get(activeFileId.value);
+  if (!current || current.size < 2) return;
+  // 取已选页码的最小值和最大值，把区间内所有页都勾上
+  const arr = Array.from(current);
+  const min = Math.min(...arr);
+  const max = Math.max(...arr);
+  const filled = new Set<number>();
+  for (let i = min; i <= max; i++) {
+    filled.add(i);
+  }
+  const map = new Map(pageSelections.value);
+  map.set(activeFileId.value, filled);
+  pageSelections.value = map;
+  emitSelection();
+}
+
+const canSelectInterval = computed(() => activeSelectedCount.value >= 2);
 
 const activeSelectedCount = computed(() => {
   if (!activeFileId.value) return 0;
@@ -215,7 +247,10 @@ const activeFileName = computed(() => {
     <!-- Left: file list -->
     <div class="file-panel">
       <div class="panel-header">
-        <h3>Google Slides</h3>
+        <div class="header-row">
+          <h3>Google Slides</h3>
+          <button class="refresh-btn" @click="loadFiles" :disabled="loading" title="Refresh file list">&#8635;</button>
+        </div>
         <p class="subtitle">Select presentations and pick pages</p>
       </div>
 
@@ -282,10 +317,26 @@ const activeFileName = computed(() => {
               {{ isPageSelected(focusedPage.page_number) ? '&#10003; Selected' : 'Select this page' }}
             </button>
             <button v-if="!allPagesSelected" class="action-link" @click="selectAllPages">Select All</button>
-            <button v-else class="action-link" @click="deselectAllPages">Deselect All</button>
+            <button
+              class="action-link"
+              :disabled="!canSelectInterval"
+              :title="canSelectInterval ? 'Select all pages between the lowest and highest selected page' : 'Select at least 2 pages first'"
+              @click="selectInterval"
+            >Select Interval</button>
+            <button
+              v-if="activeSelectedCount > 0"
+              class="action-link"
+              @click="deselectAllPages"
+            >Unselect All</button>
             <span v-if="activeSelectedCount > 0" class="selected-hint">
               {{ activeSelectedCount }} selected
             </span>
+            <button
+              class="refresh-btn"
+              @click="refreshActiveSlides"
+              :disabled="loadingSlides"
+              title="Refresh slides (re-fetch if the presentation has changed)"
+            >&#8635;</button>
           </div>
         </div>
         <div class="preview-body">
@@ -350,9 +401,33 @@ const activeFileName = computed(() => {
 .panel-header {
   padding: 16px 14px 0;
 }
+.header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
 .panel-header h3 {
   font-size: 15px;
-  margin-bottom: 4px;
+  margin: 0;
+}
+.refresh-btn {
+  background: none;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 14px;
+  color: #888;
+  cursor: pointer;
+  padding: 1px 5px;
+  line-height: 1;
+}
+.refresh-btn:hover:not(:disabled) {
+  background: #f5f5f5;
+  color: #333;
+}
+.refresh-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 .subtitle {
   font-size: 11px;
@@ -545,8 +620,12 @@ const activeFileName = computed(() => {
   padding: 0;
   white-space: nowrap;
 }
-.action-link:hover {
+.action-link:hover:not(:disabled) {
   text-decoration: underline;
+}
+.action-link:disabled {
+  color: #bbb;
+  cursor: not-allowed;
 }
 .selected-hint {
   font-size: 12px;
