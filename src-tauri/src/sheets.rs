@@ -533,11 +533,13 @@ pub struct ExportInfo {
 }
 
 #[tauri::command]
-pub fn find_latest_export() -> Result<Option<ExportInfo>, String> {
+pub fn find_latest_export(since_ms: Option<u64>) -> Result<Option<ExportInfo>, String> {
     let dir = data_dir().join("exports");
     if !dir.exists() {
         return Ok(None);
     }
+    let since = since_ms
+        .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
     let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -545,6 +547,11 @@ pub fn find_latest_export() -> Result<Option<ExportInfo>, String> {
         if path.extension().and_then(|s| s.to_str()) == Some("xlsx") {
             let meta = entry.metadata().map_err(|e| e.to_string())?;
             let modified = meta.modified().map_err(|e| e.to_string())?;
+            if let Some(threshold) = since {
+                if modified < threshold {
+                    continue;
+                }
+            }
             if latest.as_ref().map_or(true, |(_, t)| modified > *t) {
                 latest = Some((path, modified));
             }

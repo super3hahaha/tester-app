@@ -203,7 +203,9 @@ pub async fn start_login(state: State<'_, AuthState>) -> Result<UserInfo, String
         https://www.googleapis.com/auth/spreadsheets \
         https://www.googleapis.com/auth/drive.readonly \
         https://www.googleapis.com/auth/drive.file \
-        https://www.googleapis.com/auth/presentations.readonly";
+        https://www.googleapis.com/auth/presentations.readonly \
+        https://www.googleapis.com/auth/androidpublisher \
+        https://www.googleapis.com/auth/playdeveloperreporting";
 
     let mut auth_url =
         url::Url::parse("https://accounts.google.com/o/oauth2/v2/auth").unwrap();

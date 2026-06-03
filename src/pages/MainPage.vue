@@ -5,6 +5,7 @@ import SheetsPage from "./SheetsPage.vue";
 import SlidesPage from "./SlidesPage.vue";
 import GeneratePage from "./GeneratePage.vue";
 import ComparePage from "./ComparePage.vue";
+import ReviewPage from "./ReviewPage.vue";
 import SettingsPage from "./SettingsPage.vue";
 
 interface UserInfo {
@@ -46,6 +47,14 @@ const navItems: NavItem[] = [
       { id: "slides", label: "Google Slides", icon: "📑" },
       { id: "generate", label: "Generate", icon: "▶" },
       { id: "compare", label: "compare", icon: "🔀" },
+    ],
+  },
+  {
+    id: "review",
+    label: "Review",
+    icon: "💬",
+    children: [
+      { id: "review-play", label: "Play Console", icon: "▶" },
     ],
   },
   {
@@ -161,6 +170,9 @@ function onSlidesSelect(files: SlidesSelection[]) {
         />
         <ComparePage
           v-show="activeOption === 'compare'"
+        />
+        <ReviewPage
+          v-show="activeOption === 'review-play'"
         />
         <SettingsPage
           v-show="activeOption === 'settings-general'"

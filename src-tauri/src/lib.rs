@@ -3,6 +3,7 @@ mod claude;
 mod compare;
 mod feedback;
 mod manifest;
+mod reviews;
 mod sheets;
 mod skill_sync;
 
@@ -48,6 +49,8 @@ pub fn run() {
             skill_sync::sync_all_skills,
             skill_sync::sync_skill,
             skill_sync::get_skill_local_version,
+            reviews::list_play_reviews,
+            reviews::list_play_apps,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

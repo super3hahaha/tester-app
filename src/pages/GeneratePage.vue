@@ -82,6 +82,7 @@ const error = ref("");
 const done = ref(false);
 const hasSession = ref(false);
 const userInput = ref("");
+const extraInfo = ref("");
 const sending = ref(false);
 const logPanel = ref<HTMLElement | null>(null);
 const stopping = ref(false);
@@ -110,6 +111,10 @@ const latestExport = ref<ExportInfo | null>(null);
 const uploading = ref(false);
 const uploadResult = ref<UploadResult | null>(null);
 const uploadError = ref("");
+// Timestamp (ms) when the current task started. Used to filter find_latest_export
+// so we only surface xlsx files created/modified during this run — not stale outputs
+// from a previous run that didn't get cleaned up.
+const generationStartMs = ref<number | null>(null);
 
 // Snapshot of the generation context — captured at handleGenerate time and used
 // when writing the manifest after Drive upload. Keeps the link between the
@@ -208,7 +213,9 @@ async function checkSession() {
 
 async function refreshLatestExport() {
   try {
-    latestExport.value = await invoke<ExportInfo | null>("find_latest_export");
+    latestExport.value = await invoke<ExportInfo | null>("find_latest_export", {
+      sinceMs: generationStartMs.value,
+    });
   } catch {
     latestExport.value = null;
   }
@@ -270,6 +277,7 @@ async function handleGenerate() {
   latestExport.value = null;
   uploadResult.value = null;
   uploadError.value = "";
+  generationStartMs.value = Date.now();
   startIdleWatch();
 
   try {
@@ -321,11 +329,15 @@ async function handleGenerate() {
       model: selectedModel.value,
     };
 
+    const extra = extraInfo.value.trim();
+    extraInfo.value = "";
+
     await invoke("run_claude_task", {
       csvPath,
       pptxPaths,
       pageSelections,
       model: selectedModel.value,
+      extraInfo: extra || null,
     });
   } catch (e: any) {
     error.value = String(e);
@@ -424,6 +436,16 @@ async function handleStop() {
         <div v-else class="sel-empty">
           No slides selected — go to Google Slides tab and select pages
         </div>
+      </div>
+
+      <!-- Extra info input (only before a session starts; further input goes in the log input) -->
+      <div v-if="!generating && !hasSession" class="extra-info-area">
+        <textarea
+          v-model="extraInfo"
+          class="extra-info-input"
+          placeholder="Additional info (optional) — extra context, constraints, or notes to send with the requirements"
+          rows="3"
+        ></textarea>
       </div>
     </div>
 
@@ -675,6 +697,23 @@ h3 {
 .stop-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+.extra-info-input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  background: #ffffff;
+  color: #2d3748;
+  border: 1px solid #d4d4d8;
+  border-radius: 6px;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+.extra-info-input:focus {
+  border-color: #667eea;
 }
 .error {
   color: #e53e3e;

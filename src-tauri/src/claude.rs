@@ -466,6 +466,7 @@ pub async fn run_claude_task(
     pptx_paths: Vec<String>,
     page_selections: Vec<PageSelection>,
     model: Option<String>,
+    extra_info: Option<String>,
     app: AppHandle,
     state: State<'_, ClaudeState>,
 ) -> Result<(), String> {
@@ -514,6 +515,11 @@ pub async fn run_claude_task(
     for sel in &page_selections {
         let pages_str: Vec<String> = sel.pages.iter().map(|p| p.to_string()).collect();
         prompt.push_str(&format!("{}: pages {}\n", sel.name, pages_str.join(", ")));
+    }
+    if let Some(extra) = extra_info.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        prompt.push_str("\nAdditional info from user:\n");
+        prompt.push_str(extra);
+        prompt.push('\n');
     }
 
     run_claude_and_stream(args, Some(prompt), app, &state).await

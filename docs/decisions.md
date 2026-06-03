@@ -47,6 +47,17 @@
 - **崩溃恢复**：`.revision` 在清完旧目录后立即写入，下载是异步 spawn 的。崩了的话已落地的 png 仍属于当前 revision，下次启动只补缺失，不会全清重拉。
 - **刷新按钮**：SlidesPage 三个刷新入口（左栏文件列表 / 预览栏当前 ppt）。后端永远比对 revisionId，refresh 没改动时是空操作（不重复下载），所以频繁点也无害。
 
+## Play Console 评论走 API 而非 URL 跳转
+
+- **场景**：测试人员想按星级 / 回复状态 / 日期范围筛选评论看，过去靠在 Chrome 里点 Play Console。
+- **选择**：用 Google Play Developer API（`androidpublisher.googleapis.com`）的 reviews 端点直接拉评论数据进 app；服务端不支持任何筛选 → 一次拿 7 天全量，本地过滤。
+- **API 硬限制**：Reviews 端点只返回最近 **7 天**评论。超过 7 天得另走 GCS CSV 归档（未实现）；ReviewPage 顶部明确写了"最近 7 天"以免误导。
+- **package_name vs 数字 ID**：Play Console URL 里的 `4973223441657725559` 是 Console 内部 app id，API 必须用包名（`files.fileexplorer.filemanager`）。两个 ID 都在 ReviewPage 表单里存着 —— 包名给 API 用，数字 ID 给"在 Console 打开"兜底按钮用。
+- **OAuth scope 升级**：往 `auth.rs::start_login` 的 scope 串加了 `androidpublisher`，但**老的 refresh_token 绑的是老 scope**，不会自动升级。reviews.rs 检测 401 / `ACCESS_TOKEN_SCOPE_INSUFFICIENT` 时返回 `NEED_RELOGIN_SCOPE:` 前缀错误，前端提示用户 Logout 后重登；登录页本来就带 `prompt=consent`，重登时会重新弹同意页带新 scope。
+- **拒绝的方案**：(a) 纯 URL 跳转 — 每次都要在浏览器手动操作，且数据没法进入 app 后续做分析；(b) Service Account — 当前用户没权限把 SA 加到 Play Console 用户列表里。
+- **应用列表来自 Reporting API**：Publisher API 没有 "list my apps" 端点，只能用 Reporting API 的 `apps:search`（`playdeveloperreporting.googleapis.com/v1beta1/apps:search`）。它需要一个**独立的 OAuth scope** `playdeveloperreporting`，且在 GCP 里是**独立的 API**，必须单独启用「Google Play Developer Reporting API」—— Publisher API 已启用并不代表 Reporting API 也启用。漏启时会报 403 `SERVICE_DISABLED`，错误信息里直接给启用 URL。
+- **保留 URL 兜底按钮**：复杂筛选 / 7 天以外的评论 / 网页回复仍走 Console，按当前表单参数拼 URL 后用 `openUrl` 打开（不能用 `target=_blank`，见 [[gotcha-tauri-open-url]]）。注意 Console URL 必须用**数字 ID**（developerId + appId），API 不返回这俩 → 在 ReviewPage 的"Play Console 跳转设置"折叠区里手动维护。
+
 ## diff 脚本两份拷贝 + build.rs 自动同步
 
 - 上游源：`C:\Users\chenj\Documents\trae_projects\diff\scripts\diff_testcases.py`（独立项目）
