@@ -51,6 +51,7 @@ pub fn run() {
             skill_sync::get_skill_local_version,
             reviews::list_play_reviews,
             reviews::list_play_apps,
+            reviews::reply_to_review,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

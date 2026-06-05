@@ -150,7 +150,7 @@ async function handleFetch() {
     const list = await invoke<Review[]>("list_play_reviews", {
       packageName: packageName.value.trim(),
       maxPages: 5,
-      translationLanguage: null,
+      translationLanguage: "zh-CN",
     });
     reviews.value = list;
     fetchedAt.value = Date.now();

@@ -229,6 +229,63 @@ fn ts_seconds(t: &Option<GoogleTimestamp>) -> i64 {
         .unwrap_or(0)
 }
 
+// ---- reviews.reply ----
+//
+// POSTs a developer reply to a single review.
+// Endpoint: applications/{packageName}/reviews/{reviewId}:reply
+// Body: { "replyText": "..." }
+// Quota: 2000 POST/day per app — easily enough for batch flows.
+
+#[derive(serde::Serialize)]
+struct ReplyBody<'a> {
+    #[serde(rename = "replyText")]
+    reply_text: &'a str,
+}
+
+#[tauri::command]
+pub async fn reply_to_review(
+    package_name: String,
+    review_id: String,
+    reply_text: String,
+    state: State<'_, AuthState>,
+) -> Result<(), String> {
+    let token = crate::auth::get_valid_access_token(&state).await?;
+    let url = format!(
+        "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{}/reviews/{}:reply",
+        urlencoding::encode(&package_name),
+        urlencoding::encode(&review_id),
+    );
+
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&ReplyBody { reply_text: &reply_text })
+        .send()
+        .await
+        .map_err(|e| format!("Reply request failed: {}", e))?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("Read reply body failed: {}", e))?;
+
+    if !status.is_success() {
+        let needs_relogin = body.contains("ACCESS_TOKEN_SCOPE_INSUFFICIENT")
+            || body.contains("insufficient authentication scopes")
+            || status.as_u16() == 401;
+        if needs_relogin {
+            return Err(format!(
+                "NEED_RELOGIN_SCOPE: 当前登录态没有 androidpublisher 权限，请退出登录后重新登录。原始错误：{}",
+                body
+            ));
+        }
+        return Err(format!("Reply API {}: {}", status, body));
+    }
+
+    Ok(())
+}
+
 // ---- apps:search via the Reporting API ----
 //
 // The publisher API has no "list my apps" endpoint, but the Reporting API does.

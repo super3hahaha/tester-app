@@ -1,0 +1,642 @@
+<script setup lang="ts">
+import { ref, computed, onMounted, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  type DatePreset,
+  computeRange,
+  toIso,
+  daysAgo,
+  PRESET_LABELS,
+} from "../utils/batchReplyDates";
+
+interface PlayApp {
+  package_name: string;
+  display_name: string;
+}
+
+interface AppConfig {
+  enabled: boolean;
+  datePreset: DatePreset;
+  customFromDate: string; // used only when datePreset === "custom"
+  customToDate: string;
+  stars: number[];
+}
+
+interface MultiConfig {
+  perApp: Record<string, AppConfig>;
+}
+
+// v3: when migrating from an older key, presets are force-reset to the default.
+//   v2 stored a preset, but early builds persisted a migration-artifact "custom"
+//   onto every app (even unchecked ones), so v2 presets aren't trustworthy.
+//   v1 stored absolute {fromDate, toDate} with no preset at all.
+// Reading the current v3 key preserves the user's explicit preset choices.
+const STORAGE_KEY = "batch-reply-multi-config-v3";
+const LEGACY_KEYS = ["batch-reply-multi-config-v2", "batch-reply-multi-config-v1"];
+const APPS_CACHE_KEY = "batch-reply-apps-cache-v1";
+
+function defaultConfig(): AppConfig {
+  const today = toIso(new Date());
+  const yesterday = toIso(daysAgo(1));
+  return {
+    enabled: false,
+    datePreset: "sinceLastWorkday",
+    customFromDate: yesterday,
+    customToDate: today,
+    stars: [1, 2],
+  };
+}
+
+// Coerce arbitrary stored data into a valid AppConfig.
+// resetPreset=true (migrating from a legacy key) forces the default preset,
+// discarding any stored preset (which on legacy data is an untrustworthy artifact).
+function normalizeConfig(raw: any, resetPreset = false): AppConfig {
+  const def = defaultConfig();
+  if (!raw || typeof raw !== "object") return def;
+  const stored = raw.datePreset;
+  const validStored: DatePreset | null =
+    stored === "sinceLastWorkday" ||
+    stored === "yesterday" ||
+    stored === "today" ||
+    stored === "7d" ||
+    stored === "custom"
+      ? stored
+      : null;
+  const preset: DatePreset = resetPreset || !validStored ? def.datePreset : validStored;
+  return {
+    enabled: !!raw.enabled,
+    datePreset: preset,
+    customFromDate: raw.customFromDate || raw.fromDate || def.customFromDate,
+    customToDate: raw.customToDate || raw.toDate || def.customToDate,
+    stars:
+      Array.isArray(raw.stars) && raw.stars.length > 0
+        ? raw.stars.filter((s: any) => Number.isInteger(s) && s >= 1 && s <= 5)
+        : def.stars,
+  };
+}
+
+const apps = ref<PlayApp[]>([]);
+const appsLoading = ref(false);
+const appsError = ref("");
+const needRelogin = ref(false);
+
+const perApp = ref<Record<string, AppConfig>>({});
+const savedSnapshot = ref<string>("");
+const saveFlash = ref<"" | "saved" | "error" | "cleared">("");
+const saveError = ref("");
+const searchQ = ref("");
+
+// Tick once a minute so the "computed range" preview stays fresh across midnight.
+const now = ref(new Date());
+let nowTimer: number | undefined;
+
+onMounted(() => {
+  // Read current v3 (preserve presets); else fall back through legacy keys
+  // (reset presets to default — legacy presets are migration artifacts).
+  let raw = localStorage.getItem(STORAGE_KEY);
+  let fromLegacy = false;
+  if (!raw) {
+    for (const k of LEGACY_KEYS) {
+      const v = localStorage.getItem(k);
+      if (v) {
+        raw = v;
+        fromLegacy = true;
+        break;
+      }
+    }
+  }
+  if (raw) {
+    try {
+      const cfg = JSON.parse(raw) as MultiConfig;
+      if (cfg.perApp && typeof cfg.perApp === "object") {
+        const normalized: Record<string, AppConfig> = {};
+        for (const [pkg, entry] of Object.entries(cfg.perApp)) {
+          normalized[pkg] = normalizeConfig(entry, fromLegacy);
+        }
+        perApp.value = normalized;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  savedSnapshot.value = JSON.stringify(perApp.value);
+
+  const cachedApps = localStorage.getItem(APPS_CACHE_KEY);
+  if (cachedApps) {
+    try {
+      apps.value = JSON.parse(cachedApps) as PlayApp[];
+    } catch {
+      // ignore
+    }
+  }
+  loadApps();
+
+  nowTimer = window.setInterval(() => {
+    now.value = new Date();
+  }, 60_000);
+});
+
+async function loadApps() {
+  appsLoading.value = true;
+  appsError.value = "";
+  try {
+    const list = await invoke<PlayApp[]>("list_play_apps");
+    apps.value = list;
+    localStorage.setItem(APPS_CACHE_KEY, JSON.stringify(list));
+    for (const a of list) {
+      if (!perApp.value[a.package_name]) {
+        perApp.value[a.package_name] = defaultConfig();
+      }
+    }
+  } catch (e: any) {
+    const msg = String(e);
+    if (msg.startsWith("NEED_RELOGIN_SCOPE")) {
+      appsError.value = "需要重新登录授权 playdeveloperreporting 权限。";
+      needRelogin.value = true;
+    } else {
+      appsError.value = msg;
+    }
+  } finally {
+    appsLoading.value = false;
+  }
+}
+
+function ensureCfg(pkg: string): AppConfig {
+  if (!perApp.value[pkg]) {
+    perApp.value[pkg] = defaultConfig();
+  }
+  return perApp.value[pkg];
+}
+
+function setPreset(pkg: string, preset: DatePreset) {
+  ensureCfg(pkg).datePreset = preset;
+}
+
+function toggleStar(pkg: string, s: number) {
+  const cfg = ensureCfg(pkg);
+  const i = cfg.stars.indexOf(s);
+  if (i >= 0) cfg.stars.splice(i, 1);
+  else cfg.stars.push(s);
+  cfg.stars.sort();
+}
+
+function selectAll() {
+  for (const a of apps.value) ensureCfg(a.package_name).enabled = true;
+}
+function unselectAll() {
+  for (const a of apps.value) ensureCfg(a.package_name).enabled = false;
+}
+
+// Wipe all saved batch-reply config (every version) back to factory state.
+function resetAll() {
+  const ok = window.confirm(
+    "确认清空所有应用的批量回复配置？\n所有勾选、日期、星级都会恢复默认（自上一个工作日 / 1★ 2★ / 未启用），此操作不可撤销。"
+  );
+  if (!ok) return;
+  for (const k of [STORAGE_KEY, ...LEGACY_KEYS]) {
+    localStorage.removeItem(k);
+  }
+  // Reset in-memory state to fresh defaults for the currently loaded apps.
+  const fresh: Record<string, AppConfig> = {};
+  for (const a of apps.value) fresh[a.package_name] = defaultConfig();
+  perApp.value = fresh;
+  // localStorage now empty == fresh defaults, so the cleared state is "clean" (not dirty).
+  savedSnapshot.value = JSON.stringify(perApp.value);
+  saveFlash.value = "cleared";
+  setTimeout(() => {
+    if (saveFlash.value === "cleared") saveFlash.value = "";
+  }, 2500);
+}
+
+const enabledCount = computed(() =>
+  apps.value.filter((a) => perApp.value[a.package_name]?.enabled).length
+);
+
+const filteredApps = computed(() => {
+  const q = searchQ.value.trim().toLowerCase();
+  if (!q) return apps.value;
+  return apps.value.filter(
+    (a) =>
+      a.display_name.toLowerCase().includes(q) ||
+      a.package_name.toLowerCase().includes(q)
+  );
+});
+
+const currentSnapshot = computed(() => JSON.stringify(perApp.value));
+const isDirty = computed(() => currentSnapshot.value !== savedSnapshot.value);
+
+watch(currentSnapshot, () => {
+  if (saveFlash.value === "saved") saveFlash.value = "";
+});
+
+function handleSave() {
+  saveError.value = "";
+  try {
+    const knownPkgs = new Set(apps.value.map((a) => a.package_name));
+    const pruned: Record<string, AppConfig> = {};
+    for (const [pkg, cfg] of Object.entries(perApp.value)) {
+      if (knownPkgs.has(pkg) || cfg.enabled) pruned[pkg] = cfg;
+    }
+    perApp.value = pruned;
+    const payload: MultiConfig = { perApp: perApp.value };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    savedSnapshot.value = JSON.stringify(perApp.value);
+    saveFlash.value = "saved";
+    setTimeout(() => {
+      if (saveFlash.value === "saved") saveFlash.value = "";
+    }, 2500);
+  } catch (e: any) {
+    saveFlash.value = "error";
+    saveError.value = String(e);
+  }
+}
+
+function rangePreview(cfg: AppConfig): string {
+  const r = computeRange(
+    cfg.datePreset,
+    { fromDate: cfg.customFromDate, toDate: cfg.customToDate },
+    now.value,
+  );
+  return r.fromDate === r.toDate ? r.fromDate : `${r.fromDate} → ${r.toDate}`;
+}
+
+function validateConfig(cfg: AppConfig): string {
+  if (cfg.datePreset === "custom") {
+    if (cfg.customFromDate && cfg.customToDate && cfg.customFromDate > cfg.customToDate) {
+      return "日期不合法";
+    }
+  }
+  if (cfg.stars.length === 0) return "未选择星级";
+  return "";
+}
+
+const PRESETS: DatePreset[] = ["sinceLastWorkday", "yesterday", "today", "7d", "custom"];
+</script>
+
+<template>
+  <div class="config-page">
+    <header class="page-header">
+      <h3>Batch Reply · 配置</h3>
+      <p class="subtitle">
+        勾选要批量回复的应用，并为每个应用配置日期范围（动态预设，执行时按当天计算）和星级筛选。保存后到 <b>Run</b> 子页拉取候选评论并提交回复。
+      </p>
+    </header>
+
+    <div class="toolbar">
+      <input
+        v-model="searchQ"
+        class="search-input"
+        type="text"
+        placeholder="搜索应用名 / 包名"
+      />
+      <div class="toolbar-spacer"></div>
+      <button class="link-btn" @click="selectAll" :disabled="apps.length === 0">全部勾选</button>
+      <button class="link-btn" @click="unselectAll" :disabled="apps.length === 0">全部取消</button>
+      <button class="refresh-btn" @click="loadApps" :disabled="appsLoading" title="刷新应用列表">
+        ↻ {{ appsLoading ? "加载中" : "刷新" }}
+      </button>
+      <button class="reset-btn" @click="resetAll" title="清空所有保存的批量回复配置，恢复出厂默认">
+        清空配置
+      </button>
+      <button class="save-btn" @click="handleSave" :disabled="!isDirty">
+        {{ isDirty ? "保存配置" : "已保存" }}
+      </button>
+    </div>
+
+    <div class="status-row">
+      <span class="status-text">
+        已启用 <b>{{ enabledCount }}</b> / {{ apps.length }} 个应用
+        <span v-if="isDirty" class="dirty-tag">· 有未保存改动</span>
+      </span>
+      <span v-if="saveFlash === 'saved'" class="flash flash-ok">✓ 已保存到本地</span>
+      <span v-if="saveFlash === 'cleared'" class="flash flash-ok">✓ 配置已清空，恢复默认</span>
+      <span v-if="saveFlash === 'error'" class="flash flash-err">保存失败：{{ saveError }}</span>
+    </div>
+
+    <div v-if="needRelogin" class="banner banner-warn">
+      ⚠️ 当前登录态不包含 Play 相关权限。请点右上角 <b>Logout</b> 后重新登录。
+    </div>
+    <div v-else-if="appsError" class="banner banner-error">应用列表加载失败：{{ appsError }}</div>
+
+    <div v-if="apps.length === 0 && !appsLoading" class="empty-state">
+      暂无应用。点上方「刷新」重新拉取。
+    </div>
+
+    <div v-else class="app-grid">
+      <article
+        v-for="a in filteredApps"
+        :key="a.package_name"
+        class="app-card"
+        :class="{ disabled: !perApp[a.package_name]?.enabled }"
+      >
+        <header class="app-card-head">
+          <label class="enable-toggle">
+            <input
+              type="checkbox"
+              :checked="!!perApp[a.package_name]?.enabled"
+              @change="ensureCfg(a.package_name).enabled = ($event.target as HTMLInputElement).checked"
+            />
+            <span class="app-name">{{ a.display_name }}</span>
+          </label>
+          <span class="pkg-name">{{ a.package_name }}</span>
+        </header>
+
+        <div class="cfg-row">
+          <label class="cfg-label">日期</label>
+          <div class="preset-row">
+            <button
+              v-for="p in PRESETS"
+              :key="p"
+              class="preset-btn"
+              :class="{ active: ensureCfg(a.package_name).datePreset === p }"
+              :disabled="!perApp[a.package_name]?.enabled"
+              @click="setPreset(a.package_name, p)"
+            >{{ PRESET_LABELS[p] }}</button>
+          </div>
+        </div>
+
+        <div v-if="ensureCfg(a.package_name).datePreset === 'custom'" class="cfg-row indent">
+          <label class="cfg-label"></label>
+          <input
+            type="date"
+            class="date-input"
+            :value="ensureCfg(a.package_name).customFromDate"
+            @input="ensureCfg(a.package_name).customFromDate = ($event.target as HTMLInputElement).value"
+            :disabled="!perApp[a.package_name]?.enabled"
+          />
+          <span class="date-sep">→</span>
+          <input
+            type="date"
+            class="date-input"
+            :value="ensureCfg(a.package_name).customToDate"
+            @input="ensureCfg(a.package_name).customToDate = ($event.target as HTMLInputElement).value"
+            :disabled="!perApp[a.package_name]?.enabled"
+          />
+        </div>
+
+        <div v-else class="cfg-row indent preview-row">
+          <label class="cfg-label"></label>
+          <span class="preview-text">
+            实际范围：<b>{{ rangePreview(ensureCfg(a.package_name)) }}</b>
+          </span>
+        </div>
+
+        <div class="cfg-row">
+          <label class="cfg-label">评分</label>
+          <div class="star-row">
+            <button
+              v-for="s in [1, 2, 3, 4, 5]"
+              :key="s"
+              class="star-btn"
+              :class="{ active: ensureCfg(a.package_name).stars.includes(s) }"
+              :disabled="!perApp[a.package_name]?.enabled"
+              @click="toggleStar(a.package_name, s)"
+            >{{ s }} ★</button>
+          </div>
+        </div>
+
+        <div
+          v-if="perApp[a.package_name]?.enabled && validateConfig(perApp[a.package_name])"
+          class="error small"
+        >{{ validateConfig(perApp[a.package_name]) }}</div>
+      </article>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.config-page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+.page-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.subtitle {
+  margin: 4px 0 12px 0;
+  font-size: 12px;
+  color: #888;
+  line-height: 1.5;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #fafafa;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.toolbar-spacer { flex: 1; min-width: 8px; }
+.search-input {
+  flex: 1;
+  min-width: 200px;
+  max-width: 320px;
+  padding: 6px 10px;
+  font-size: 13px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  outline: none;
+}
+.search-input:focus { border-color: #667eea; }
+.link-btn {
+  background: none;
+  border: none;
+  color: #667eea;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+.link-btn:hover:not(:disabled) { text-decoration: underline; }
+.link-btn:disabled { color: #aaa; cursor: not-allowed; }
+.refresh-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #666;
+  cursor: pointer;
+}
+.refresh-btn:hover:not(:disabled) { background: #f5f5fa; color: #333; }
+.refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.save-btn {
+  padding: 6px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  border-radius: 6px;
+  background: #38a169;
+  color: white;
+  cursor: pointer;
+}
+.save-btn:hover:not(:disabled) { background: #2f855a; }
+.save-btn:disabled { background: #cbd5e0; cursor: default; }
+.reset-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  border: 1px solid #fbb6b6;
+  border-radius: 6px;
+  background: white;
+  color: #c53030;
+  cursor: pointer;
+}
+.reset-btn:hover { background: #fff5f5; border-color: #f56565; }
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: #666;
+}
+.dirty-tag { color: #c05621; margin-left: 4px; font-weight: 600; }
+.flash { font-size: 12px; padding: 2px 10px; border-radius: 10px; }
+.flash-ok { background: #c6f6d5; color: #22543d; }
+.flash-err { background: #fed7d7; color: #9b2c2c; }
+
+.banner {
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+.banner-warn { background: #fffaf0; border: 1px solid #fbd38d; color: #975a16; }
+.banner-error { background: #fff5f5; border: 1px solid #fed7d7; color: #c53030; word-break: break-all; }
+
+.app-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
+  gap: 10px;
+}
+.app-card {
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: white;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: opacity 0.15s, background 0.15s;
+}
+.app-card.disabled { background: #fafafa; opacity: 0.65; }
+.app-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px dashed #ececec;
+}
+.enable-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.enable-toggle input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+.app-name { font-weight: 600; color: #2d3748; }
+.pkg-name {
+  font-size: 11px;
+  color: #999;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.cfg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  flex-wrap: wrap;
+}
+.cfg-row.indent { padding-top: 0; }
+.cfg-label {
+  width: 36px;
+  font-size: 11px;
+  color: #888;
+  flex-shrink: 0;
+}
+.preset-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.preset-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background: white;
+  cursor: pointer;
+  color: #666;
+}
+.preset-btn.active {
+  background: #667eea;
+  border-color: #667eea;
+  color: white;
+}
+.preset-btn:hover:not(:disabled):not(.active) {
+  background: #f5f5fa;
+  color: #333;
+}
+.preset-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.preview-row { padding-top: 0; padding-bottom: 4px; }
+.preview-text {
+  font-size: 11px;
+  color: #4a5568;
+  background: #f7fafc;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid #e2e8f0;
+}
+
+.date-input {
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  outline: none;
+}
+.date-input:focus { border-color: #667eea; }
+.date-input:disabled { background: #f3f3f3; color: #aaa; cursor: not-allowed; }
+.date-sep { color: #888; font-size: 12px; }
+
+.star-row { display: flex; gap: 4px; }
+.star-btn {
+  padding: 3px 10px;
+  font-size: 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background: white;
+  cursor: pointer;
+  color: #888;
+}
+.star-btn.active {
+  background: #f6ad55;
+  border-color: #f6ad55;
+  color: white;
+}
+.star-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.empty-state {
+  padding: 30px 16px;
+  text-align: center;
+  font-size: 13px;
+  color: #999;
+}
+.error { color: #e53e3e; font-size: 12px; margin-top: 4px; }
+.error.small { font-size: 11px; }
+</style>

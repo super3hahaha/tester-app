@@ -16,6 +16,8 @@ tester-app/
 │   ├── vite-env.d.ts            # Vite 类型声明
 │   ├── assets/                  # 静态资源
 │   │   └── vue.svg              # Vue logo
+│   ├── utils/                   # 跨页面工具模块
+│   │   └── batchReplyDates.ts   # 批量回复的动态日期预设（"自上一个工作日"/"昨天"等 → 执行时解析为绝对范围）
 │   └── pages/                   # 页面组件
 │       ├── LoginPage.vue        # Google OAuth 登录页
 │       ├── MainPage.vue         # 主布局：三级导航（工作区 → 选项 → 内容）
@@ -24,6 +26,8 @@ tester-app/
 │       ├── GeneratePage.vue     # Claude 测试用例生成（导出 + 流式日志 + 多轮对话）
 │       ├── ComparePage.vue      # compare：两个 Sheet 导出 HTML → 调用 diff skill → 在 Chrome 打开报告
 │       ├── ReviewPage.vue       # Play Console 评论：API 拉最近 7 天评论，本地按星级/回复/日期筛选
+│       ├── BatchReplyConfigPage.vue # 批量回复配置：每个 app 一张卡片，独立勾选启用 + 日期预设 + 星级；显式「保存」按钮写 localStorage
+│       ├── BatchReplyPage.vue   # 批量回复执行：读保存的多 app 配置 → 并行拉评论 → 按 app 分组折叠 → AI 生成回复 → 逐条/一键提交
 │       └── SettingsPage.vue     # 缓存管理设置
 ├── public/                      # 公共静态资源
 │   ├── tauri.svg                # Tauri logo
@@ -42,7 +46,7 @@ tester-app/
 │   │   ├── compare.rs           # 对比流程：导出 Sheet 为 HTML、直接跑 Python diff 脚本、在 Chrome 打开报告
 │   │   ├── manifest.rs          # 生成-上传 manifest 落盘：记录 Drive ID ↔ 源文件（CSV/PPTX/页码）的映射
 │   │   ├── feedback.rs          # 反馈打包：zip + Telegram sendDocument 上传 + 本地归档 / pending 重试
-│   │   ├── reviews.rs           # Google Play Developer API 评论拉取（list_play_reviews 命令）
+│   │   ├── reviews.rs           # Google Play Developer API：评论拉取（list_play_reviews）/ 应用列表（list_play_apps）/ 评论回复（reply_to_review）
 │   │   └── skill_sync.rs        # Skill 热更新：从 GitHub 拉取 zipball 同步到 ~/.claude/skills/，启动时静默 + Settings 手动
 │   ├── scripts/                 # 内嵌资源（编译期 include_str!）
 │   │   └── diff_testcases.py    # 来自 testcase-eval-visual-report skill 的纯 Python diff 脚本
@@ -104,6 +108,8 @@ tester-app/
 | 生成页 | `GeneratePage.vue` | 展示选择摘要 → 一键导出并调用 Claude → 终端风格日志 → 多轮对话输入 |
 | 对比页 | `ComparePage.vue` | 双栏选择（AI 原始 vs 人工修改）→ 导出 HTML → 调 Claude skill 生成 diff → "在 Chrome 中打开"按钮 |
 | 评论页 | `ReviewPage.vue` | Play Console 评论：调 `list_play_reviews` 拉最近 7 天，本地按星级/回复状态/日期筛选；附 "在 Play Console 打开"按钮兜底 |
+| 批量回复 · 配置 | `BatchReplyConfigPage.vue` | 多 app 卡片：每张卡片独立**日期预设**（自上一个工作日 / 昨天 / 今天 / 近 7 天 / 自定义）+ 星级；非自定义预设下显示「实际范围」预览（每分钟刷新一次，跨午夜自动重算）；顶部「全选/全不选/刷新/清空配置/保存」工具栏（清空配置 = 删除所有版本 localStorage key 并恢复出厂默认，带 confirm）；显式保存到 localStorage `batch-reply-multi-config-v3`（从旧 key v2/v1 迁移时**强制把日期预设重置为默认**，因为早期 v2 会把"自定义"这个迁移产物写进每个 app；读当前 v3 则保留用户显式选择）；应用列表缓存在 `batch-reply-apps-cache-v1` 让冷启动秒回 |
+| 批量回复 · 执行 | `BatchReplyPage.vue` | 进入时从 localStorage 读多 app 配置 → 「拉取候选评论」**在拉取时**调 `computeRange()` 把预设解析为绝对日期（所以配置一次永远新鲜）→ 并行调每个启用 app 的 `list_play_reviews`（不互相阻塞）→ 按 app 分组折叠展示（默认展开，组头显示 app 名 / 包名 / 当次实际日期范围 + 预设名 / 候选数）→ AI 批量生成回复（stub，等 reply skill）→ 逐条提交直接发，「一键提交全部」弹 confirm 后跨 app 串行 + 200ms 间隔调 `reply_to_review` |
 | 设置页 | `SettingsPage.vue` | 缓存大小查看与清理 |
 
 ## 后端模块
@@ -114,7 +120,7 @@ tester-app/
 | Google API | `sheets.rs` | Drive 文件列表、Sheets 读取与 CSV 导出、xlsx 上传（路径或字节、自动转 Google 表格、归入 `tester-app` 文件夹）、Slides 幻灯片获取与 PPTX 导出、缩略图异步缓存 |
 | Claude 集成 | `claude.rs` | 定位 Claude CLI 路径、子进程管理、stream-json 输出解析、会话 ID 续接、实时事件推送 |
 | 对比流程 | `compare.rs` | 单 Tab Sheet 导出 HTML（`docs.google.com/.../export?format=html&gid=`）、内嵌脚本写盘后直接执行 `python diff_testcases.py`、在 Chrome 打开报告（`compare-log` 事件流，独立于 `claude-log`） |
-| 评论拉取 | `reviews.rs` | 两条命令：① `list_play_apps` 调 `playdeveloperreporting.googleapis.com/v1beta1/apps:search` 列出账号下所有应用（包名 + 显示名）；② `list_play_reviews` 调 `androidpublisher.googleapis.com/v3/applications/{packageName}/reviews`，扁平化 comments 数组（取最新 userComment + developerComment）。服务端不支持任何筛选 → 一次性返回全部 7 天评论，由前端按星级/回复/日期本地过滤；遇 401 或 `ACCESS_TOKEN_SCOPE_INSUFFICIENT` 返回 `NEED_RELOGIN_SCOPE:` 前缀，前端提示重登 |
+| 评论拉取 | `reviews.rs` | 三条命令：① `list_play_apps` 调 `playdeveloperreporting.googleapis.com/v1beta1/apps:search` 列出账号下所有应用（包名 + 显示名）；② `list_play_reviews` 调 `androidpublisher.googleapis.com/v3/applications/{packageName}/reviews`（支持 `translationLanguage` 参数让 Google 直接返回译文，原文落 `originalText`），扁平化 comments 数组（取最新 userComment + developerComment）；③ `reply_to_review` 调 `…/reviews/{reviewId}:reply` POST `{replyText}`（配额：2000/天/应用）。服务端不支持任何筛选 → 一次性返回全部 7 天评论，由前端按星级/回复/日期本地过滤；遇 401 或 `ACCESS_TOKEN_SCOPE_INSUFFICIENT` 返回 `NEED_RELOGIN_SCOPE:` 前缀，前端提示重登 |
 | 生成-上传 manifest | `manifest.rs` | `write_generate_manifest` command：把"生成的 xlsx 上传到 Drive 后的 drive_id"和"用来生成它的源文件（CSV + PPTX + 页码）"绑定写盘；compare 页反馈时按 ai_drive_id 反查 |
 | 反馈上传 | `feedback.rs` | `send_feedback` command：反查 manifest → 打包 zip（ai.html + human.html + report.html + 源文件 + meta.json）→ Telegram sendDocument multipart 上传 → 成功移到 `feedback_sent/`，失败留 `feedback_pending/`；`retry_pending_feedback` 重试；`is_feedback_configured` 探测是否配置好 token |
 | Skill 热更新 | `skill_sync.rs` | 内置 skill 列表（owner/repo）；用 GitHub Releases API（`/releases/latest`）拿 tag_name 做版本判断；`check_skill_updates` 比对本地 `.tester-app-version` 与远程 tag；`sync_all_skills` / `sync_skill` 下载 release zipball → 备份旧版 → 解压覆盖到 `~/.claude/skills/{name}/` → 写新版本；`get_skill_local_version` 给前端取版本号写进反馈 manifest |
