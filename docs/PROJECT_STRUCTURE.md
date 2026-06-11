@@ -47,6 +47,7 @@ tester-app/
 │   │   ├── manifest.rs          # 生成-上传 manifest 落盘：记录 Drive ID ↔ 源文件（CSV/PPTX/页码）的映射
 │   │   ├── feedback.rs          # 反馈打包：zip + Telegram sendDocument 上传 + 本地归档 / pending 重试
 │   │   ├── reviews.rs           # Google Play Developer API：评论拉取（list_play_reviews）/ 应用列表（list_play_apps）/ 评论回复（reply_to_review）
+│   │   ├── reply.rs             # 批量回复生成：写 pending JSON → 跑 claude /review-reply → 读回 candidates.json（reply-log 事件流）
 │   │   └── skill_sync.rs        # Skill 热更新：从 GitHub 拉取 zipball 同步到 ~/.claude/skills/，启动时静默 + Settings 手动
 │   ├── scripts/                 # 内嵌资源（编译期 include_str!）
 │   │   └── diff_testcases.py    # 来自 testcase-eval-visual-report skill 的纯 Python diff 脚本
@@ -82,6 +83,9 @@ tester-app/
 │   └── diff_report_*.html       # 对比页用：diff_testcases.py 生成的报告
 ├── manifests/                   # 生成-上传 manifest：每个上传到 Drive 的结果对应一份
 │   └── {drive_id}.json          # 字段：drive_id, web_url, source_csv_path, pptx_paths, slide_pages, model, skill_version
+├── reviews/                     # 批量回复中转：每次 AI 生成的输入/输出 JSON（供调试回看）
+│   ├── pending-reviews-{ts}.json            # 写给 review-reply skill 的输入（target_language + channel + groups[]）
+│   └── pending-reviews-{ts}.candidates.json # skill 产出的候选回复，前端读回回填
 ├── feedback_pending/            # 反馈 zip 落盘暂存；上传成功移走，上传失败留存等待重试
 ├── feedback_sent/               # 上传成功的反馈 zip 归档（本地备份，方便回看自己提过什么）
 ├── skill_backups/               # skill 热更新前的旧版备份；目录名 {skill_name}_{old_version}_{ts}
@@ -109,7 +113,7 @@ tester-app/
 | 对比页 | `ComparePage.vue` | 双栏选择（AI 原始 vs 人工修改）→ 导出 HTML → 调 Claude skill 生成 diff → "在 Chrome 中打开"按钮 |
 | 评论页 | `ReviewPage.vue` | Play Console 评论：调 `list_play_reviews` 拉最近 7 天，本地按星级/回复状态/日期筛选；附 "在 Play Console 打开"按钮兜底 |
 | 批量回复 · 配置 | `BatchReplyConfigPage.vue` | 多 app 卡片：每张卡片独立**日期预设**（自上一个工作日 / 昨天 / 今天 / 近 7 天 / 自定义）+ 星级；非自定义预设下显示「实际范围」预览（每分钟刷新一次，跨午夜自动重算）；顶部「全选/全不选/刷新/清空配置/保存」工具栏（清空配置 = 删除所有版本 localStorage key 并恢复出厂默认，带 confirm）；显式保存到 localStorage `batch-reply-multi-config-v3`（从旧 key v2/v1 迁移时**强制把日期预设重置为默认**，因为早期 v2 会把"自定义"这个迁移产物写进每个 app；读当前 v3 则保留用户显式选择）；应用列表缓存在 `batch-reply-apps-cache-v1` 让冷启动秒回 |
-| 批量回复 · 执行 | `BatchReplyPage.vue` | 进入时从 localStorage 读多 app 配置 → 「拉取候选评论」**在拉取时**调 `computeRange()` 把预设解析为绝对日期（所以配置一次永远新鲜）→ 并行调每个启用 app 的 `list_play_reviews`（不互相阻塞）→ 按 app 分组折叠展示（默认展开，组头显示 app 名 / 包名 / 当次实际日期范围 + 预设名 / 候选数）→ AI 批量生成回复（stub，等 reply skill）→ 逐条提交直接发，「一键提交全部」弹 confirm 后跨 app 串行 + 200ms 间隔调 `reply_to_review` |
+| 批量回复 · 执行 | `BatchReplyPage.vue` | 进入时从 localStorage 读多 app 配置 → 「拉取候选评论」**在拉取时**调 `computeRange()` 把预设解析为绝对日期（所以配置一次永远新鲜）→ 并行调每个启用 app 的 `list_play_reviews`（不互相阻塞）→ 按 app 分组折叠展示（默认展开，组头显示 app 名 / 包名 / 当次实际日期范围 + 预设名 / 候选数）→ **「🔎 匹配模板并填充」调 `run_reply_skill`**（顶部下拉选回复语言默认 `auto`，模型固定 Sonnet）→ 命中模板的评论预填翻译好的模板正文（+中文预览）；未匹配的标「未匹配·需手动处理」留空手填 → 逐条提交直接发，「一键提交全部」弹 confirm 后跨 app 串行 + 200ms 间隔调 `reply_to_review` |
 | 设置页 | `SettingsPage.vue` | 缓存大小查看与清理 |
 
 ## 后端模块
@@ -120,6 +124,7 @@ tester-app/
 | Google API | `sheets.rs` | Drive 文件列表、Sheets 读取与 CSV 导出、xlsx 上传（路径或字节、自动转 Google 表格、归入 `tester-app` 文件夹）、Slides 幻灯片获取与 PPTX 导出、缩略图异步缓存 |
 | Claude 集成 | `claude.rs` | 定位 Claude CLI 路径、子进程管理、stream-json 输出解析、会话 ID 续接、实时事件推送 |
 | 对比流程 | `compare.rs` | 单 Tab Sheet 导出 HTML（`docs.google.com/.../export?format=html&gid=`）、内嵌脚本写盘后直接执行 `python diff_testcases.py`、在 Chrome 打开报告（`compare-log` 事件流，独立于 `claude-log`） |
+| 批量回复生成 | `reply.rs` | `run_reply_skill` command：把前端传来的 `groups[]` 包成 `{target_language, channel:"gp", groups}` 写到 `~/.tester-app/reviews/pending-reviews-{ts}.json` → 跑 `claude --print --output-format stream-json --permission-mode bypassPermissions --add-dir <reviews> --model claude-sonnet-4-6 /review-reply <json>` → 等子进程结束 → 读回同 stem 的 `*.candidates.json` 解析。返回 `{output, usage}`（usage 来自 stream-json 终结 `result` 事件的 token/费用）。独立 `ReplyState`（running + child_pid）+ `reply-log` 事件流。`stop_reply` command 杀进程树并置 running=false → inner 检测到返回 `CANCELLED`。复用 claude.rs 的 `find_claude` / `load_claude_token`。skill 流程为「匹配 only」（命中→翻译模板1条；未命中→matched:false）。**注意**：skill 是 LLM 手写 candidates.json，含未转义引号会非法 → SKILL.md 已要求写完自检 JSON；后端严格 `serde_json` 解析，非法报错。`stop_reply` 可中断 |
 | 评论拉取 | `reviews.rs` | 三条命令：① `list_play_apps` 调 `playdeveloperreporting.googleapis.com/v1beta1/apps:search` 列出账号下所有应用（包名 + 显示名）；② `list_play_reviews` 调 `androidpublisher.googleapis.com/v3/applications/{packageName}/reviews`（支持 `translationLanguage` 参数让 Google 直接返回译文，原文落 `originalText`），扁平化 comments 数组（取最新 userComment + developerComment）；③ `reply_to_review` 调 `…/reviews/{reviewId}:reply` POST `{replyText}`（配额：2000/天/应用）。服务端不支持任何筛选 → 一次性返回全部 7 天评论，由前端按星级/回复/日期本地过滤；遇 401 或 `ACCESS_TOKEN_SCOPE_INSUFFICIENT` 返回 `NEED_RELOGIN_SCOPE:` 前缀，前端提示重登 |
 | 生成-上传 manifest | `manifest.rs` | `write_generate_manifest` command：把"生成的 xlsx 上传到 Drive 后的 drive_id"和"用来生成它的源文件（CSV + PPTX + 页码）"绑定写盘；compare 页反馈时按 ai_drive_id 反查 |
 | 反馈上传 | `feedback.rs` | `send_feedback` command：反查 manifest → 打包 zip（ai.html + human.html + report.html + 源文件 + meta.json）→ Telegram sendDocument multipart 上传 → 成功移到 `feedback_sent/`，失败留 `feedback_pending/`；`retry_pending_feedback` 重试；`is_feedback_configured` 探测是否配置好 token |
@@ -206,6 +211,24 @@ compare（ComparePage）
     4. build_feedback_zip()        → zip 含 ai.html / human.html / report.html / sources/* / meta.json
     5. upload_to_telegram()        → POST sendDocument multipart，校验 {"ok":true}
     6. 成功 → move_to_sent()       → 失败 → 留在 feedback_pending/，错误回传前端
+
+批量回复链路（BatchReplyPage）
+  拉取：handleFetch() → 并行 list_play_reviews（每 app）→ 本地按星级/未回复/日期过滤 → 候选列表
+  匹配：generateReplies()（按钮「🔎 匹配模板并填充」）
+    1. buildSkillGroups() 收集"未匹配/未处理且未提交"的评论，按 app 组装 groups[]
+    2. invoke("run_reply_skill", { groups, targetLanguage, channel:"gp", model:"claude-sonnet-4-6" })
+         → reply.rs 写 pending JSON → claude /review-reply → 读 *.candidates.json → 返回 {output:{results[],warnings[]}, usage}
+         → 期间 reply-log 事件喂前端「匹配日志」面板
+    3. 按 review_id 回填：命中(matched=true)→candidate.options=[模板译文]，预填 replyText；
+       未命中(matched=false)→candidate.unmatched=true，留空交用户手填（不是错误）
+    4. 显示本次 token 用量/费用（res.usage → 工具栏下常驻「💰 本次用量」+ notice）
+  选择：命中只有 1 条（模板译文，已预填）；手动编辑 textarea → selectedIdx=-1（标"已手动编辑"）
+  提交：submitOne / handleSubmitAll → reply_to_review（与原逻辑一致）
+
+  ⚠️ 流程已是「匹配 only」（skill v0.2.0）：命中模板→翻译该模板 1 条；未命中→跳过交用户手处理。
+    不再对每条评论现生成多候选。回复语言默认 "auto"（逐条跟随评论语言），模型固定 Sonnet。
+    实测 6 条评论 $0.31 / 133s（旧"全生成"是 $1.01 / 552s）。
+  耗时仍分钟级（agentic 读索引+匹配+翻译），UI 有已用时计时 + 「停止」按钮（invoke stop_reply）+ 流式日志。
 
 按钮可见性
   ComparePage onMounted → is_feedback_configured()，false 时按钮隐藏

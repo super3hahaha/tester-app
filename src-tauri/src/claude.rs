@@ -670,7 +670,7 @@ pub fn get_claude_account() -> ClaudeAccountInfo {
     }
 }
 
-fn load_claude_token() -> Option<String> {
+pub(crate) fn load_claude_token() -> Option<String> {
     let cred_path = dirs::home_dir()?.join(".claude").join(".credentials.json");
     let content = std::fs::read_to_string(cred_path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;

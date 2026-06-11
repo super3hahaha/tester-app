@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   type DatePreset,
   type DateRange,
@@ -45,9 +46,25 @@ interface MultiConfig {
 
 type CandidateStatus = "pending" | "submitting" | "done" | "error";
 
+// One AI-generated reply option for a review. Mirrors the review-reply skill's
+// candidate schema (source=template|generated, optional confidence/category/direction).
+interface ReplyOption {
+  source: "template" | "generated";
+  text: string;
+  text_zh: string;
+  confidence?: number;
+  category?: string;
+  direction?: string;
+  language?: string;
+}
+
 interface Candidate {
   review: Review;
   replyText: string;
+  options: ReplyOption[]; // matched-template candidate(s); [0] pre-filled into replyText
+  selectedIdx: number; // index into options that's currently filled; -1 = manually edited
+  showMore: boolean; // whether the alternative-options panel is expanded
+  unmatched: boolean; // true once matching ran and found no template (user handles manually)
   status: CandidateStatus;
   errorMsg: string;
 }
@@ -94,13 +111,72 @@ function normalizeConfig(raw: any, resetPreset = false): AppConfig {
 }
 
 const BULK_INTERVAL_MS = 200;
+const GP_LIMIT = 350; // Google Play reply hard limit (chars)
+// Fixed model for reply generation: replies are template-matching + translation,
+// Sonnet is plenty and keeps cost/latency down. Same id as GeneratePage's Sonnet.
+const REPLY_MODEL = "claude-sonnet-4-6";
+
+// Reply language. "auto" = the skill replies to each review in its own language
+// (per-review), so one run covers a mixed-language batch. Specific codes force
+// the whole batch into that one language.
+interface LangOption {
+  code: string;
+  label: string;
+}
+const LANGS: LangOption[] = [
+  { code: "auto", label: "跟随评论语言（auto）" },
+  { code: "en", label: "English" },
+  { code: "zh-CN", label: "简体中文" },
+  { code: "ru", label: "Русский" },
+  { code: "pt", label: "Português" },
+  { code: "es", label: "Español" },
+  { code: "de", label: "Deutsch" },
+  { code: "fr", label: "Français" },
+  { code: "ja", label: "日本語" },
+  { code: "ko", label: "한국어" },
+];
+const targetLanguage = ref<string>("auto");
 
 const groups = ref<AppGroup[]>([]);
 const overallError = ref("");
+const noticeMsg = ref(""); // non-error info (e.g. skill warnings)
 const needRelogin = ref(false);
 const fetching = ref(false);
 const fetchedAt = ref<number | null>(null);
 const aiGenerating = ref(false);
+const genLog = ref<string[]>([]); // live skill output lines during generation
+const genLogOpen = ref(false);
+const lastUsage = ref<UsageInfo | null>(null); // token usage from the latest generation
+const genElapsed = ref(0); // seconds since current generation started
+let genTimer: number | undefined;
+let genStartMs = 0;
+
+function startGenTimer() {
+  genStartMs = Date.now();
+  genElapsed.value = 0;
+  genTimer = window.setInterval(() => {
+    genElapsed.value = Math.floor((Date.now() - genStartMs) / 1000);
+  }, 1000);
+}
+function stopGenTimer() {
+  if (genTimer !== undefined) {
+    window.clearInterval(genTimer);
+    genTimer = undefined;
+  }
+}
+function fmtElapsed(s: number): string {
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return m > 0 ? `${m}m${String(sec).padStart(2, "0")}s` : `${sec}s`;
+}
+
+async function handleStopReply() {
+  try {
+    await invoke("stop_reply");
+  } catch {
+    // ignore — backend resets state regardless
+  }
+}
 const bulkSubmitting = ref(false);
 const bulkProgress = ref({ done: 0, total: 0 });
 
@@ -178,7 +254,27 @@ function rebuildGroups() {
   groups.value = next;
 }
 
-onMounted(rebuildGroups);
+let unlistenReply: UnlistenFn | null = null;
+
+onMounted(async () => {
+  rebuildGroups();
+  // Live skill output during AI generation. The awaited invoke() resolves with
+  // the final candidates, so this log is purely for showing progress.
+  unlistenReply = await listen<{ text: string; kind: string; done: boolean }>(
+    "reply-log",
+    (event) => {
+      const { text } = event.payload;
+      if (text && text.trim()) {
+        genLog.value.push(text.trim());
+        if (genLog.value.length > 400) genLog.value.splice(0, genLog.value.length - 400);
+      }
+    }
+  );
+});
+onUnmounted(() => {
+  unlistenReply?.();
+  stopGenTimer();
+});
 // MainPage uses v-show (component stays mounted), so onMounted only fires once.
 // handleFetch() re-reads localStorage on every click, so config changes take effect on next pull.
 
@@ -212,6 +308,10 @@ async function fetchOne(g: AppGroup): Promise<void> {
       .map((r) => ({
         review: r,
         replyText: "",
+        options: [] as ReplyOption[],
+        selectedIdx: -1,
+        showMore: false,
+        unmatched: false,
         status: "pending" as CandidateStatus,
         errorMsg: "",
       }));
@@ -247,16 +347,166 @@ async function handleFetch() {
   fetchedAt.value = Date.now();
 }
 
+interface SkillResult {
+  review_id: string;
+  matched?: boolean;
+  candidates: ReplyOption[];
+}
+interface SkillOutput {
+  results?: SkillResult[];
+  warnings?: string[];
+}
+interface UsageInfo {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  total_cost_usd?: number;
+}
+// run_reply_skill returns the skill output plus the CLI-reported token usage.
+interface ReplyResultPayload {
+  output: SkillOutput;
+  usage: UsageInfo | null;
+}
+
+// Build the skill input `groups` payload from candidates still needing a reply.
+// Only includes reviews without an AI reply yet and not already submitted, so
+// re-running "AI 生成" tops up rather than redoing everything.
+function buildSkillGroups(): {
+  groups: any[];
+  pendingByReview: Map<string, Candidate>;
+} {
+  const out: any[] = [];
+  const pendingByReview = new Map<string, Candidate>();
+  for (const g of groups.value) {
+    const reviews: any[] = [];
+    for (const c of g.candidates) {
+      if (c.status === "done") continue;
+      if (c.options.length > 0 || c.unmatched) continue; // already matched/processed
+      const r = c.review;
+      reviews.push({
+        review_id: r.review_id,
+        text: r.text,
+        original_text: r.original_text,
+        star_rating: r.star_rating,
+        reviewer_language: r.reviewer_language,
+        app_version_name: r.app_version_name,
+        device: r.device,
+        android_os_version: r.android_os_version,
+      });
+      pendingByReview.set(r.review_id, c);
+    }
+    if (reviews.length > 0) {
+      out.push({
+        package_name: g.packageName,
+        display_name: g.displayName,
+        reviews,
+      });
+    }
+  }
+  return { groups: out, pendingByReview };
+}
+
 async function generateReplies() {
-  // TODO: 接入 reply skill —— 把每个 group 内 pending 项的评论文本批量传给 skill，
-  // 拿到 [{ review_id, reply_text }] 后回填到对应 candidate.replyText。
+  if (aiGenerating.value) return;
+  const { groups: skillGroups, pendingByReview } = buildSkillGroups();
+  if (skillGroups.length === 0) {
+    overallError.value = "没有需要匹配的候选（可能都已匹配/处理或已提交）。";
+    return;
+  }
   aiGenerating.value = true;
+  overallError.value = "";
+  noticeMsg.value = "";
+  genLog.value = [];
+  lastUsage.value = null;
+  startGenTimer();
+
   try {
-    await new Promise((r) => setTimeout(r, 300));
-    overallError.value = "AI 批量生成回复尚未接入（等 reply skill 完成后接通）。";
+    const res = await invoke<ReplyResultPayload>("run_reply_skill", {
+      groups: skillGroups,
+      targetLanguage: targetLanguage.value,
+      channel: "gp",
+      model: REPLY_MODEL,
+    });
+    const out = res.output || {};
+    lastUsage.value = res.usage;
+
+    const byId = new Map<string, SkillResult>();
+    for (const r of out.results || []) {
+      byId.set(r.review_id, r);
+    }
+
+    let matched = 0;
+    let unmatched = 0;
+    for (const [reviewId, c] of pendingByReview) {
+      const r = byId.get(reviewId);
+      const opts = r && Array.isArray(r.candidates) ? r.candidates : [];
+      if (r && r.matched !== false && opts.length > 0) {
+        c.options = opts;
+        c.selectedIdx = 0;
+        c.replyText = opts[0].text || "";
+        c.unmatched = false;
+        c.errorMsg = "";
+        if (c.status === "error") c.status = "pending";
+        matched += 1;
+      } else {
+        // No matching template — skip; user handles this review manually.
+        c.unmatched = true;
+        c.options = [];
+        c.errorMsg = "";
+        unmatched += 1;
+      }
+    }
+
+    const parts: string[] = [`命中模板 ${matched} 条（已填入译文）`];
+    if (unmatched > 0) parts.push(`未匹配 ${unmatched} 条（请在下方手动处理）`);
+    if (lastUsage.value) parts.push(usageText.value);
+    if (out.warnings && out.warnings.length > 0) {
+      parts.push(`warnings: ${out.warnings.join("；")}`);
+    }
+    noticeMsg.value = parts.join(" · ");
+  } catch (e: any) {
+    const msg = String(e);
+    if (msg.includes("CANCELLED")) {
+      noticeMsg.value = "已取消生成（已生成的候选保留）。";
+    } else {
+      overallError.value = `AI 生成回复失败：${msg}`;
+    }
   } finally {
     aiGenerating.value = false;
+    stopGenTimer();
   }
+}
+
+// Pick option `idx` for candidate `c`: fill its text into the textarea and
+// collapse the alternatives panel.
+function selectOption(c: Candidate, idx: number) {
+  if (idx < 0 || idx >= c.options.length) return;
+  c.selectedIdx = idx;
+  c.replyText = c.options[idx].text || "";
+  c.showMore = false;
+}
+
+// When the user edits the textarea away from the selected option, mark as custom
+// so the selection chip stops claiming a specific option is active.
+function onReplyInput(c: Candidate) {
+  if (c.selectedIdx >= 0 && c.replyText !== (c.options[c.selectedIdx]?.text || "")) {
+    c.selectedIdx = -1;
+  }
+}
+
+function optionLabel(o: ReplyOption): string {
+  if (o.source === "template") {
+    const conf = o.confidence != null ? ` · ${Math.round(o.confidence * 100)}%` : "";
+    const cat = o.category ? `·${o.category}` : "";
+    return `模板${cat}${conf}`;
+  }
+  const dir = o.direction ? `·${o.direction}` : "";
+  return `原创${dir}`;
+}
+
+function overLimit(text: string): boolean {
+  return text.length > GP_LIMIT;
 }
 
 async function submitOne(g: AppGroup, idx: number): Promise<boolean> {
@@ -349,6 +599,19 @@ const totalDone = computed(() =>
   )
 );
 
+const usageText = computed(() => {
+  const u = lastUsage.value;
+  if (!u) return "";
+  const inT = u.input_tokens ?? 0;
+  const outT = u.output_tokens ?? 0;
+  const cr = u.cache_read_input_tokens ?? 0;
+  const cc = u.cache_creation_input_tokens ?? 0;
+  const total = inT + outT + cr + cc;
+  const cost = u.total_cost_usd != null ? ` · 约 $${u.total_cost_usd.toFixed(4)}` : "";
+  const fmt = (n: number) => n.toLocaleString();
+  return `本次用量：输入 ${fmt(inT)} · 输出 ${fmt(outT)} · 缓存读 ${fmt(cr)} · 合计 ${fmt(total)} tokens${cost}`;
+});
+
 function configSummary(g: AppGroup): string {
   const r = g.effectiveRange;
   const date = r.fromDate === r.toDate ? r.fromDate : `${r.fromDate} → ${r.toDate}`;
@@ -387,13 +650,21 @@ function configSummary(g: AppGroup): string {
             ? (fetchProgress ? `拉取中 ${fetchProgress.done}/${fetchProgress.total}` : "拉取中...")
             : (fetchedAt ? "重新拉取" : "拉取候选评论") }}
       </button>
+      <label class="lang-select" :title="'回复语言'">
+        <span class="lang-label">回复语言</span>
+        <select v-model="targetLanguage" :disabled="aiGenerating || bulkSubmitting">
+          <option v-for="l in LANGS" :key="l.code" :value="l.code">{{ l.label }}</option>
+        </select>
+      </label>
       <button
         class="ai-btn"
         :disabled="aiGenerating || bulkSubmitting || totalCandidates === 0"
         @click="generateReplies"
       >
-        {{ aiGenerating ? "AI 生成中..." : "✨ AI 批量生成回复" }}
+        <span v-if="aiGenerating" class="btn-spinner"></span>
+        {{ aiGenerating ? `匹配中… ${fmtElapsed(genElapsed)}` : "🔎 匹配模板并填充" }}
       </button>
+      <button v-if="aiGenerating" class="stop-btn" @click="handleStopReply">停止</button>
       <button
         class="bulk-btn"
         :disabled="bulkSubmitting || totalSubmittable === 0"
@@ -406,10 +677,26 @@ function configSummary(g: AppGroup): string {
       </button>
     </div>
 
+    <div v-if="lastUsage" class="usage-line">💰 {{ usageText }}</div>
+
     <div v-if="needRelogin" class="banner banner-warn">
       ⚠️ 当前登录态不包含 Play 相关权限。请点右上角 <b>Logout</b> 后重新登录。
     </div>
     <div v-if="overallError" class="banner banner-error">{{ overallError }}</div>
+    <div v-if="noticeMsg" class="banner banner-info">{{ noticeMsg }}</div>
+
+    <div v-if="aiGenerating || genLog.length > 0" class="gen-log-box">
+      <div class="gen-log-head" @click="genLogOpen = !genLogOpen">
+        <span class="group-caret">{{ genLogOpen ? "▼" : "▶" }}</span>
+        <span v-if="aiGenerating" class="tag-spinner"></span>
+        <span class="gen-log-title">
+          {{ aiGenerating ? `正在匹配模板… ${fmtElapsed(genElapsed)}` : "匹配日志" }}
+        </span>
+        <span v-if="aiGenerating" class="gen-hint">逐条匹配模板并翻译命中项，请耐心等待</span>
+        <span v-else-if="genLog.length > 0" class="gen-log-last">{{ genLog[genLog.length - 1] }}</span>
+      </div>
+      <pre v-if="genLogOpen" class="gen-log-body">{{ genLog.join("\n") }}</pre>
+    </div>
 
     <div v-if="groups.length === 0" class="empty-state big">
       还没启用任何应用。<br />
@@ -465,6 +752,9 @@ function configSummary(g: AppGroup): string {
               </span>
               <span class="author">{{ c.review.author_name || "(匿名)" }}</span>
               <span class="ts">{{ formatTs(c.review.user_comment_ts) }}</span>
+              <span v-if="c.unmatched && c.status === 'pending'" class="unmatched-tag">
+                未匹配 · 需手动处理
+              </span>
               <span class="status-tag" :class="`status-${c.status}`">
                 {{
                   c.status === "done" ? "✓ 已回复" :
@@ -489,12 +779,59 @@ function configSummary(g: AppGroup): string {
             </div>
 
             <div class="reply-edit">
+              <!-- AI option picker: selected chip + char count + 更多. Shown only
+                   once the skill has returned candidates for this review. -->
+              <div v-if="c.options.length > 0" class="opt-bar">
+                <span class="opt-chip" :class="c.selectedIdx === -1 ? 'custom' : 'active'">
+                  {{
+                    c.selectedIdx === -1
+                      ? "已手动编辑"
+                      : optionLabel(c.options[c.selectedIdx])
+                  }}
+                </span>
+                <span class="opt-count">候选 {{ c.options.length }} 条</span>
+                <span class="char-count" :class="{ over: overLimit(c.replyText) }">
+                  {{ c.replyText.length }}/{{ GP_LIMIT }}
+                </span>
+                <button
+                  v-if="c.options.length > 1"
+                  class="more-btn"
+                  @click="c.showMore = !c.showMore"
+                  :disabled="c.status === 'done' || c.status === 'submitting' || bulkSubmitting"
+                >
+                  {{ c.showMore ? "收起 ▲" : "更多 ▾" }}
+                </button>
+              </div>
+
+              <!-- Alternatives panel: every option with EN body + 中文 preview. -->
+              <div v-if="c.showMore && c.options.length > 1" class="opt-list">
+                <div
+                  v-for="(o, oi) in c.options"
+                  :key="oi"
+                  class="opt-item"
+                  :class="{ selected: oi === c.selectedIdx }"
+                  @click="selectOption(c, oi)"
+                >
+                  <div class="opt-item-head">
+                    <span class="opt-item-tag" :class="o.source">{{ optionLabel(o) }}</span>
+                    <span v-if="o.language" class="opt-item-lang">{{ o.language }}</span>
+                    <span class="opt-item-len" :class="{ over: overLimit(o.text) }">
+                      {{ o.text.length }} 字符
+                    </span>
+                    <span v-if="oi === c.selectedIdx" class="opt-item-cur">当前</span>
+                  </div>
+                  <div class="opt-item-text">{{ o.text }}</div>
+                  <div v-if="o.text_zh" class="opt-item-zh">{{ o.text_zh }}</div>
+                </div>
+              </div>
+
               <textarea
                 v-model="c.replyText"
                 class="reply-textarea"
-                placeholder="在此填写回复内容（AI 生成后会自动填入这里）"
+                :placeholder="c.unmatched ? '未匹配到模板，请在此手动填写回复' : '在此填写回复内容（点「🔎 匹配模板并填充」后命中的会自动填入）'"
                 rows="3"
                 :disabled="c.status === 'done' || c.status === 'submitting' || bulkSubmitting"
+                @input="onReplyInput(c)"
               ></textarea>
               <div class="reply-actions">
                 <span v-if="c.status === 'error'" class="error-inline">{{ c.errorMsg }}</span>
@@ -597,6 +934,20 @@ function configSummary(g: AppGroup): string {
   opacity: 0.5;
   cursor: not-allowed;
 }
+.stop-btn {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid #e53e3e;
+  border-radius: 6px;
+  background: white;
+  color: #e53e3e;
+  cursor: pointer;
+}
+.stop-btn:hover {
+  background: #e53e3e;
+  color: white;
+}
 .bulk-btn {
   padding: 6px 16px;
   font-size: 13px;
@@ -637,6 +988,235 @@ function configSummary(g: AppGroup): string {
   border: 1px solid #fed7d7;
   color: #c53030;
   word-break: break-all;
+}
+.banner-info {
+  background: #ebf8ff;
+  border: 1px solid #bee3f8;
+  color: #2c5282;
+}
+.usage-line {
+  font-size: 12px;
+  color: #4a5568;
+  background: #f7fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 6px 12px;
+  margin-bottom: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* language selector in toolbar */
+.lang-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #666;
+}
+.lang-label {
+  white-space: nowrap;
+}
+.lang-select select {
+  font-size: 12px;
+  padding: 5px 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #2d3748;
+  cursor: pointer;
+}
+.lang-select select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* generation log */
+.gen-log-box {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fbfcfe;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.gen-log-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.gen-log-head:hover {
+  background: #f1f5f9;
+}
+.gen-log-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a5568;
+  white-space: nowrap;
+}
+.gen-hint {
+  font-size: 11px;
+  color: #a0aec0;
+  flex: 1;
+  min-width: 0;
+}
+.gen-log-last {
+  font-size: 11px;
+  color: #718096;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.gen-log-body {
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid #e2e8f0;
+  background: #1a202c;
+  color: #cbd5e0;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* AI option picker */
+.opt-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.opt-chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 10px;
+}
+.opt-chip.active {
+  background: #e9d8fd;
+  color: #553c9a;
+}
+.opt-chip.custom {
+  background: #edf2f7;
+  color: #4a5568;
+}
+.opt-count {
+  font-size: 11px;
+  color: #888;
+}
+.char-count {
+  font-size: 11px;
+  color: #a0aec0;
+  font-variant-numeric: tabular-nums;
+}
+.char-count.over {
+  color: #e53e3e;
+  font-weight: 600;
+}
+.more-btn {
+  margin-left: auto;
+  padding: 3px 12px;
+  font-size: 11px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  background: white;
+  color: #4a5568;
+  cursor: pointer;
+}
+.more-btn:hover:not(:disabled) {
+  background: #edf2f7;
+}
+.more-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.opt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 8px;
+  background: #faf9fd;
+  border: 1px solid #e9e3f5;
+  border-radius: 8px;
+}
+.opt-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: white;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.opt-item:hover {
+  border-color: #9f7aea;
+}
+.opt-item.selected {
+  border-color: #805ad5;
+  box-shadow: 0 0 0 1px #805ad5 inset;
+}
+.opt-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+  flex-wrap: wrap;
+}
+.opt-item-tag {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 8px;
+}
+.opt-item-tag.template {
+  background: #e6fffa;
+  color: #234e52;
+}
+.opt-item-tag.generated {
+  background: #fefcbf;
+  color: #744210;
+}
+.opt-item-lang {
+  font-size: 10px;
+  color: #999;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.opt-item-len {
+  font-size: 10px;
+  color: #a0aec0;
+}
+.opt-item-len.over {
+  color: #e53e3e;
+  font-weight: 600;
+}
+.opt-item-cur {
+  font-size: 10px;
+  font-weight: 600;
+  color: #805ad5;
+  margin-left: auto;
+}
+.opt-item-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #2d3748;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.opt-item-zh {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #888;
+  line-height: 1.4;
+  border-top: 1px dashed #edf2f7;
+  padding-top: 4px;
 }
 
 .empty-state {
@@ -841,6 +1421,17 @@ function configSummary(g: AppGroup): string {
   font-weight: 600;
   margin-left: auto;
 }
+.unmatched-tag {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+  background: #fffaf0;
+  color: #975a16;
+  border: 1px solid #fbd38d;
+  margin-left: auto;
+}
+.unmatched-tag + .status-tag { margin-left: 8px; }
 .status-pending { background: #edf2f7; color: #4a5568; }
 .status-submitting { background: #fefcbf; color: #744210; }
 .status-done { background: #c6f6d5; color: #22543d; }

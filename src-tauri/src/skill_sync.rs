@@ -11,11 +11,18 @@ struct SkillSource {
     repo: &'static str,
 }
 
-const SKILLS: &[SkillSource] = &[SkillSource {
-    name: "test-case-generator",
-    owner: "super3hahaha",
-    repo: "test-case-generator",
-}];
+const SKILLS: &[SkillSource] = &[
+    SkillSource {
+        name: "test-case-generator",
+        owner: "super3hahaha",
+        repo: "test-case-generator",
+    },
+    SkillSource {
+        name: "review-reply",
+        owner: "super3hahaha",
+        repo: "review-reply",
+    },
+];
 
 // GitHub API requires a User-Agent on every request. Anything identifying works.
 const UA: &str = "tester-app/0.1";

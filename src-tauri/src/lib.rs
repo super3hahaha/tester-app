@@ -3,6 +3,7 @@ mod claude;
 mod compare;
 mod feedback;
 mod manifest;
+mod reply;
 mod reviews;
 mod sheets;
 mod skill_sync;
@@ -10,6 +11,7 @@ mod skill_sync;
 use auth::AuthState;
 use claude::ClaudeState;
 use compare::CompareState;
+use reply::ReplyState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -18,6 +20,7 @@ pub fn run() {
         .manage(AuthState::new())
         .manage(ClaudeState::new())
         .manage(CompareState::new())
+        .manage(ReplyState::new())
         .invoke_handler(tauri::generate_handler![
             auth::check_auth,
             auth::start_login,
@@ -52,6 +55,8 @@ pub fn run() {
             reviews::list_play_reviews,
             reviews::list_play_apps,
             reviews::reply_to_review,
+            reply::run_reply_skill,
+            reply::stop_reply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

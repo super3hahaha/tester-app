@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {
   type DatePreset,
@@ -134,6 +134,10 @@ onMounted(() => {
   nowTimer = window.setInterval(() => {
     now.value = new Date();
   }, 60_000);
+});
+
+onUnmounted(() => {
+  if (nowTimer !== undefined) window.clearInterval(nowTimer);
 });
 
 async function loadApps() {
