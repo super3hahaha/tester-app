@@ -9,6 +9,7 @@ tester-app/
 ├── tsconfig.json                # TypeScript 编译器配置（严格模式）
 ├── tsconfig.node.json           # Vite 配置文件专用 TypeScript 配置
 ├── dev.bat                      # Windows 快速启动脚本
+├── dev.command                  # macOS 快速启动脚本（双击运行）
 ├── README.md                    # 项目说明
 ├── src/                         # Vue 3 前端源码
 │   ├── main.ts                  # Vue 应用入口，挂载根组件
