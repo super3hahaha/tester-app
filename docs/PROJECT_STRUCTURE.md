@@ -64,7 +64,8 @@ tester-app/
 │       ├── 128x128@2x.png      # 128px Retina
 │       └── Square*.png          # Windows Store 各尺寸
 └── docs/                        # 项目文档
-    └── PROJECT_STRUCTURE.md     # 本文件
+    ├── PROJECT_STRUCTURE.md     # 本文件
+    └── gotchas.md               # 踩过的坑（平台怪癖、外部约束、易复发 bug）
 ```
 
 # 运行时数据目录
