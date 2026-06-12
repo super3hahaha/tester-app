@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -276,7 +276,20 @@ onUnmounted(() => {
   stopGenTimer();
 });
 // MainPage uses v-show (component stays mounted), so onMounted only fires once.
-// handleFetch() re-reads localStorage on every click, so config changes take effect on next pull.
+// Re-read config whenever this page becomes visible — otherwise a config saved on
+// the Config sub-page after first mount never reaches groups, leaving the page stuck
+// on "未配置启用任何应用" with the (groups-empty-disabled) fetch button uncllickable.
+const props = defineProps<{ activeOption: string }>();
+watch(
+  () => props.activeOption,
+  (opt) => {
+    // Only resync the enabled-app list before a session starts. Once candidates are
+    // fetched (fetchedAt set), rebuilding would wipe them, so leave it alone.
+    if (opt === "review-batch-reply" && fetchedAt.value === null && !fetching.value) {
+      rebuildGroups();
+    }
+  }
+);
 
 function tsRange(r: DateRange): { from: number; to: number } {
   const from = r.fromDate
@@ -409,6 +422,14 @@ function buildSkillGroups(): {
 
 async function generateReplies() {
   if (aiGenerating.value) return;
+  // Block while any app is still being fetched: fetchOne() clears candidates at
+  // its start, so a half-loaded group would silently drop out of buildSkillGroups
+  // (the group vanishes from the batch and never gets matched). See the toolbar
+  // buttons' :disabled guards — this is the belt to their suspenders.
+  if (fetching.value || groups.value.some((g) => g.loading)) {
+    overallError.value = "评论还在拉取中，请等拉取完成后再匹配。";
+    return;
+  }
   const { groups: skillGroups, pendingByReview } = buildSkillGroups();
   if (skillGroups.length === 0) {
     overallError.value = "没有需要匹配的候选（可能都已匹配/处理或已提交）。";
@@ -658,7 +679,7 @@ function configSummary(g: AppGroup): string {
       </label>
       <button
         class="ai-btn"
-        :disabled="aiGenerating || bulkSubmitting || totalCandidates === 0"
+        :disabled="fetching || aiGenerating || bulkSubmitting || totalCandidates === 0"
         @click="generateReplies"
       >
         <span v-if="aiGenerating" class="btn-spinner"></span>
@@ -667,7 +688,7 @@ function configSummary(g: AppGroup): string {
       <button v-if="aiGenerating" class="stop-btn" @click="handleStopReply">停止</button>
       <button
         class="bulk-btn"
-        :disabled="bulkSubmitting || totalSubmittable === 0"
+        :disabled="fetching || bulkSubmitting || totalSubmittable === 0"
         @click="handleSubmitAll"
         :title="totalSubmittable === 0 ? '请先填写回复内容' : ''"
       >
@@ -833,6 +854,17 @@ function configSummary(g: AppGroup): string {
                 :disabled="c.status === 'done' || c.status === 'submitting' || bulkSubmitting"
                 @input="onReplyInput(c)"
               ></textarea>
+              <!-- 中文译文 of the currently-filled option. The 更多 panel only shows
+                   when there are 2+ candidates, so without this a single-candidate
+                   reply would never surface its translation. Hidden once the user
+                   edits manually (selectedIdx -1), since the译文 no longer matches. -->
+              <div
+                v-if="c.selectedIdx >= 0 && c.options[c.selectedIdx]?.text_zh"
+                class="reply-zh"
+              >
+                <span class="reply-zh-label">中文</span>
+                <span class="reply-zh-text">{{ c.options[c.selectedIdx].text_zh }}</span>
+              </div>
               <div class="reply-actions">
                 <span v-if="c.status === 'error'" class="error-inline">{{ c.errorMsg }}</span>
                 <button
@@ -1217,6 +1249,26 @@ function configSummary(g: AppGroup): string {
   line-height: 1.4;
   border-top: 1px dashed #edf2f7;
   padding-top: 4px;
+}
+.reply-zh {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #718096;
+  background: #f7fafc;
+  border: 1px solid #edf2f7;
+  border-radius: 6px;
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.reply-zh-label {
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #a0aec0;
+  vertical-align: top;
 }
 
 .empty-state {

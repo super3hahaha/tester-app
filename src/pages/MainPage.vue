@@ -183,6 +183,7 @@ function onSlidesSelect(files: SlidesSelection[]) {
         />
         <BatchReplyPage
           v-show="activeOption === 'review-batch-reply'"
+          :active-option="activeOption"
         />
         <SettingsPage
           v-show="activeOption === 'settings-general'"
