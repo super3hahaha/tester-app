@@ -628,6 +628,46 @@ fn extract_email_from_jwt(token: &str) -> Option<String> {
     None
 }
 
+/// Read the Claude Code credentials JSON. Claude Code stores it in
+/// `~/.claude/.credentials.json` on Linux/Windows, but on macOS it lives in the
+/// login Keychain (service "Claude Code-credentials") and the file is absent —
+/// so fall back to the Keychain when the file is missing.
+fn read_credentials_json() -> Option<serde_json::Value> {
+    if let Some(home) = dirs::home_dir() {
+        let cred = home.join(".claude").join(".credentials.json");
+        if let Ok(content) = std::fs::read_to_string(&cred) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                return Some(json);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("security")
+            .args([
+                "find-generic-password",
+                "-s",
+                "Claude Code-credentials",
+                "-w",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(content) = String::from_utf8(output.stdout) {
+                    if let Ok(json) =
+                        serde_json::from_str::<serde_json::Value>(content.trim())
+                    {
+                        return Some(json);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[tauri::command]
 pub fn get_claude_account() -> ClaudeAccountInfo {
     let cli_path = find_claude();
@@ -637,28 +677,23 @@ pub fn get_claude_account() -> ClaudeAccountInfo {
     let mut email: Option<String> = None;
     let mut subscription: Option<String> = None;
 
-    if let Some(home) = dirs::home_dir() {
-        let cred = home.join(".claude").join(".credentials.json");
-        if let Ok(content) = std::fs::read_to_string(&cred) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                let oauth = json.get("claudeAiOauth");
-                let token = oauth
-                    .and_then(|o| o.get("accessToken"))
-                    .and_then(|v| v.as_str());
-                logged_in = token.map_or(false, |t| !t.is_empty());
+    if let Some(json) = read_credentials_json() {
+        let oauth = json.get("claudeAiOauth");
+        let token = oauth
+            .and_then(|o| o.get("accessToken"))
+            .and_then(|v| v.as_str());
+        logged_in = token.map_or(false, |t| !t.is_empty());
 
-                email = oauth
-                    .and_then(|o| o.get("email"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .or_else(|| token.and_then(extract_email_from_jwt));
+        email = oauth
+            .and_then(|o| o.get("email"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| token.and_then(extract_email_from_jwt));
 
-                subscription = oauth
-                    .and_then(|o| o.get("subscriptionType"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-            }
-        }
+        subscription = oauth
+            .and_then(|o| o.get("subscriptionType"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
     }
 
     ClaudeAccountInfo {
@@ -671,9 +706,7 @@ pub fn get_claude_account() -> ClaudeAccountInfo {
 }
 
 pub(crate) fn load_claude_token() -> Option<String> {
-    let cred_path = dirs::home_dir()?.join(".claude").join(".credentials.json");
-    let content = std::fs::read_to_string(cred_path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let json = read_credentials_json()?;
     let token = json
         .get("claudeAiOauth")
         .and_then(|o| o.get("accessToken"))
