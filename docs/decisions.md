@@ -64,3 +64,12 @@
 - 仓内 vendored：`src-tauri/scripts/diff_testcases.py`（被 include_str! 编译进二进制）
 - `build.rs` 每次 build 前对比并覆盖；上游不存在时静默跳过（保证别人机器上可独立 build）。
 - 为什么不直接读上游路径：path 写死在二进制 = 只能在维护者机器上跑。
+
+## 批量回复「人工处理」标记按 review_id 持久化
+
+- **场景**：批量回复前人工先筛一遍，把**不适合走 AI 模板批量**的评论标出来。这些评论里有的确实不用回复，有的需要回复但模板不合适（用户会手动写或用 AI 单条回复）。
+- **关键语义**：标记**只排除**「匹配模板并填充」这一步，**不影响**手动填写、AI 单条回复、逐条提交、一键提交全部。所以叫「人工处理」而非「无需回复」——后者会让人以为评论被完全排除（最初就踩了这个坑：误把它从 `handleSubmitAll` 也排除并禁用了输入框）。
+- **实现**：`Candidate` 加 `manual` 字段；**只有** `buildSkillGroups` 跳过 `manual` 项，`handleSubmitAll` / `totalSubmittable` / 输入框 / 提交按钮一律不看 `manual`。
+- **为什么要持久化**：候选每次拉取都重建（`fetchOne` 里 `g.candidates = []`），而被标记的评论在 Play 上仍是未回复态、每次拉取都会重现。不落盘标记就会丢。
+- **只存 id 列表**：`localStorage` key `batch-reply-manual-ids-v1` 存 `review_id` 字符串数组，拉取时回填到 `candidate.manual`。不存整个 candidate —— 评论内容/译文每次重新拉，只有"用户的标记意图"需要跨拉取保留。
+- **取消标记即恢复**：取消后该评论重新参与模板匹配，标记从 Set 里删掉并落盘。

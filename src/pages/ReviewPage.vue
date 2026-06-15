@@ -393,7 +393,7 @@ function restoreTask(id: string) {
 }
 
 function enqueueGenerate(task: AiTask) {
-  if (!task.instruction.trim()) return;
+  // 回复方向可留空：留空时后端让 AI 据评论自行判断方向。
   if (task.status === "generating" || task.status === "queued") return;
   task.status = "queued";
   task.error = "";
@@ -700,7 +700,7 @@ async function handleSubmitReply(task: AiTask) {
             v-model="activeTask.instruction"
             class="ai-instruction"
             rows="2"
-            placeholder="例如：询问用户具体想兼容哪些格式，态度诚恳，表示会反馈给团队"
+            placeholder="可留空——留空则由 AI 根据评论自行判断方向。也可指定，例如：询问用户具体想兼容哪些格式，态度诚恳，表示会反馈给团队"
             :disabled="activeTask.status === 'generating' || activeTask.status === 'queued'"
           ></textarea>
         </div>
@@ -726,7 +726,6 @@ async function handleSubmitReply(task: AiTask) {
           <button
             v-else
             class="ai-gen-btn"
-            :disabled="!activeTask.instruction.trim()"
             @click="enqueueGenerate(activeTask)"
           >
             {{ activeTask.candidates.length ? "重新生成" : "生成 3 条候选" }}

@@ -65,6 +65,7 @@ interface Candidate {
   selectedIdx: number; // index into options that's currently filled; -1 = manually edited
   showMore: boolean; // whether the alternative-options panel is expanded
   unmatched: boolean; // true once matching ran and found no template (user handles manually)
+  manual: boolean; // 用户标记「人工处理」：只排除「匹配模板并填充」，仍可手动填写/提交
   status: CandidateStatus;
   errorMsg: string;
 }
@@ -86,6 +87,24 @@ interface AppGroup {
 const STORAGE_KEY = "batch-reply-multi-config-v3";
 const LEGACY_KEYS = ["batch-reply-multi-config-v2", "batch-reply-multi-config-v1"];
 const APPS_CACHE_KEY = "batch-reply-apps-cache-v1";
+// 「人工处理」标记按 review_id 持久化：人工先筛一遍、不走 AI 模板批量的评论（有的
+// 不用回复，有的需要但模板不合适 → 手动写 / 用 AI 单条回复）。这些评论在 Play 上仍
+// 是未回复态，每次拉取都会重现，不落盘标记就会丢。只存 id 列表，拉取时回填到
+// candidate.manual。注意：标记只排除「匹配模板并填充」，不影响手动填写/逐条/一键提交。
+const MANUAL_KEY = "batch-reply-manual-ids-v1";
+
+function loadManualIds(): Set<string> {
+  try {
+    const arr = JSON.parse(localStorage.getItem(MANUAL_KEY) || "[]");
+    return new Set(Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+const manualIds = loadManualIds();
+function saveManualIds() {
+  localStorage.setItem(MANUAL_KEY, JSON.stringify([...manualIds]));
+}
 
 function normalizeConfig(raw: any, resetPreset = false): AppConfig {
   const stored = raw?.datePreset;
@@ -334,6 +353,7 @@ async function fetchOne(g: AppGroup): Promise<void> {
         selectedIdx: -1,
         showMore: false,
         unmatched: false,
+        manual: manualIds.has(r.review_id),
         status: "pending" as CandidateStatus,
         errorMsg: "",
       }));
@@ -404,6 +424,7 @@ function buildSkillGroups(): {
     const reviews: any[] = [];
     for (const c of g.candidates) {
       if (c.status === "done") continue;
+      if (c.manual) continue; // 用户标记「人工处理」，不参与模板匹配填充
       if (c.options.length > 0 || c.unmatched) continue; // already matched/processed
       const r = c.review;
       reviews.push({
@@ -573,6 +594,7 @@ async function handleSubmitAll() {
   const tasks: Array<{ g: AppGroup; idx: number }> = [];
   for (const g of groups.value) {
     g.candidates.forEach((c, idx) => {
+      // 「人工处理」标记的评论照样能一键提交（只要用户填了内容）——标记只挡模板匹配。
       if (c.status !== "done" && c.replyText.trim()) {
         tasks.push({ g, idx });
       }
@@ -633,6 +655,21 @@ const totalDone = computed(() =>
     0
   )
 );
+
+const totalManual = computed(() =>
+  groups.value.reduce(
+    (sum, g) => sum + g.candidates.filter((c) => c.manual).length,
+    0
+  )
+);
+
+// 切换「人工处理」标记，并同步落盘（按 review_id）。
+function toggleManual(c: Candidate) {
+  c.manual = !c.manual;
+  if (c.manual) manualIds.add(c.review.review_id);
+  else manualIds.delete(c.review.review_id);
+  saveManualIds();
+}
 
 const usageText = computed(() => {
   const u = lastUsage.value;
@@ -733,7 +770,7 @@ function restoreAiDlgTask(id: string) {
 }
 
 function enqueueAiDlg(task: AiDlgTask) {
-  if (!task.instruction.trim()) return;
+  // 回复方向可留空：留空时后端让 AI 据评论自行判断方向。
   if (task.status === "generating" || task.status === "queued") return;
   task.status = "queued";
   task.error = "";
@@ -814,6 +851,7 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
         已启用 <b>{{ groups.length }}</b> 个应用
         <span v-if="fetchedAt"> · 共 {{ totalCandidates }} 条候选</span>
         <span v-if="totalDone > 0"> · 已提交 {{ totalDone }} 条</span>
+        <span v-if="totalManual > 0"> · 人工处理 {{ totalManual }} 条</span>
       </span>
       <span class="summary-text" v-else>未配置启用任何应用</span>
 
@@ -926,7 +964,7 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
             v-for="(c, idx) in g.candidates"
             :key="c.review.review_id"
             class="review-card"
-            :class="{ 'is-done': c.status === 'done', 'is-error': c.status === 'error' }"
+            :class="{ 'is-done': c.status === 'done', 'is-error': c.status === 'error', 'is-manual': c.manual }"
           >
             <div class="review-head">
               <span class="stars" :class="`stars-${c.review.star_rating}`">
@@ -941,6 +979,16 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
               >
                 🤖 AI 回复
               </button>
+              <button
+                class="manual-btn"
+                :class="{ active: c.manual }"
+                :disabled="c.status === 'done' || c.status === 'submitting' || bulkSubmitting"
+                :title="c.manual ? '取消后将重新参与「匹配模板并填充」' : '标记后不参与「匹配模板并填充」，仍可手动填写 / AI 单条回复 / 提交'"
+                @click="toggleManual(c)"
+              >
+                {{ c.manual ? "↩ 取消人工" : "✋ 人工处理" }}
+              </button>
+              <span v-if="c.manual" class="status-tag status-manual">✋ 人工处理</span>
               <span v-if="c.unmatched && c.status === 'pending'" class="unmatched-tag">
                 未匹配 · 需手动处理
               </span>
@@ -1092,7 +1140,7 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
             v-model="aiDlgActive.instruction"
             class="ai-instruction"
             rows="2"
-            placeholder="例如：询问用户具体想兼容哪些格式，态度诚恳，表示会反馈给团队"
+            placeholder="可留空——留空则由 AI 根据评论自行判断方向。也可指定，例如：询问用户具体想兼容哪些格式，态度诚恳，表示会反馈给团队"
             :disabled="aiDlgActive.status === 'generating' || aiDlgActive.status === 'queued'"
           ></textarea>
         </div>
@@ -1118,7 +1166,6 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
           <button
             v-else
             class="ai-gen-btn"
-            :disabled="!aiDlgActive.instruction.trim()"
             @click="enqueueAiDlg(aiDlgActive)"
           >
             {{ aiDlgActive.candidates.length ? "重新生成" : "生成 3 条候选" }}
@@ -1741,6 +1788,10 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
   border-color: #fbb6b6;
   background: #fffafa;
 }
+.review-card.is-manual {
+  border-left: 3px solid #a0aec0;
+  background: #fbfcfd;
+}
 .review-head {
   display: flex;
   align-items: center;
@@ -1894,6 +1945,32 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
   opacity: 0.4;
   cursor: not-allowed;
 }
+.manual-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  background: white;
+  color: #718096;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.manual-btn:hover:not(:disabled) {
+  background: #edf2f7;
+  color: #4a5568;
+}
+.manual-btn.active {
+  border-color: #a0aec0;
+  background: #4a5568;
+  color: white;
+}
+.manual-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.status-manual { background: #e2e8f0; color: #4a5568; }
 
 /* 单条 AI 回复弹窗 */
 .ai-overlay {
