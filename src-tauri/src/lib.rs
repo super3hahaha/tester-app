@@ -57,6 +57,7 @@ pub fn run() {
             reviews::reply_to_review,
             reply::run_reply_skill,
             reply::stop_reply,
+            reply::generate_single_reply,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

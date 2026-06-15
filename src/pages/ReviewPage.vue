@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { lastWorkdayBefore, toIso } from "../utils/batchReplyDates";
 
 interface PlayApp {
   package_name: string;
@@ -26,7 +28,8 @@ interface Review {
   developer_reply_ts: number | null;
 }
 
-type ReplyState = "ANY" | "ABSENT" | "REPLIED";
+// UPDATED = 开发者已回复，但用户在回复之后又更新了评论（回复可能已过时，需重回）
+type ReplyState = "ANY" | "ABSENT" | "REPLIED" | "UPDATED";
 
 interface PersistedConfig {
   packageName: string;
@@ -63,6 +66,11 @@ function daysAgoIso(n: number): string {
 
 const fromDate = ref(daysAgoIso(7));
 const toDate = ref(todayIso());
+
+// Play reviews API 只返回最近约 7 天的评论，日期选择器据此限制可选范围（给 1 天
+// 余量，API 边界本就不精确）。选更早的日期没意义——API 根本没返回那些评论。
+const minSelectableDate = computed(() => daysAgoIso(7));
+const maxSelectableDate = computed(() => todayIso());
 
 const reviews = ref<Review[]>([]);
 const loading = ref(false);
@@ -140,6 +148,12 @@ function setDatePreset(days: number) {
   toDate.value = todayIso();
 }
 
+// 自上一个工作日 → 今天（与批量回复页同口径：周一回到上周五、周末回到上周五）
+function setSinceLastWorkday() {
+  fromDate.value = toIso(lastWorkdayBefore());
+  toDate.value = todayIso();
+}
+
 async function handleFetch() {
   if (loading.value || !packageName.value.trim()) return;
   loading.value = true;
@@ -181,9 +195,15 @@ const toTs = computed(() => {
 
 const filtered = computed(() => {
   return reviews.value.filter((r) => {
-    if (!stars.value.includes(r.star_rating)) return false;
+    // 「回复后又更新」忽略星级筛选，显示全部星级（这种通常不在乎评分，要看全部）
+    if (replyState.value !== "UPDATED" && !stars.value.includes(r.star_rating)) return false;
     if (replyState.value === "ABSENT" && r.developer_reply) return false;
     if (replyState.value === "REPLIED" && !r.developer_reply) return false;
+    if (
+      replyState.value === "UPDATED" &&
+      !(r.developer_reply && r.developer_reply_ts && r.user_comment_ts > r.developer_reply_ts)
+    )
+      return false;
     if (r.user_comment_ts < fromTs.value) return false;
     if (r.user_comment_ts > toTs.value) return false;
     return true;
@@ -205,7 +225,8 @@ const playConsoleUrl = computed(() => {
   if (stars.value.length > 0) {
     params.set("starCounts", [...stars.value].sort().join(","));
   }
-  if (replyState.value !== "ANY") {
+  // Play Console 只认 ABSENT/REPLIED；UPDATED 是本地自定义筛选，跳转时退回不带该参数。
+  if (replyState.value === "ABSENT" || replyState.value === "REPLIED") {
     params.set("replyState", replyState.value);
   }
   if (fromDate.value) params.set("from", fromDate.value);
@@ -216,6 +237,24 @@ const playConsoleUrl = computed(() => {
 async function handleOpenInConsole() {
   try {
     await openUrl(playConsoleUrl.value);
+  } catch (e: any) {
+    errorMsg.value = String(e);
+  }
+}
+
+// 跳转到 Play Console 中的某条具体评论。developerId/appId 未填时退回到带筛选的
+// 评论列表页（playConsoleUrl）。URL 格式来自 Console 实测复制：
+//   .../user-feedback/review-details?reviewId=<uuid>&corpus=PUBLIC_REVIEWS
+// 我们的 review_id 就是该 UUID（与 androidpublisher reviews API 一致），可直接定位。
+function reviewConsoleUrl(r: Review): string {
+  if (!developerId.value || !appId.value) return playConsoleUrl.value;
+  const base = `https://play.google.com/console/u/0/developers/${developerId.value}/app/${appId.value}/user-feedback/review-details`;
+  return `${base}?reviewId=${encodeURIComponent(r.review_id)}&corpus=PUBLIC_REVIEWS`;
+}
+
+async function openReviewInConsole(r: Review) {
+  try {
+    await openUrl(reviewConsoleUrl(r));
   } catch (e: any) {
     errorMsg.value = String(e);
   }
@@ -243,6 +282,221 @@ const selectedAppLabel = computed(() => {
   const a = apps.value.find((x) => x.package_name === packageName.value);
   return a ? a.display_name : "";
 });
+
+// ── AI 回复 ──────────────────────────────────────────────────────────────
+interface GenCandidate {
+  style: string;
+  language: string;
+  text: string;
+  text_zh: string;
+  char_count: number;
+}
+interface GenReplyResult {
+  candidates: GenCandidate[];
+  usage: { input_tokens?: number; output_tokens?: number; total_cost_usd?: number } | null;
+}
+
+const LANG_OPTIONS: { value: string; label: string }[] = [
+  { value: "auto", label: "跟随评论语言" },
+  { value: "en", label: "英文 en" },
+  { value: "zh-CN", label: "中文 zh-CN" },
+  { value: "ru", label: "俄文 ru" },
+  { value: "pt", label: "葡萄牙文 pt" },
+  { value: "es", label: "西班牙文 es" },
+  { value: "fr", label: "法文 fr" },
+  { value: "de", label: "德文 de" },
+];
+
+// 多任务 AI 回复：每条评论一个独立任务，可同时存在多个（缩小成右下角悬浮条）。
+// 生成是「排队」的——后端一次只跑一个 generate_single_reply，前端用 genBusy +
+// processQueue 串行化，避免后端「已有任务在进行中」的拒绝。reply-log 路由到当前
+// 正在生成的那个任务。
+type AiStatus = "idle" | "queued" | "generating" | "done" | "error";
+interface AiTask {
+  id: string;
+  review: Review;
+  instruction: string;
+  language: string;
+  status: AiStatus;
+  submitting: boolean;
+  candidates: GenCandidate[];
+  selectedIdx: number; // -1 = 未选 / 已手动编辑
+  editText: string;
+  error: string;
+  log: string;
+  usage: GenReplyResult["usage"];
+}
+
+const aiTasks = ref<AiTask[]>([]);
+const activeTaskId = ref<string | null>(null); // 当前展开的任务；null = 全部缩小 / 无
+let taskSeq = 0;
+let genBusy = false; // 队列调度：是否有任务正在调用后端
+
+const activeTask = computed(
+  () => aiTasks.value.find((t) => t.id === activeTaskId.value) ?? null
+);
+// 非展开态的任务都以悬浮条形式堆在右下角（含进行中、已就绪、出错等）
+const minimizedTasks = computed(() =>
+  aiTasks.value.filter((t) => t.id !== activeTaskId.value)
+);
+
+let unlistenReplyLog: UnlistenFn | null = null;
+onMounted(async () => {
+  unlistenReplyLog = await listen<{ text: string; kind: string; done: boolean }>(
+    "reply-log",
+    (e) => {
+      const gen = aiTasks.value.find((t) => t.status === "generating");
+      if (gen) gen.log = e.payload.text;
+    }
+  );
+});
+onUnmounted(() => {
+  if (unlistenReplyLog) unlistenReplyLog();
+});
+
+function openAiDialog(r: Review) {
+  // 已为该评论建过任务就直接展开它（避免重复 / 丢状态）
+  const existing = aiTasks.value.find((t) => t.review.review_id === r.review_id);
+  if (existing) {
+    activeTaskId.value = existing.id;
+    return;
+  }
+  const task: AiTask = {
+    id: `ai-${++taskSeq}`,
+    review: r,
+    instruction: "",
+    language: "auto",
+    status: "idle",
+    submitting: false,
+    candidates: [],
+    selectedIdx: -1,
+    editText: "",
+    error: "",
+    log: "",
+    usage: null,
+  };
+  aiTasks.value.push(task);
+  activeTaskId.value = task.id;
+}
+
+function closeTask(task: AiTask) {
+  if (task.status === "generating" || task.submitting) return;
+  aiTasks.value = aiTasks.value.filter((t) => t.id !== task.id);
+  if (activeTaskId.value === task.id) activeTaskId.value = null;
+}
+
+function minimizeAiDialog() {
+  activeTaskId.value = null;
+}
+function restoreTask(id: string) {
+  activeTaskId.value = id;
+}
+
+function enqueueGenerate(task: AiTask) {
+  if (!task.instruction.trim()) return;
+  if (task.status === "generating" || task.status === "queued") return;
+  task.status = "queued";
+  task.error = "";
+  task.log = "";
+  task.candidates = [];
+  task.selectedIdx = -1;
+  processQueue();
+}
+
+async function processQueue() {
+  if (genBusy) return;
+  const next = aiTasks.value.find((t) => t.status === "queued");
+  if (!next) return;
+  genBusy = true;
+  next.status = "generating";
+  try {
+    const res = await invoke<GenReplyResult>("generate_single_reply", {
+      review: next.review,
+      product: selectedAppLabel.value || packageName.value,
+      packageName: packageName.value.trim(),
+      instruction: next.instruction.trim(),
+      language: next.language,
+      model: "claude-sonnet-4-6",
+    });
+    next.candidates = Array.isArray(res.candidates) ? res.candidates : [];
+    next.usage = res.usage;
+    if (next.candidates.length === 0) {
+      next.status = "error";
+      next.error = "未生成任何候选，请调整方向后重试。";
+    } else {
+      next.status = "done";
+    }
+  } catch (e: any) {
+    const msg = String(e);
+    next.error = msg === "CANCELLED" ? "已取消生成。" : msg;
+    next.status = "error";
+  } finally {
+    genBusy = false;
+    processQueue(); // 接着跑下一个排队中的任务
+  }
+}
+
+async function stopTask(task: AiTask) {
+  if (task.status === "queued") {
+    // 还没轮到它，直接出队即可，不碰后端
+    task.status = task.candidates.length ? "done" : "idle";
+    return;
+  }
+  if (task.status === "generating") {
+    try {
+      await invoke("stop_reply");
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function selectCandidate(task: AiTask, idx: number) {
+  task.selectedIdx = idx;
+  task.editText = task.candidates[idx]?.text ?? "";
+}
+
+function onEditInput(task: AiTask) {
+  // 手动改动后取消"选中"高亮，但保留文本
+  task.selectedIdx = -1;
+}
+
+function taskEditLen(task: AiTask | null): number {
+  return task ? [...task.editText].length : 0;
+}
+
+async function handleSubmitReply(task: AiTask) {
+  if (!task || task.submitting) return;
+  const text = task.editText.trim();
+  if (!text) {
+    task.error = "回复内容为空。";
+    return;
+  }
+  if ([...text].length > 350) {
+    task.error = `回复超过 350 字符（当前 ${[...text].length}），请精简后再提交。`;
+    return;
+  }
+  // 不用 window.confirm —— Tauri webview 里它常返回 false / 不弹，会卡住提交。
+  // 按钮文案本身就是「确认提交到 Play」，已是明确的确认动作。
+  task.submitting = true;
+  task.error = "";
+  try {
+    await invoke("reply_to_review", {
+      packageName: packageName.value.trim(),
+      reviewId: task.review.review_id,
+      replyText: text,
+    });
+    // 本地回填，UI 立即反映为「已回复」
+    task.review.developer_reply = text;
+    task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
+    aiTasks.value = aiTasks.value.filter((t) => t.id !== task.id);
+    if (activeTaskId.value === task.id) activeTaskId.value = null;
+  } catch (e: any) {
+    task.error = String(e);
+  } finally {
+    task.submitting = false;
+  }
+}
 </script>
 
 <template>
@@ -293,8 +547,10 @@ const selectedAppLabel = computed(() => {
             :key="s"
             class="star-btn"
             :class="{ active: stars.includes(s) }"
+            :disabled="replyState === 'UPDATED'"
             @click="toggleStar(s)"
           >{{ s }} ★</button>
+          <span v-if="replyState === 'UPDATED'" class="star-hint">已忽略 · 显示全部星级</span>
         </div>
       </div>
 
@@ -310,20 +566,24 @@ const selectedAppLabel = computed(() => {
           <label class="radio-item">
             <input type="radio" v-model="replyState" value="REPLIED" /> 已回复
           </label>
+          <label class="radio-item">
+            <input type="radio" v-model="replyState" value="UPDATED" /> 回复后又更新
+          </label>
         </div>
       </div>
 
       <div class="form-row">
         <label class="form-label">日期范围</label>
         <div class="date-row">
-          <input type="date" v-model="fromDate" class="date-input" />
+          <input type="date" v-model="fromDate" class="date-input" :min="minSelectableDate" :max="maxSelectableDate" />
           <span class="date-sep">→</span>
-          <input type="date" v-model="toDate" class="date-input" />
+          <input type="date" v-model="toDate" class="date-input" :min="minSelectableDate" :max="maxSelectableDate" />
           <div class="presets">
             <button class="preset-btn" @click="setDatePreset(1)">今天</button>
-            <button class="preset-btn" @click="setDatePreset(2)">近 2 天</button>
+            <button class="preset-btn" @click="setSinceLastWorkday">自上一个工作日</button>
             <button class="preset-btn" @click="setDatePreset(7)">近 7 天</button>
           </div>
+          <span class="date-hint">⚠️ 仅能在最近 7 天内筛选（API 只返回最近约 7 天的评论）</span>
         </div>
       </div>
       <div v-if="dateError" class="error">{{ dateError }}</div>
@@ -368,6 +628,9 @@ const selectedAppLabel = computed(() => {
           <span class="stars" :class="`stars-${r.star_rating}`">{{ starsDisplay(r.star_rating) }}</span>
           <span class="author">{{ r.author_name || "(匿名)" }}</span>
           <span class="ts">{{ formatTs(r.user_comment_ts) }}</span>
+          <button class="ai-btn" @click="openAiDialog(r)">
+            🤖 {{ r.developer_reply ? "AI 重新回复" : "AI 回复" }}
+          </button>
           <span v-if="r.developer_reply" class="reply-tag replied">已回复</span>
           <span v-else class="reply-tag absent">未回复</span>
         </div>
@@ -390,6 +653,11 @@ const selectedAppLabel = computed(() => {
           </div>
           <div class="reply-text">{{ r.developer_reply }}</div>
         </div>
+        <div class="review-actions">
+          <button class="web-btn" @click="openReviewInConsole(r)" title="在 Play Console 中打开该评论">
+            🌐 在网页中打开
+          </button>
+        </div>
       </article>
     </div>
 
@@ -399,6 +667,145 @@ const selectedAppLabel = computed(() => {
 
     <div v-else-if="!fetchedAt && !loading" class="empty-state">
       选择应用后点「拉取评论」—— API 一次会拉最近 7 天全部评论，之后切换筛选不需要重新请求。
+    </div>
+
+    <!-- AI 回复弹窗（展开中的任务） -->
+    <div v-if="activeTask" class="ai-overlay" @click.self="minimizeAiDialog">
+      <div class="ai-dialog">
+        <div class="ai-dialog-head">
+          <span class="ai-title">🤖 AI 生成回复</span>
+          <div class="ai-head-btns">
+            <button class="ai-min" title="缩小（生成继续）" @click="minimizeAiDialog">—</button>
+            <button
+              class="ai-close"
+              :disabled="activeTask.status === 'generating' || activeTask.submitting"
+              @click="closeTask(activeTask)"
+            >✕</button>
+          </div>
+        </div>
+
+        <div class="ai-review-quote">
+          <span class="stars" :class="`stars-${activeTask.review.star_rating}`">{{ starsDisplay(activeTask.review.star_rating) }}</span>
+          <div class="ai-quote-body">
+            <div class="ai-quote-text">{{ activeTask.review.text || "(无文字)" }}</div>
+            <div v-if="activeTask.review.original_text" class="ai-quote-orig">
+              <span class="ai-quote-orig-label">原文：</span>{{ activeTask.review.original_text }}
+            </div>
+          </div>
+        </div>
+
+        <div class="ai-input-row">
+          <label class="ai-label">回复方向</label>
+          <textarea
+            v-model="activeTask.instruction"
+            class="ai-instruction"
+            rows="2"
+            placeholder="例如：询问用户具体想兼容哪些格式，态度诚恳，表示会反馈给团队"
+            :disabled="activeTask.status === 'generating' || activeTask.status === 'queued'"
+          ></textarea>
+        </div>
+        <div class="ai-input-row">
+          <label class="ai-label">回复语言</label>
+          <select
+            v-model="activeTask.language"
+            class="ai-lang-select"
+            :disabled="activeTask.status === 'generating' || activeTask.status === 'queued'"
+          >
+            <option v-for="o in LANG_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+          </select>
+          <button
+            v-if="activeTask.status === 'generating'"
+            class="ai-stop-btn"
+            @click="stopTask(activeTask)"
+          >■ 停止</button>
+          <button
+            v-else-if="activeTask.status === 'queued'"
+            class="ai-stop-btn"
+            @click="stopTask(activeTask)"
+          >排队中…取消</button>
+          <button
+            v-else
+            class="ai-gen-btn"
+            :disabled="!activeTask.instruction.trim()"
+            @click="enqueueGenerate(activeTask)"
+          >
+            {{ activeTask.candidates.length ? "重新生成" : "生成 3 条候选" }}
+          </button>
+        </div>
+
+        <div v-if="activeTask.status === 'generating'" class="ai-generating">
+          <span class="ai-spinner">⏳</span> 生成中…
+          <span v-if="activeTask.log" class="ai-log">{{ activeTask.log }}</span>
+        </div>
+        <div v-else-if="activeTask.status === 'queued'" class="ai-generating">
+          <span class="ai-spinner">⏳</span> 排队等待中…（前面还有任务在生成）
+        </div>
+
+        <div v-if="activeTask.error" class="ai-error">{{ activeTask.error }}</div>
+
+        <div v-if="activeTask.candidates.length" class="ai-candidates">
+          <div
+            v-for="(c, idx) in activeTask.candidates"
+            :key="idx"
+            class="ai-cand"
+            :class="{ active: activeTask.selectedIdx === idx }"
+            @click="selectCandidate(activeTask, idx)"
+          >
+            <div class="ai-cand-head">
+              <span class="ai-cand-style">{{ c.style || `候选 ${idx + 1}` }}</span>
+              <span class="ai-cand-meta">{{ c.language }} · {{ c.char_count }} 字符</span>
+            </div>
+            <div class="ai-cand-text">{{ c.text }}</div>
+            <div v-if="c.text_zh" class="ai-cand-zh">{{ c.text_zh }}</div>
+          </div>
+        </div>
+
+        <div v-if="activeTask.selectedIdx >= 0 || activeTask.editText" class="ai-final">
+          <label class="ai-label">最终回复（可手动微调）</label>
+          <textarea
+            v-model="activeTask.editText"
+            class="ai-final-text"
+            rows="4"
+            @input="onEditInput(activeTask)"
+          ></textarea>
+          <div class="ai-final-foot">
+            <span class="ai-charcount" :class="{ over: taskEditLen(activeTask) > 350 }">{{ taskEditLen(activeTask) }} / 350</span>
+            <button
+              class="ai-submit-btn"
+              :disabled="activeTask.submitting || !activeTask.editText.trim() || taskEditLen(activeTask) > 350"
+              @click="handleSubmitReply(activeTask)"
+            >
+              {{ activeTask.submitting ? "提交中…" : "确认提交到 Play" }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="activeTask.usage" class="ai-usage">
+          💰 本次用量：输入 {{ activeTask.usage.input_tokens ?? 0 }} · 输出 {{ activeTask.usage.output_tokens ?? 0 }} tokens
+          <span v-if="activeTask.usage.total_cost_usd"> · 约 ${{ activeTask.usage.total_cost_usd.toFixed(4) }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 缩小后的右下角悬浮条：竖直堆叠，每个任务一条 -->
+    <div v-if="minimizedTasks.length" class="ai-mini-stack">
+      <div
+        v-for="t in minimizedTasks"
+        :key="t.id"
+        class="ai-mini-bar"
+        :class="{ 'is-error': t.status === 'error', 'is-done': t.status === 'done' }"
+        @click="restoreTask(t.id)"
+      >
+        <span class="ai-mini-text">
+          🤖 <span class="ai-mini-quote">{{ (t.review.text || t.review.original_text || "(无文字)").slice(0, 16) }}</span>
+          <template v-if="t.status === 'generating'">· 生成中…</template>
+          <template v-else-if="t.status === 'queued'">· 排队中</template>
+          <template v-else-if="t.status === 'error'">· 失败</template>
+          <template v-else-if="t.candidates.length">· {{ t.candidates.length }} 条已就绪</template>
+          <template v-else>· 待生成</template>
+        </span>
+        <button class="ai-mini-open" @click.stop="restoreTask(t.id)">展开</button>
+      </div>
     </div>
   </div>
 </template>
@@ -526,6 +933,16 @@ const selectedAppLabel = computed(() => {
   border-color: #f6ad55;
   color: white;
 }
+.star-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.star-hint {
+  align-self: center;
+  margin-left: 6px;
+  font-size: 11px;
+  color: #b7791f;
+}
 
 .radio-row {
   display: flex;
@@ -566,6 +983,12 @@ const selectedAppLabel = computed(() => {
   display: flex;
   gap: 4px;
   margin-left: 8px;
+}
+.date-hint {
+  width: 100%;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #b7791f;
 }
 .preset-btn {
   padding: 4px 10px;
@@ -693,7 +1116,6 @@ const selectedAppLabel = computed(() => {
   padding: 2px 8px;
   border-radius: 10px;
   font-weight: 600;
-  margin-left: auto;
 }
 .reply-tag.replied {
   background: #e6fffa;
@@ -776,5 +1198,380 @@ const selectedAppLabel = computed(() => {
 }
 .error.small {
   font-size: 11px;
+}
+
+/* ── AI 回复 ── */
+.review-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+}
+.ai-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  border: 1px solid #667eea;
+  border-radius: 6px;
+  background: white;
+  color: #667eea;
+  cursor: pointer;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.ai-btn:hover {
+  background: #667eea;
+  color: white;
+}
+.web-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #4a5568;
+  cursor: pointer;
+}
+.web-btn:hover {
+  background: #f5f5fa;
+  border-color: #cbd5e0;
+  color: #2d3748;
+}
+
+.ai-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+.ai-dialog {
+  background: white;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 640px;
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 18px 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+.ai-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.ai-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #2d3748;
+}
+.ai-head-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.ai-min,
+.ai-close {
+  border: none;
+  background: none;
+  color: #999;
+  cursor: pointer;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ai-min {
+  font-size: 18px;
+  line-height: 1;
+}
+.ai-close {
+  font-size: 16px;
+}
+.ai-min:hover,
+.ai-close:hover:not(:disabled) {
+  background: #edf2f7;
+  color: #4a5568;
+}
+.ai-close:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ai-mini-stack {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column-reverse; /* 新的堆在下方，旧的往上叠 */
+  gap: 8px;
+  align-items: flex-end;
+}
+.ai-mini-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-left: 3px solid #667eea;
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  max-width: 360px;
+}
+.ai-mini-bar.is-error {
+  border-left-color: #e53e3e;
+}
+.ai-mini-bar.is-done {
+  border-left-color: #38a169;
+}
+.ai-mini-bar:hover {
+  background: #f5f6ff;
+}
+.ai-mini-text {
+  font-size: 12px;
+  color: #4a5568;
+  white-space: nowrap;
+}
+.ai-mini-quote {
+  color: #1a202c;
+  font-weight: 500;
+}
+.ai-mini-open {
+  padding: 4px 12px;
+  font-size: 12px;
+  border: 1px solid #667eea;
+  border-radius: 6px;
+  background: white;
+  color: #667eea;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-mini-open:hover {
+  background: #667eea;
+  color: white;
+}
+.ai-review-quote {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  background: #fafafa;
+  border-left: 3px solid #ddd;
+  border-radius: 0 6px 6px 0;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+}
+.ai-quote-body {
+  flex: 1;
+  min-width: 0;
+}
+.ai-quote-text {
+  font-size: 13px;
+  color: #2d3748;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ai-quote-orig {
+  margin-top: 5px;
+  font-size: 12px;
+  color: #777;
+  line-height: 1.5;
+}
+.ai-quote-orig-label {
+  color: #999;
+  font-size: 11px;
+}
+.ai-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.ai-label {
+  width: 72px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a5568;
+  align-self: flex-start;
+  padding-top: 6px;
+}
+.ai-instruction,
+.ai-final-text {
+  flex: 1;
+  padding: 8px 10px;
+  font-size: 13px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  outline: none;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.5;
+}
+.ai-instruction:focus,
+.ai-final-text:focus {
+  border-color: #667eea;
+}
+.ai-lang-select {
+  padding: 6px 10px;
+  font-size: 13px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+}
+.ai-gen-btn {
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  border-radius: 6px;
+  background: #667eea;
+  color: white;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-gen-btn:hover:not(:disabled) {
+  background: #5a67d8;
+}
+.ai-gen-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+.ai-stop-btn {
+  padding: 6px 14px;
+  font-size: 13px;
+  border: 1px solid #e53e3e;
+  border-radius: 6px;
+  background: white;
+  color: #e53e3e;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-generating {
+  font-size: 13px;
+  color: #667eea;
+  margin: 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ai-log {
+  font-size: 11px;
+  color: #999;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ai-error {
+  color: #e53e3e;
+  font-size: 12px;
+  margin: 8px 0;
+  word-break: break-word;
+}
+.ai-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+.ai-cand {
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.ai-cand:hover {
+  border-color: #b3bcf5;
+}
+.ai-cand.active {
+  border-color: #667eea;
+  background: #f5f6ff;
+}
+.ai-cand-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.ai-cand-style {
+  font-size: 12px;
+  font-weight: 600;
+  color: #5a67d8;
+}
+.ai-cand-meta {
+  font-size: 11px;
+  color: #999;
+}
+.ai-cand-text {
+  font-size: 13px;
+  color: #2d3748;
+  line-height: 1.5;
+}
+.ai-cand-zh {
+  font-size: 12px;
+  color: #888;
+  line-height: 1.5;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed #eee;
+}
+.ai-final {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ai-final .ai-label {
+  width: auto;
+  padding-top: 0;
+}
+.ai-final-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ai-charcount {
+  font-size: 12px;
+  color: #888;
+}
+.ai-charcount.over {
+  color: #e53e3e;
+  font-weight: 600;
+}
+.ai-submit-btn {
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  border-radius: 6px;
+  background: #38a169;
+  color: white;
+  cursor: pointer;
+}
+.ai-submit-btn:hover:not(:disabled) {
+  background: #2f855a;
+}
+.ai-submit-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+.ai-usage {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #eee;
+  font-size: 11px;
+  color: #999;
 }
 </style>

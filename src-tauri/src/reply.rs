@@ -138,6 +138,293 @@ pub async fn stop_reply(state: State<'_, ReplyState>) -> Result<(), String> {
         .map_err(|e| format!("Failed to stop reply: {}", e))
 }
 
+/// Result of `generate_single_reply`: a JSON array of 3 style-varied candidates
+/// (each `{style, language, text, text_zh, char_count}`) plus token/cost usage.
+#[derive(Serialize)]
+pub struct GenReplyResult {
+    candidates: serde_json::Value,
+    usage: Option<serde_json::Value>,
+}
+
+fn rv_str<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    v.get(key).and_then(|x| x.as_str()).filter(|s| !s.trim().is_empty())
+}
+
+/// Build the prompt for single-review freeform generation. Concatenates the
+/// review context, the user's direction, and the review-reply skill's hard
+/// standards (≤350 chars / reply language / no fabrication / keep emoji+proper
+/// nouns / quote style), then asks for a JSON array of 3 style-varied candidates.
+fn build_gen_prompt(
+    review: &serde_json::Value,
+    product: &str,
+    package_name: &str,
+    instruction: &str,
+    language: &str,
+) -> String {
+    let star = review.get("star_rating").and_then(|v| v.as_i64()).unwrap_or(0);
+    let original = rv_str(review, "original_text").unwrap_or("(无)");
+    let zh = rv_str(review, "text").unwrap_or("(无)");
+    let rev_lang = rv_str(review, "reviewer_language").unwrap_or("(未知)");
+    let version = rv_str(review, "app_version_name").unwrap_or("(未知)");
+    let device = rv_str(review, "device").unwrap_or("(未知)");
+    let os = review
+        .get("android_os_version")
+        .and_then(|v| v.as_i64())
+        .map(|n| format!("Android {}", n))
+        .unwrap_or_else(|| "(未知)".to_string());
+
+    let lang_rule = if language.trim().is_empty() || language == "auto" {
+        "默认用「评论本身的语言」回复（看下面的「评论语言」，为空则据原文判断）。评论是英文就回英文，俄语就回俄语，不要因为中文译文而回中文。".to_string()
+    } else {
+        format!("本次所有候选统一用 `{}` 这个语言回复。", language)
+    };
+
+    format!(
+        r#"你是 Google Play 应用的开发者，正在以官方身份回复一条用户评论。
+根据下面的【评论信息】和【回复方向】，生成回复，并严格遵守【硬性标准】。
+不要使用任何工具，直接给出结果。
+
+【评论信息】
+- 应用：{product}（{package_name}）
+- 星级：{star}★
+- 用户原文（优先据此理解语义）：{original}
+- 中文译文（仅供你理解，不要据此判断语言）：{zh}
+- 评论语言：{rev_lang}
+- 应用版本：{version}
+- 设备 / 安卓版本：{device} / {os}
+
+【回复方向】
+{instruction}
+
+【硬性标准】
+1. 长度：这是 Google Play 公开回复，每条 ≤ 350 字符（含空格/标点/emoji），超了必须改短。
+2. 回复语言：{lang_rule}
+3. 不编造：邮箱、版本号、团队名、价格、未发布功能等不确定的事实绝不杜撰。
+4. 语气：礼貌、感谢反馈、对症回应「回复方向」，不要空话套话堆砌。
+5. 保留：emoji 原样保留；专有名词（应用名、Android、Google Play）不翻译。
+6. 引号：正文里尽量不用 ASCII 直引号；要引用 UI 选项名时英文用 '...'，中文用「」。
+7. 生成 3 条候选，风格/角度要有明显差异（例如：诚恳道歉式 / 务实引导式 / 简短友好式），
+   不要只是改几个词。每条都各自满足 1-6 全部约束。
+
+【输出格式】
+只输出一个 JSON 数组，3 个元素，不要任何额外文字、不要 markdown 代码块：
+[
+  {{ "style": "风格名", "language": "实际语言 ISO 码", "text": "回复正文", "text_zh": "中文预览", "char_count": 正文字符数 }},
+  ...共 3 条
+]"#,
+        product = product,
+        package_name = package_name,
+        star = star,
+        original = original,
+        zh = zh,
+        rev_lang = rev_lang,
+        version = version,
+        device = device,
+        os = os,
+        instruction = instruction,
+        lang_rule = lang_rule,
+    )
+}
+
+/// Extract a JSON array substring from possibly-fenced / prose-wrapped model
+/// output: slice from the first '[' to the last ']'.
+fn extract_json_array(s: &str) -> Option<&str> {
+    let start = s.find('[')?;
+    let end = s.rfind(']')?;
+    if end > start {
+        Some(&s[start..=end])
+    } else {
+        None
+    }
+}
+
+/// Generate 3 style-varied Google Play reply candidates for ONE review, driven by
+/// a freeform user instruction. Unlike `run_reply_skill` (template-match only),
+/// this calls `claude --print` directly with a self-contained prompt and parses
+/// the model's JSON array output — no skill, no file round-trip.
+#[tauri::command]
+pub async fn generate_single_reply(
+    review: serde_json::Value,
+    product: String,
+    package_name: String,
+    instruction: String,
+    language: String,
+    model: Option<String>,
+    app: AppHandle,
+    state: State<'_, ReplyState>,
+) -> Result<GenReplyResult, String> {
+    {
+        let mut running = state.running.lock().unwrap();
+        if *running {
+            return Err("已有回复生成任务在进行中。".into());
+        }
+        *running = true;
+    }
+    let result =
+        generate_single_reply_inner(review, product, package_name, instruction, language, model, app.clone())
+            .await;
+    *state.running.lock().unwrap() = false;
+    *state.child_pid.lock().unwrap() = None;
+    match &result {
+        Ok(_) => emit_log(&app, "候选生成完成。", "result", true),
+        Err(e) if e == "CANCELLED" => emit_log(&app, "已取消生成。", "info", true),
+        Err(e) => emit_log(&app, &format!("失败：{}", e), "error", true),
+    }
+    result
+}
+
+async fn generate_single_reply_inner(
+    review: serde_json::Value,
+    product: String,
+    package_name: String,
+    instruction: String,
+    language: String,
+    model: Option<String>,
+    app: AppHandle,
+) -> Result<GenReplyResult, String> {
+    if instruction.trim().is_empty() {
+        return Err("回复方向不能为空。".into());
+    }
+
+    let prompt = build_gen_prompt(&review, &product, &package_name, instruction.trim(), &language);
+
+    let claude_path = find_claude()
+        .ok_or("Claude CLI not found. Please install it: npm install -g @anthropic-ai/claude-code")?;
+
+    let mut args = vec![
+        "--print".to_string(),
+        "--verbose".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--permission-mode".to_string(),
+        "bypassPermissions".to_string(),
+    ];
+    if let Some(m) = model.as_ref().filter(|s| !s.is_empty()) {
+        args.push("--model".to_string());
+        args.push(m.clone());
+    }
+
+    emit_log(&app, "正在生成 3 条候选回复…", "info", false);
+
+    let mut cmd = Command::new(&claude_path);
+    cmd.args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(token) = load_claude_token() {
+        cmd.env("CLAUDE_CODE_SESSION_ACCESS_TOKEN", &token);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn claude: {}", e))?;
+    *app.state::<ReplyState>().child_pid.lock().unwrap() = child.id();
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(prompt.as_bytes()).await;
+        drop(stdin);
+    }
+
+    let stdout = child.stdout.take().ok_or("No stdout")?;
+    let stderr = child.stderr.take().ok_or("No stderr")?;
+
+    // Accumulate the model's final text. The `result` event carries the complete
+    // final message; we prefer it but fall back to concatenated assistant text.
+    let result_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let assistant_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let usage_cell: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let result_for_task = result_text.clone();
+    let assistant_for_task = assistant_text.clone();
+    let usage_for_task = usage_cell.clone();
+
+    let app_out = app.clone();
+    let stdout_task = tokio::spawn(async move {
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match event_type {
+                    "assistant" => {
+                        if let Some(content) = val
+                            .get("message")
+                            .and_then(|m| m.get("content"))
+                            .and_then(|c| c.as_array())
+                        {
+                            for block in content {
+                                if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                                    if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                        assistant_for_task.lock().unwrap().push_str(t);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "result" => {
+                        if let Some(r) = val.get("result").and_then(|v| v.as_str()) {
+                            *result_for_task.lock().unwrap() = r.to_string();
+                        }
+                        if let Some(usage) = val.get("usage").filter(|u| u.is_object()) {
+                            let mut u = usage.clone();
+                            if let (Some(obj), Some(cost)) =
+                                (u.as_object_mut(), val.get("total_cost_usd"))
+                            {
+                                obj.insert("total_cost_usd".to_string(), cost.clone());
+                            }
+                            *usage_for_task.lock().unwrap() = Some(u);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let _ = &app_out;
+    });
+
+    let app_err = app.clone();
+    let stderr_task = tokio::spawn(async move {
+        let reader = BufReader::new(stderr);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if !line.trim().is_empty() {
+                emit_log(&app_err, &line, "error", false);
+            }
+        }
+    });
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("Claude process error: {}", e))?;
+    stdout_task.await.ok();
+    stderr_task.await.ok();
+    *app.state::<ReplyState>().child_pid.lock().unwrap() = None;
+
+    if !*app.state::<ReplyState>().running.lock().unwrap() {
+        return Err("CANCELLED".into());
+    }
+    if !status.success() {
+        return Err(format!("Claude exited with code {}", status.code().unwrap_or(-1)));
+    }
+
+    let raw = {
+        let r = result_text.lock().unwrap().clone();
+        if r.trim().is_empty() {
+            assistant_text.lock().unwrap().clone()
+        } else {
+            r
+        }
+    };
+    let json_str = extract_json_array(&raw)
+        .ok_or_else(|| format!("模型输出里找不到 JSON 数组：{}", raw.chars().take(300).collect::<String>()))?;
+    let candidates: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| format!("候选不是合法 JSON 数组：{}", e))?;
+
+    let usage = usage_cell.lock().unwrap().take();
+    Ok(GenReplyResult { candidates, usage })
+}
+
 async fn run_reply_skill_inner(
     groups: serde_json::Value,
     target_language: String,

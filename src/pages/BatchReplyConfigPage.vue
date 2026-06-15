@@ -58,10 +58,9 @@ function normalizeConfig(raw: any, resetPreset = false): AppConfig {
     stored === "sinceLastWorkday" ||
     stored === "yesterday" ||
     stored === "today" ||
-    stored === "7d" ||
-    stored === "custom"
+    stored === "7d"
       ? stored
-      : null;
+      : null; // 已移除「自定义」：旧配置存的 custom 会落到 null → 规整为默认预设
   const preset: DatePreset = resetPreset || !validStored ? def.datePreset : validStored;
   return {
     enabled: !!raw.enabled,
@@ -191,12 +190,20 @@ function unselectAll() {
   for (const a of apps.value) ensureCfg(a.package_name).enabled = false;
 }
 
+// 内联两步确认（window.confirm 在 Tauri webview 不弹，会卡住操作）
+const resetArmed = ref(false);
+let resetTimer: number | undefined;
+
 // Wipe all saved batch-reply config (every version) back to factory state.
 function resetAll() {
-  const ok = window.confirm(
-    "确认清空所有应用的批量回复配置？\n所有勾选、日期、星级都会恢复默认（自上一个工作日 / 1★ 2★ / 未启用），此操作不可撤销。"
-  );
-  if (!ok) return;
+  if (!resetArmed.value) {
+    resetArmed.value = true;
+    if (resetTimer) clearTimeout(resetTimer);
+    resetTimer = window.setTimeout(() => { resetArmed.value = false; }, 4000);
+    return;
+  }
+  if (resetTimer) clearTimeout(resetTimer);
+  resetArmed.value = false;
   for (const k of [STORAGE_KEY, ...LEGACY_KEYS]) {
     localStorage.removeItem(k);
   }
@@ -265,16 +272,11 @@ function rangePreview(cfg: AppConfig): string {
 }
 
 function validateConfig(cfg: AppConfig): string {
-  if (cfg.datePreset === "custom") {
-    if (cfg.customFromDate && cfg.customToDate && cfg.customFromDate > cfg.customToDate) {
-      return "日期不合法";
-    }
-  }
   if (cfg.stars.length === 0) return "未选择星级";
   return "";
 }
 
-const PRESETS: DatePreset[] = ["sinceLastWorkday", "yesterday", "today", "7d", "custom"];
+const PRESETS: DatePreset[] = ["sinceLastWorkday", "yesterday", "today", "7d"];
 </script>
 
 <template>
@@ -299,8 +301,13 @@ const PRESETS: DatePreset[] = ["sinceLastWorkday", "yesterday", "today", "7d", "
       <button class="refresh-btn" @click="loadApps" :disabled="appsLoading" title="刷新应用列表">
         ↻ {{ appsLoading ? "加载中" : "刷新" }}
       </button>
-      <button class="reset-btn" @click="resetAll" title="清空所有保存的批量回复配置，恢复出厂默认">
-        清空配置
+      <button
+        class="reset-btn"
+        :class="{ armed: resetArmed }"
+        @click="resetAll"
+        :title="resetArmed ? '再点一次确认清空（4 秒内）' : '清空所有保存的批量回复配置，恢复出厂默认'"
+      >
+        {{ resetArmed ? "再点一次确认" : "清空配置" }}
       </button>
       <button class="save-btn" @click="handleSave" :disabled="!isDirty">
         {{ isDirty ? "保存配置" : "已保存" }}
@@ -359,26 +366,7 @@ const PRESETS: DatePreset[] = ["sinceLastWorkday", "yesterday", "today", "7d", "
           </div>
         </div>
 
-        <div v-if="ensureCfg(a.package_name).datePreset === 'custom'" class="cfg-row indent">
-          <label class="cfg-label"></label>
-          <input
-            type="date"
-            class="date-input"
-            :value="ensureCfg(a.package_name).customFromDate"
-            @input="ensureCfg(a.package_name).customFromDate = ($event.target as HTMLInputElement).value"
-            :disabled="!perApp[a.package_name]?.enabled"
-          />
-          <span class="date-sep">→</span>
-          <input
-            type="date"
-            class="date-input"
-            :value="ensureCfg(a.package_name).customToDate"
-            @input="ensureCfg(a.package_name).customToDate = ($event.target as HTMLInputElement).value"
-            :disabled="!perApp[a.package_name]?.enabled"
-          />
-        </div>
-
-        <div v-else class="cfg-row indent preview-row">
+        <div class="cfg-row indent preview-row">
           <label class="cfg-label"></label>
           <span class="preview-text">
             实际范围：<b>{{ rangePreview(ensureCfg(a.package_name)) }}</b>
@@ -493,6 +481,7 @@ const PRESETS: DatePreset[] = ["sinceLastWorkday", "yesterday", "today", "7d", "
   cursor: pointer;
 }
 .reset-btn:hover { background: #fff5f5; border-color: #f56565; }
+.reset-btn.armed { background: #e53e3e; border-color: #e53e3e; color: white; font-weight: 600; }
 
 .status-row {
   display: flex;
