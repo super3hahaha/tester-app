@@ -13,11 +13,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use calamine::{open_workbook_auto, Data, Reader};
 use serde::{Deserialize, Serialize};
 
+fn default_lang() -> String {
+    "en".to_string()
+}
+
+/// 把任意语言码规范成模板支持的源语言：en 或 zh-CN（其它一律退回 en）。
+fn norm_lang(lang: &str) -> String {
+    let l = lang.trim().to_lowercase();
+    if l.starts_with("zh") {
+        "zh-CN".to_string()
+    } else {
+        "en".to_string()
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Template {
     pub id: String,
     pub category: String,
     pub text: String,
+    // 源语言（en / zh-CN）。skill 命中后据此翻到回复语言（相同则直接用）。
+    // 旧数据无此字段 → 默认 en（存量 302 条都是英文源）。
+    #[serde(default = "default_lang")]
+    pub lang: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -216,6 +234,27 @@ pub fn list_template_products() -> Result<Vec<ProductInfo>, String> {
         .collect())
 }
 
+/// 按包名查它对应的模板产品（XFolder/MP3 Cutter/...）。返回 None 表示该应用没有
+/// 模板产品（package_map 里 product=null，如 ringwall/xplayer），调用方据此禁用收录。
+#[tauri::command]
+pub fn product_for_package(package_name: String) -> Result<Option<String>, String> {
+    ensure_templates_dir()?;
+    let pkgmap = read_package_map();
+    if let Some(m) = pkgmap
+        .as_ref()
+        .and_then(|v| v.get("mapping"))
+        .and_then(|v| v.as_object())
+    {
+        if let Some(entry) = m.get(&package_name) {
+            return Ok(entry
+                .get("product")
+                .and_then(|p| p.as_str())
+                .map(|s| s.to_string()));
+        }
+    }
+    Ok(None)
+}
+
 #[tauri::command]
 pub fn list_templates(product: String) -> Result<Vec<Template>, String> {
     ensure_templates_dir()?;
@@ -224,7 +263,12 @@ pub fn list_templates(product: String) -> Result<Vec<Template>, String> {
 }
 
 #[tauri::command]
-pub fn add_template(product: String, category: String, text: String) -> Result<String, String> {
+pub fn add_template(
+    product: String,
+    category: String,
+    text: String,
+    lang: Option<String>,
+) -> Result<String, String> {
     if text.trim().is_empty() {
         return Err("模板正文不能为空。".into());
     }
@@ -236,6 +280,7 @@ pub fn add_template(product: String, category: String, text: String) -> Result<S
         id: id.clone(),
         category: category.trim().to_string(),
         text: text.trim().to_string(),
+        lang: norm_lang(lang.as_deref().unwrap_or("en")),
     });
     write_templates_and_index(&mut f)?;
     Ok(id)
@@ -247,6 +292,7 @@ pub fn update_template(
     id: String,
     category: String,
     text: String,
+    lang: Option<String>,
 ) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("模板正文不能为空。".into());
@@ -257,6 +303,9 @@ pub fn update_template(
     let t = pt.templates.iter_mut().find(|t| t.id == id).ok_or("模板不存在")?;
     t.category = category.trim().to_string();
     t.text = text.trim().to_string();
+    if let Some(l) = lang {
+        t.lang = norm_lang(&l);
+    }
     write_templates_and_index(&mut f)?;
     Ok(())
 }
@@ -362,6 +411,7 @@ pub fn import_templates_xlsx(product: String, path: String) -> Result<ImportResu
                 current_category.clone()
             },
             text: english.to_string(),
+            lang: "en".to_string(), // xlsx B 列是英文源
         });
     }
 

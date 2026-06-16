@@ -14,6 +14,7 @@ interface Template {
   id: string;
   category: string;
   text: string;
+  lang: string; // 源语言 en / zh-CN
 }
 interface ImportResult {
   count: number;
@@ -33,6 +34,7 @@ const notice = ref("");
 // 新增表单
 const newCategory = ref("");
 const newText = ref("");
+const newLang = ref("en"); // 源语言，默认英文
 
 // 内联两步确认（Tauri webview 里 window.confirm 不弹，见 gotchas.md）
 const armedDeleteId = ref("");
@@ -106,6 +108,7 @@ async function addTemplate() {
       product: selectedProduct.value,
       category: newCategory.value,
       text: newText.value,
+      lang: newLang.value,
     });
     newCategory.value = "";
     newText.value = "";
@@ -124,6 +127,7 @@ async function saveTemplate(t: Template) {
       id: t.id,
       category: t.category,
       text: t.text,
+      lang: t.lang,
     });
     flash(`已保存 ${t.id}`);
   } catch (e: any) {
@@ -280,6 +284,10 @@ watch(
           class="add-category"
           placeholder="类别（如：要五星 / 广告太多；可留空）"
         />
+        <select v-model="newLang" class="add-lang" title="模板源语言">
+          <option value="en">英文 en</option>
+          <option value="zh-CN">中文 zh-CN</option>
+        </select>
         <button class="add-btn" :disabled="!newText.trim()" @click="addTemplate">
           + 新增模板
         </button>
@@ -303,6 +311,10 @@ watch(
         <div class="tpl-head">
           <span class="tpl-id">{{ t.id }}</span>
           <input v-model="t.category" class="tpl-category" placeholder="类别" />
+          <select v-model="t.lang" class="tpl-lang" title="源语言">
+            <option value="en">en</option>
+            <option value="zh-CN">zh-CN</option>
+          </select>
           <span class="tpl-len">{{ t.text.length }} 字符</span>
           <div class="tpl-head-spacer"></div>
           <button class="save-btn" @click="saveTemplate(t)">保存</button>
@@ -459,6 +471,15 @@ watch(
   border: 1px solid #e2e8f0;
   border-radius: 6px;
   font-size: 13px;
+}
+.add-lang,
+.tpl-lang {
+  padding: 5px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 12px;
+  background: white;
+  flex-shrink: 0;
 }
 .add-btn {
   padding: 6px 16px;

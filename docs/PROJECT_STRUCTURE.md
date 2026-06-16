@@ -50,7 +50,7 @@ tester-app/
 │   │   ├── reviews.rs           # Google Play Developer API：评论拉取（list_play_reviews）/ 应用列表（list_play_apps）/ 评论回复（reply_to_review）
 │   │   ├── reply.rs             # 批量回复生成：写 pending JSON → 跑 claude /review-reply（--add-dir 模板目录 + prompt 传路径）→ 读回 candidates.json（reply-log 事件流）
 │   │   ├── skill_sync.rs        # Skill 热更新：从 GitHub 拉取 zipball 同步到 ~/.claude/skills/，启动时静默 + Settings 手动
-│   │   └── templates.rs         # 模板管理：~/.tester-app/templates/ 的增删改 + xlsx 导入；写全文同时重建瘦身 index；skill 从此目录读
+│   │   └── templates.rs         # 模板管理：~/.tester-app/templates/ 的增删改 + xlsx 导入；模板含 lang（en/zh-CN 双源）；写全文同时重建瘦身 index；skill 从此目录读
 │   ├── scripts/                 # 内嵌资源（编译期 include_str!）
 │   │   └── diff_testcases.py    # 来自 testcase-eval-visual-report skill 的纯 Python diff 脚本
 │   ├── capabilities/            # Tauri 权限能力
@@ -90,7 +90,7 @@ tester-app/
 │   ├── pending-reviews-{ts}.json            # 写给 review-reply skill 的输入（target_language + channel + groups[]）
 │   └── pending-reviews-{ts}.candidates.json # skill 产出的候选回复，前端读回回填
 ├── templates/                   # 回复模板（模板管理页维护）；review-reply skill 运行时从这里读
-│   ├── templates.json           # 全文权威源 {version, products:{产品:{templates:[{id,category,text}]}}}
+│   ├── templates.json           # 全文权威源 {version, products:{产品:{templates:[{id,category,text,lang}]}}}（lang=en/zh-CN 源语言，缺省 en）
 │   ├── index.json               # 瘦身索引（id+category），写 templates 时由后端自动重建；skill 匹配只读它
 │   └── package_map.json         # packageName→产品（从 skill data 拷的种子；第一期 app 只读不编辑）
 ├── feedback_pending/            # 反馈 zip 落盘暂存；上传成功移走，上传失败留存等待重试
@@ -118,9 +118,9 @@ tester-app/
 | Slides 页 | `SlidesPage.vue` | 三栏布局：文件列表 + 大图预览 + 缩略图条，支持多页勾选 |
 | 生成页 | `GeneratePage.vue` | 展示选择摘要 → 一键导出并调用 Claude → 终端风格日志 → 多轮对话输入 |
 | 对比页 | `ComparePage.vue` | 双栏选择（AI 原始 vs 人工修改）→ 导出 HTML → 调 Claude skill 生成 diff → "在 Chrome 中打开"按钮 |
-| 评论页 | `ReviewPage.vue` | Play Console 评论：调 `list_play_reviews` 拉最近 7 天，本地按星级/回复状态/日期筛选；附 "在 Play Console 打开"按钮兜底。每张评论卡片带「🤖 AI 回复」按钮 → 弹窗输入「回复方向」(一句指令) + 选回复语言(默认跟随评论语言) → 调 `generate_single_reply` 现场生成 **3 条不同风格**候选 → 点选/手动微调(实时 350 字符计数) → confirm 后调 `reply_to_review` 提交并本地回填为「已回复」。**与批量回复不同**：这里是 freeform 现生成(走 `claude --print` 直出 JSON 数组)，不走模板匹配 |
+| 评论页 | `ReviewPage.vue` | Play Console 评论：调 `list_play_reviews` 拉最近 7 天，本地按星级/回复状态/日期筛选；附 "在 Play Console 打开"按钮兜底。每张评论卡片带「🤖 AI 回复」按钮 → 弹窗输入「回复方向」(一句指令) + 选回复语言(默认跟随评论语言) → 调 `generate_single_reply` 现场生成 **3 条不同风格**候选 → 点选/手动微调(实时 350 字符计数) → confirm 后调 `reply_to_review` 提交并本地回填为「已回复」。**与批量回复不同**：这里是 freeform 现生成(走 `claude --print` 直出 JSON 数组)，不走模板匹配。每条候选可点「➕ 添加模板」把好回复收录进该应用对应产品的模板库（任意语言都可收：英文存英文模板，其它语言用候选中文预览 text_zh 存中文模板；收录时内联填类别 → `product_for_package` 解析产品 → `add_template` 带 lang） |
 | 批量回复 · 配置 | `BatchReplyConfigPage.vue` | 多 app 卡片：每张卡片独立**日期预设**（自上一个工作日 / 昨天 / 今天 / 近 7 天 / 自定义）+ 星级；非自定义预设下显示「实际范围」预览（每分钟刷新一次，跨午夜自动重算）；顶部「全选/全不选/刷新/清空配置/保存」工具栏（清空配置 = 删除所有版本 localStorage key 并恢复出厂默认，带 confirm）；显式保存到 localStorage `batch-reply-multi-config-v3`（从旧 key v2/v1 迁移时**强制把日期预设重置为默认**，因为早期 v2 会把"自定义"这个迁移产物写进每个 app；读当前 v3 则保留用户显式选择）；应用列表缓存在 `batch-reply-apps-cache-v1` 让冷启动秒回 |
-| 批量回复 · 执行 | `BatchReplyPage.vue` | 进入时从 localStorage 读多 app 配置 → 「拉取候选评论」**在拉取时**调 `computeRange()` 把预设解析为绝对日期（所以配置一次永远新鲜）→ 并行调每个启用 app 的 `list_play_reviews`（不互相阻塞）→ 按 app 分组折叠展示（默认展开，组头显示 app 名 / 包名 / 当次实际日期范围 + 预设名 / 候选数）→ **「🔎 匹配模板并填充」调 `run_reply_skill`**（顶部下拉选回复语言默认 `auto`，模型固定 Sonnet）→ 命中模板的评论预填翻译好的模板正文（+中文预览）；未匹配的标「未匹配·需手动处理」留空手填 → 逐条提交直接发，「一键提交全部」弹 confirm 后跨 app 串行 + 200ms 间隔调 `reply_to_review`。每条评论可点「✋ 人工处理」手动标记（按 review_id 持久化到 localStorage `batch-reply-manual-ids-v1`，跨拉取/重启保留）——标记后**只**从「匹配模板并填充」里排除，仍可手填 / AI 单条回复 / 逐条或一键提交。每张候选卡片另有「🤖 AI 回复」按钮 → 弹单条生成弹窗（回复方向**可留空**，留空时后端让模型据评论自行判断方向〔含「无法更新」等常见问题的标准排查引导〕；+ 语言 → `generate_single_reply` 出 3 条风格各异候选）→「选用并填入」把文案灌进该卡片回复框（标记手动、清掉未匹配标），再走原有逐条/一键提交。**单条弹窗是多任务的**：可同时开多条（缩小成右下角竖直堆叠的悬浮条），生成走前端队列排队（后端 `ReplyState` 一次只跑一个），`reply-log` 路由到当前正在生成的那个任务、不污染批量匹配日志。与「匹配模板」是两条独立路径：模板匹配=批量命中翻译，AI 回复=单条 freeform 现生成 |
+| 批量回复 · 执行 | `BatchReplyPage.vue` | 进入时从 localStorage 读多 app 配置 → 「拉取候选评论」**在拉取时**调 `computeRange()` 把预设解析为绝对日期（所以配置一次永远新鲜）→ 并行调每个启用 app 的 `list_play_reviews`（不互相阻塞）→ 按 app 分组折叠展示（默认展开，组头显示 app 名 / 包名 / 当次实际日期范围 + 预设名 / 候选数）→ **「🔎 匹配模板并填充」调 `run_reply_skill`**（顶部下拉选回复语言默认 `auto`，模型固定 Sonnet）→ 命中模板的评论预填翻译好的模板正文（+中文预览）；未匹配的标「未匹配·需手动处理」留空手填 → 逐条提交直接发，「一键提交全部」弹 confirm 后跨 app 串行 + 200ms 间隔调 `reply_to_review`。每条评论可点「✋ 人工处理」手动标记（按 review_id 持久化到 localStorage `batch-reply-manual-ids-v1`，跨拉取/重启保留）——标记后**只**从「匹配模板并填充」里排除，仍可手填 / AI 单条回复 / 逐条或一键提交。每张候选卡片另有「🤖 AI 回复」按钮 → 弹单条生成弹窗（回复方向**可留空**，留空时后端让模型据评论自行判断方向〔含「无法更新」等常见问题的标准排查引导〕；+ 语言 → `generate_single_reply` 出 3 条风格各异候选）→「选用并填入」把文案灌进该卡片回复框（标记手动、清掉未匹配标），再走原有逐条/一键提交。**单条弹窗是多任务的**：可同时开多条（缩小成右下角竖直堆叠的悬浮条），生成走前端队列排队（后端 `ReplyState` 一次只跑一个），`reply-log` 路由到当前正在生成的那个任务、不污染批量匹配日志。每条候选也有「➕ 添加模板」收录入口（任意语言：英文存英文、其它用中文预览存中文、填类别 → `product_for_package` + `add_template` 带 lang）。与「匹配模板」是两条独立路径：模板匹配=批量命中翻译，AI 回复=单条 freeform 现生成 |
 | 模板管理 | `TemplateManagerPage.vue` | 挂在 Review 工作区。按产品 tab 切换（显示条数 + 关联 app），列出该产品模板，每条可改 category/正文 → `update_template`，删除走**内联两步确认**；顶部「+ 新增模板」→ `add_template`（后端按产品前缀自动生成 id）；「📥 从 xlsx 导入」用系统文件选择器（`@tauri-apps/plugin-dialog`）选 xlsx → 内联确认（覆盖该产品）→ `import_templates_xlsx`。所有写操作落 `~/.tester-app/templates/`，skill 直接读 |
 | 设置页 | `SettingsPage.vue` | 缓存大小查看与清理 |
 
@@ -138,7 +138,7 @@ tester-app/
 | 生成-上传 manifest | `manifest.rs` | `write_generate_manifest` command：把"生成的 xlsx 上传到 Drive 后的 drive_id"和"用来生成它的源文件（CSV + PPTX + 页码）"绑定写盘；compare 页反馈时按 ai_drive_id 反查 |
 | 反馈上传 | `feedback.rs` | `send_feedback` command：反查 manifest → 打包 zip（ai.html + human.html + report.html + 源文件 + meta.json）→ Telegram sendDocument multipart 上传 → 成功移到 `feedback_sent/`，失败留 `feedback_pending/`；`retry_pending_feedback` 重试；`is_feedback_configured` 探测是否配置好 token |
 | Skill 热更新 | `skill_sync.rs` | 内置 skill 列表（owner/repo）；用 GitHub Releases API（`/releases/latest`）拿 tag_name 做版本判断；`check_skill_updates` 比对本地 `.tester-app-version` 与远程 tag；`sync_all_skills` / `sync_skill` 下载 release zipball → 备份旧版 → 解压覆盖到 `~/.claude/skills/{name}/` → 写新版本；`get_skill_local_version` 给前端取版本号写进反馈 manifest |
-| 模板管理 | `templates.rs` | 6 个 command（无 State，纯文件读写）：`list_template_products`（产品+条数+关联 app）/ `list_templates` / `add_template`（按产品前缀 xfolder/mp3cutter/video2mp3 自动生成 id）/ `update_template` / `delete_template` / `import_templates_xlsx`（calamine 读 xlsx，复刻 build 解析口径：A 列类别继承、B 列英文、空 B 跳过，覆盖该产品）。**唯一写出口** `write_templates_and_index` 写 templates.json 同时由全文派生重建 index.json，二者永不漂移。`ensure_templates_dir` 首次从 `~/.claude/skills/review-reply/data/` 拷种子。`reply.rs` 复用其 `templates_dir()` / `ensure_templates_dir()` |
+| 模板管理 | `templates.rs` | 7 个 command（无 State，纯文件读写）：`list_template_products`（产品+条数+关联 app）/ `product_for_package`（包名→产品，给「添加模板」收录用，null=该应用无模板产品）/ `list_templates` / `add_template`（按产品前缀 xfolder/mp3cutter/video2mp3 自动生成 id）/ `update_template` / `delete_template` / `import_templates_xlsx`（calamine 读 xlsx，复刻 build 解析口径：A 列类别继承、B 列英文、空 B 跳过，覆盖该产品，导入项 lang=en）。模板含 `lang`（en/zh-CN）**中英双源**：add/update 带 lang，skill 命中后据 lang 翻到回复语言（相同直接用）；存量无 lang 字段的按 en。**唯一写出口** `write_templates_and_index` 写 templates.json 同时由全文派生重建 index.json，二者永不漂移。`ensure_templates_dir` 首次从 `~/.claude/skills/review-reply/data/` 拷种子。`reply.rs` 复用其 `templates_dir()` / `ensure_templates_dir()` |
 
 # 依赖库
 

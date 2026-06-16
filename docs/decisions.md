@@ -83,3 +83,11 @@
 - **种子迁移**：首次（无 `~/.tester-app/templates/templates.json`）从 skill 已同步的 `~/.claude/skills/review-reply/data/` 拷三个 json；之后以 app 目录为准。仓库内 xlsx/json/build 脚本降级为历史/初始种子。
 - **package_map 第一期不在 app 管**：包名↔产品映射沿用现有（拷过来只读），skill 仍读它；产品/映射的增改留作后续。
 - **xlsx 仍可批量导入**：保留「从 xlsx 导入」入口（calamine 读，复刻原解析口径），覆盖式灌某产品；日常增删改则在 app 里直接做。
+
+## 模板库改为中英双源（模板加 lang 字段）
+
+- **背景**：原本模板库约定纯英文源，skill 命中后翻到目标语言；但运营有时想收录一条好的中文回复、或直接写中文模板。
+- **可行性关键**：匹配阶段只读索引（id+category，category 本就是中文），**与模板正文语言无关**——所以换/混源语言不影响匹配，只影响"命中后取全文翻译"那一步。
+- **选择**：每条模板加 `lang` 字段（`en` / `zh-CN`，serde 缺省 `en`，存量 302 条自动按 en）。skill 命中后据 `lang` 把模板正文翻到回复语言（回复语言==lang 直接用原文）。
+- **「添加模板」任意语言都可收**：AI 候选总带中文预览 `text_zh`，所以英文候选存英文模板（lang=en）、其它语言（含中文）用 `text_zh` 存中文模板（lang=zh-CN）。按钮不再按语言禁用。
+- **不影响**：索引（不含 lang，匹配不需要）、category、模板管理 CRUD。skill 取全文命令改成同时取 `lang`+`text`。

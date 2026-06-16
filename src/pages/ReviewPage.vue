@@ -340,6 +340,61 @@ const minimizedTasks = computed(() =>
   aiTasks.value.filter((t) => t.id !== activeTaskId.value)
 );
 
+// 「添加模板」：把觉得好的 AI 候选收录进该应用对应产品的模板库。
+// 仅英文候选可收（模板库以英文为源）；收录时内联填类别。
+const addTplIdx = ref(-1); // 当前展开收录面板的候选 index，-1 = 关闭
+const addTplCategory = ref("");
+const addTplBusy = ref(false);
+const addTplError = ref("");
+const addTplFlash = ref("");
+
+// 模板库中/英双源：英文候选直接存英文模板；其它语言用候选的中文预览(text_zh)
+// 存成中文模板。skill 命中后再把模板按 lang 翻到目标回复语言。任意候选都能收录。
+function tplPayload(c: GenCandidate): { text: string; lang: string } {
+  const l = (c.language || "").toLowerCase();
+  if (l.startsWith("en")) return { text: c.text, lang: "en" };
+  if (l.startsWith("zh")) return { text: c.text, lang: "zh-CN" };
+  // 其它语言（ru/pt/...）→ 用中文预览存中文模板，缺中文预览才退回原文
+  return { text: c.text_zh && c.text_zh.trim() ? c.text_zh : c.text, lang: "zh-CN" };
+}
+function startAddTpl(idx: number) {
+  addTplIdx.value = idx;
+  addTplCategory.value = "";
+  addTplError.value = "";
+}
+function cancelAddTpl() {
+  addTplIdx.value = -1;
+  addTplError.value = "";
+}
+async function confirmAddTpl(c: GenCandidate) {
+  if (addTplBusy.value) return;
+  addTplBusy.value = true;
+  addTplError.value = "";
+  try {
+    const product = await invoke<string | null>("product_for_package", {
+      packageName: packageName.value.trim(),
+    });
+    if (!product) {
+      addTplError.value = "该应用没有对应的模板产品，无法收录。";
+      return;
+    }
+    const { text, lang } = tplPayload(c);
+    await invoke<string>("add_template", {
+      product,
+      category: addTplCategory.value,
+      text,
+      lang,
+    });
+    addTplIdx.value = -1;
+    addTplFlash.value = `已收录到「${product}」模板库（${lang === "en" ? "英文" : "中文"}模板）`;
+    window.setTimeout(() => (addTplFlash.value = ""), 2500);
+  } catch (e: any) {
+    addTplError.value = String(e);
+  } finally {
+    addTplBusy.value = false;
+  }
+}
+
 let unlistenReplyLog: UnlistenFn | null = null;
 onMounted(async () => {
   unlistenReplyLog = await listen<{ text: string; kind: string; done: boolean }>(
@@ -395,6 +450,7 @@ function restoreTask(id: string) {
 function enqueueGenerate(task: AiTask) {
   // 回复方向可留空：留空时后端让 AI 据评论自行判断方向。
   if (task.status === "generating" || task.status === "queued") return;
+  addTplIdx.value = -1; // 重新生成后候选会变，关掉收录面板
   task.status = "queued";
   task.error = "";
   task.log = "";
@@ -742,6 +798,7 @@ async function handleSubmitReply(task: AiTask) {
 
         <div v-if="activeTask.error" class="ai-error">{{ activeTask.error }}</div>
 
+        <div v-if="addTplFlash" class="ai-tpl-flash">✓ {{ addTplFlash }}</div>
         <div v-if="activeTask.candidates.length" class="ai-candidates">
           <div
             v-for="(c, idx) in activeTask.candidates"
@@ -753,9 +810,32 @@ async function handleSubmitReply(task: AiTask) {
             <div class="ai-cand-head">
               <span class="ai-cand-style">{{ c.style || `候选 ${idx + 1}` }}</span>
               <span class="ai-cand-meta">{{ c.language }} · {{ c.char_count }} 字符</span>
+              <div class="ai-cand-head-spacer"></div>
+              <button
+                class="ai-addtpl-btn"
+                title="收录为模板（英文候选存英文模板，其它语言用中文预览存中文模板）"
+                @click.stop="startAddTpl(idx)"
+              >
+                ➕ 添加模板
+              </button>
             </div>
             <div class="ai-cand-text">{{ c.text }}</div>
             <div v-if="c.text_zh" class="ai-cand-zh">{{ c.text_zh }}</div>
+
+            <!-- 收录面板（内联，填类别） -->
+            <div v-if="addTplIdx === idx" class="ai-addtpl-panel" @click.stop>
+              <input
+                v-model="addTplCategory"
+                class="ai-addtpl-category"
+                placeholder="类别（如：要五星 / 无法更新；可留空=未分类）"
+                @keyup.enter="confirmAddTpl(c)"
+              />
+              <button class="ai-addtpl-ok" :disabled="addTplBusy" @click="confirmAddTpl(c)">
+                {{ addTplBusy ? "收录中…" : "收录" }}
+              </button>
+              <button class="ai-addtpl-cancel" :disabled="addTplBusy" @click="cancelAddTpl">取消</button>
+              <span v-if="addTplError" class="ai-addtpl-err">{{ addTplError }}</span>
+            </div>
           </div>
         </div>
 
@@ -1512,6 +1592,76 @@ async function handleSubmitReply(task: AiTask) {
 .ai-cand-meta {
   font-size: 11px;
   color: #999;
+}
+.ai-cand-head-spacer {
+  flex: 1;
+}
+.ai-addtpl-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  background: white;
+  color: #5a67d8;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-addtpl-btn:hover:not(:disabled) {
+  background: #eef0ff;
+}
+.ai-addtpl-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ai-tpl-flash {
+  font-size: 12px;
+  color: #22543d;
+  background: #c6f6d5;
+  border-radius: 6px;
+  padding: 5px 10px;
+  margin-bottom: 8px;
+}
+.ai-addtpl-panel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.ai-addtpl-category {
+  flex: 1;
+  min-width: 160px;
+  padding: 4px 8px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.ai-addtpl-ok,
+.ai-addtpl-cancel {
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-addtpl-ok {
+  border: 1px solid #667eea;
+  background: #667eea;
+  color: white;
+}
+.ai-addtpl-ok:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ai-addtpl-cancel {
+  border: 1px solid #e2e8f0;
+  background: white;
+  color: #718096;
+}
+.ai-addtpl-err {
+  font-size: 11px;
+  color: #c53030;
+  width: 100%;
 }
 .ai-cand-text {
   font-size: 13px;

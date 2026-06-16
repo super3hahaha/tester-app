@@ -61,6 +61,7 @@ pub fn run() {
             reply::stop_reply,
             reply::generate_single_reply,
             templates::list_template_products,
+            templates::product_for_package,
             templates::list_templates,
             templates::add_template,
             templates::update_template,
