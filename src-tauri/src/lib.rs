@@ -7,6 +7,7 @@ mod reply;
 mod reviews;
 mod sheets;
 mod skill_sync;
+mod templates;
 
 use auth::AuthState;
 use claude::ClaudeState;
@@ -17,6 +18,7 @@ use reply::ReplyState;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AuthState::new())
         .manage(ClaudeState::new())
         .manage(CompareState::new())
@@ -58,6 +60,12 @@ pub fn run() {
             reply::run_reply_skill,
             reply::stop_reply,
             reply::generate_single_reply,
+            templates::list_template_products,
+            templates::list_templates,
+            templates::add_template,
+            templates::update_template,
+            templates::delete_template,
+            templates::import_templates_xlsx,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

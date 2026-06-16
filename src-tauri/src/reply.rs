@@ -497,6 +497,11 @@ async fn run_reply_skill_inner(
     let input_path_str = input_path.to_string_lossy().to_string();
     let dir_str = dir.to_string_lossy().to_string();
 
+    // 模板数据目录（app 管理）：skill 从这里读 index.json / templates.json /
+    // package_map.json。--add-dir 授权访问，路径也写进 prompt 显式告诉 skill。
+    let templates_dir = crate::templates::ensure_templates_dir()?;
+    let templates_dir_str = templates_dir.to_string_lossy().to_string();
+
     let mut args = vec![
         "--print".to_string(),
         "--verbose".to_string(),
@@ -506,13 +511,18 @@ async fn run_reply_skill_inner(
         "bypassPermissions".to_string(),
         "--add-dir".to_string(),
         dir_str.clone(),
+        "--add-dir".to_string(),
+        templates_dir_str.clone(),
     ];
     if let Some(m) = model.as_ref().filter(|s| !s.is_empty()) {
         args.push("--model".to_string());
         args.push(m.clone());
     }
 
-    let prompt = format!("/review-reply {}\n", input_path_str);
+    let prompt = format!(
+        "/review-reply {}\n模板数据目录（从这里读 index.json / templates.json / package_map.json）：{}\n",
+        input_path_str, templates_dir_str
+    );
 
     emit_log(&app, &format!("$ claude {} '{}'", args.join(" "), prompt.trim()), "info", false);
 
