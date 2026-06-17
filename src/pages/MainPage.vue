@@ -6,7 +6,7 @@ import SlidesPage from "./SlidesPage.vue";
 import GeneratePage from "./GeneratePage.vue";
 import ComparePage from "./ComparePage.vue";
 import ReviewPage from "./ReviewPage.vue";
-import BatchReplyConfigPage from "./BatchReplyConfigPage.vue";
+import ConfigPage from "./ConfigPage.vue";
 import BatchReplyPage from "./BatchReplyPage.vue";
 import TemplateManagerPage from "./TemplateManagerPage.vue";
 import SettingsPage from "./SettingsPage.vue";
@@ -58,7 +58,7 @@ const navItems: NavItem[] = [
     icon: "💬",
     children: [
       { id: "review-play", label: "Play Console", icon: "▶" },
-      { id: "review-batch-reply-config", label: "Batch Reply · Config", icon: "⚙" },
+      { id: "review-config", label: "Config", icon: "⚙" },
       { id: "review-batch-reply", label: "Batch Reply · Run", icon: "🤖" },
       { id: "review-templates", label: "模板管理", icon: "🗂" },
     ],
@@ -180,8 +180,8 @@ function onSlidesSelect(files: SlidesSelection[]) {
         <ReviewPage
           v-show="activeOption === 'review-play'"
         />
-        <BatchReplyConfigPage
-          v-show="activeOption === 'review-batch-reply-config'"
+        <ConfigPage
+          v-show="activeOption === 'review-config'"
         />
         <BatchReplyPage
           v-show="activeOption === 'review-batch-reply'"

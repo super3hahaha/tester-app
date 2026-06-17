@@ -974,7 +974,7 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
 
     <div v-if="groups.length === 0" class="empty-state big">
       还没启用任何应用。<br />
-      请到左侧 <b>Batch Reply · Config</b> 子页勾选应用并保存。
+      请到左侧 <b>Config</b> 子页（Batch Reply 配置）勾选应用并保存。
     </div>
 
     <div v-else-if="!fetchedAt && !fetching" class="empty-state">

@@ -3,7 +3,8 @@ import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { lastWorkdayBefore, toIso } from "../utils/batchReplyDates";
+import { lastWorkdayBefore, toIso, computeRange } from "../utils/batchReplyDates";
+import { loadPlayConfig } from "../utils/playConsoleConfig";
 
 interface PlayApp {
   package_name: string;
@@ -27,6 +28,9 @@ interface Review {
   developer_reply: string | null;
   developer_reply_ts: number | null;
 }
+
+// 每条评论带上来源应用标签 —— 单应用拉取也带（同一个 app），批量拉取时区分各 app。
+type TaggedReview = Review & { _pkg: string; _app: string };
 
 // UPDATED = 开发者已回复，但用户在回复之后又更新了评论（回复可能已过时，需重回）
 type ReplyState = "ANY" | "ABSENT" | "REPLIED" | "UPDATED";
@@ -72,12 +76,19 @@ const toDate = ref(todayIso());
 const minSelectableDate = computed(() => daysAgoIso(7));
 const maxSelectableDate = computed(() => todayIso());
 
-const reviews = ref<Review[]>([]);
+const reviews = ref<TaggedReview[]>([]);
 const loading = ref(false);
+const batchLoading = ref(false); // 批量拉取中
 const errorMsg = ref("");
 const needRelogin = ref(false);
 const fetchedAt = ref<number | null>(null);
 const showAdvanced = ref(false);
+// "single" = 拉取单个应用（用页面上的筛选）；"batch" = 批量拉取（按各应用 Config 配置筛选）
+const mode = ref<"single" | "batch">("single");
+const batchSummary = ref(""); // 批量拉取结果摘要（拉了几个 app、各多少条）
+// 批量拉取时各应用 Config 的星级集合（拉取阶段保留全部星级，展示时据此过滤；
+// 回复状态选「回复后又更新」时跳过星级、显示所有星级）。
+const batchStarsByPkg = ref<Record<string, number[]>>({});
 
 onMounted(async () => {
   const raw = localStorage.getItem(STORAGE_KEY);
@@ -155,18 +166,22 @@ function setSinceLastWorkday() {
 }
 
 async function handleFetch() {
-  if (loading.value || !packageName.value.trim()) return;
+  if (loading.value || batchLoading.value || !packageName.value.trim()) return;
   loading.value = true;
   errorMsg.value = "";
   needRelogin.value = false;
   reviews.value = [];
+  const pkg = packageName.value.trim();
+  const appName = selectedAppLabel.value || pkg;
   try {
     const list = await invoke<Review[]>("list_play_reviews", {
-      packageName: packageName.value.trim(),
+      packageName: pkg,
       maxPages: 5,
       translationLanguage: "zh-CN",
     });
-    reviews.value = list;
+    reviews.value = list.map((r) => ({ ...r, _pkg: pkg, _app: appName }));
+    mode.value = "single";
+    batchSummary.value = "";
     fetchedAt.value = Date.now();
   } catch (e: any) {
     const msg = String(e);
@@ -184,6 +199,80 @@ async function handleFetch() {
   }
 }
 
+// 批量拉取：读 Config 里启用的应用，并行拉取，按各应用配置的**星级 + 日期**固定筛选后合并；
+// 回复状态不在这里固定，留给页面上方控件实时筛选（见 filtered）。
+async function handleBatchFetch() {
+  if (loading.value || batchLoading.value) return;
+  const config = loadPlayConfig();
+  const enabled = config
+    ? Object.entries(config.perApp).filter(([, c]) => c.enabled)
+    : [];
+  if (enabled.length === 0) {
+    errorMsg.value =
+      "未在 Config 子页（Play Console 拉取配置）启用任何应用。请先去勾选并保存。";
+    return;
+  }
+  batchLoading.value = true;
+  errorMsg.value = "";
+  needRelogin.value = false;
+  reviews.value = [];
+  batchStarsByPkg.value = {};
+  const nameMap = new Map(apps.value.map((a) => [a.package_name, a.display_name]));
+  const all: TaggedReview[] = [];
+  const parts: string[] = [];
+  let failed = 0;
+  let matchedTotal = 0; // 各应用 Config 星级+日期命中的总数（用于摘要「拉到」）
+
+  await Promise.all(
+    enabled.map(async ([pkg, cfg]) => {
+      const appName = nameMap.get(pkg) || pkg;
+      try {
+        const list = await invoke<Review[]>("list_play_reviews", {
+          packageName: pkg,
+          maxPages: 5,
+          translationLanguage: "zh-CN",
+        });
+        const range = computeRange(cfg.datePreset, {
+          fromDate: cfg.customFromDate,
+          toDate: cfg.customToDate,
+        });
+        const from = range.fromDate
+          ? Math.floor(new Date(range.fromDate + "T00:00:00").getTime() / 1000)
+          : 0;
+        const to = range.toDate
+          ? Math.floor(new Date(range.toDate + "T23:59:59").getTime() / 1000)
+          : Number.MAX_SAFE_INTEGER;
+        // 只按日期界定窗口，保留全部星级（供「回复后又更新」忽略星级时显示）；
+        // 各 app 的 Config 星级记到 map，展示时再过滤（见 filtered）。
+        batchStarsByPkg.value[pkg] = [...cfg.stars];
+        const dated = list.filter(
+          (r) => r.user_comment_ts >= from && r.user_comment_ts <= to
+        );
+        for (const r of dated) all.push({ ...r, _pkg: pkg, _app: appName });
+        // 摘要里的条数按 Config 星级算（即默认（非 UPDATED）会显示的数量）。
+        const matched = dated.filter((r) => cfg.stars.includes(r.star_rating)).length;
+        matchedTotal += matched;
+        parts.push(`${appName} ${matched} 条`);
+      } catch (e: any) {
+        const msg = String(e);
+        if (msg.startsWith("NEED_RELOGIN_SCOPE") || msg.startsWith("NEED_RELOGIN:")) {
+          needRelogin.value = true;
+        }
+        failed += 1;
+        parts.push(`${appName} 失败`);
+      }
+    })
+  );
+
+  all.sort((a, b) => b.user_comment_ts - a.user_comment_ts);
+  reviews.value = all;
+  mode.value = "batch";
+  batchSummary.value = `批量拉取 ${enabled.length} 个应用 · 拉到 ${matchedTotal} 条` +
+    (failed > 0 ? `（${failed} 个失败）` : "") + ` · ${parts.join("、")}`;
+  fetchedAt.value = Date.now();
+  batchLoading.value = false;
+}
+
 const fromTs = computed(() => {
   if (!fromDate.value) return 0;
   return Math.floor(new Date(fromDate.value + "T00:00:00").getTime() / 1000);
@@ -193,21 +282,38 @@ const toTs = computed(() => {
   return Math.floor(new Date(toDate.value + "T23:59:59").getTime() / 1000);
 });
 
+// 回复状态筛选（两种模式共用，跟随页面上方控件）。
+function matchesReplyState(r: TaggedReview): boolean {
+  if (replyState.value === "ABSENT" && r.developer_reply) return false;
+  if (replyState.value === "REPLIED" && !r.developer_reply) return false;
+  if (
+    replyState.value === "UPDATED" &&
+    !(r.developer_reply && r.developer_reply_ts && r.user_comment_ts > r.developer_reply_ts)
+  )
+    return false;
+  return true;
+}
+
 const filtered = computed(() => {
-  return reviews.value.filter((r) => {
-    // 「回复后又更新」忽略星级筛选，显示全部星级（这种通常不在乎评分，要看全部）
-    if (replyState.value !== "UPDATED" && !stars.value.includes(r.star_rating)) return false;
-    if (replyState.value === "ABSENT" && r.developer_reply) return false;
-    if (replyState.value === "REPLIED" && !r.developer_reply) return false;
-    if (
-      replyState.value === "UPDATED" &&
-      !(r.developer_reply && r.developer_reply_ts && r.user_comment_ts > r.developer_reply_ts)
-    )
-      return false;
-    if (r.user_comment_ts < fromTs.value) return false;
-    if (r.user_comment_ts > toTs.value) return false;
-    return true;
-  });
+  // 批量模式：日期已在拉取时按各应用 Config 固定；星级按各应用 Config 过滤（上方星级控件
+  // 不参与）；回复状态跟随页面控件实时筛选。「回复后又更新」忽略星级、显示所有星级。
+  if (mode.value === "batch") {
+    return reviews.value.filter((r) => {
+      if (!matchesReplyState(r)) return false;
+      if (replyState.value === "UPDATED") return true; // 忽略星级，显示所有星级
+      const cs = batchStarsByPkg.value[r._pkg];
+      return !cs || cs.includes(r.star_rating);
+    });
+  }
+  // 单应用模式：星级（页面控件）+ 回复状态 + 页面日期范围。
+  return reviews.value.filter(
+    (r) =>
+      matchesReplyState(r) &&
+      // 「回复后又更新」忽略星级，显示全部星级（这种通常不在乎评分，要看全部）
+      (replyState.value === "UPDATED" || stars.value.includes(r.star_rating)) &&
+      r.user_comment_ts >= fromTs.value &&
+      r.user_comment_ts <= toTs.value
+  );
 });
 
 const dateError = computed(() =>
@@ -246,13 +352,17 @@ async function handleOpenInConsole() {
 // 评论列表页（playConsoleUrl）。URL 格式来自 Console 实测复制：
 //   .../user-feedback/review-details?reviewId=<uuid>&corpus=PUBLIC_REVIEWS
 // 我们的 review_id 就是该 UUID（与 androidpublisher reviews API 一致），可直接定位。
-function reviewConsoleUrl(r: Review): string {
-  if (!developerId.value || !appId.value) return playConsoleUrl.value;
+function reviewConsoleUrl(r: TaggedReview): string {
+  // appId 是为当前选中应用配的；批量模式下该评论可能来自别的应用，深链不适用 →
+  // 退回应用列表页，避免跳到错误应用。
+  if (!developerId.value || !appId.value || r._pkg !== packageName.value) {
+    return playConsoleUrl.value;
+  }
   const base = `https://play.google.com/console/u/0/developers/${developerId.value}/app/${appId.value}/user-feedback/review-details`;
   return `${base}?reviewId=${encodeURIComponent(r.review_id)}&corpus=PUBLIC_REVIEWS`;
 }
 
-async function openReviewInConsole(r: Review) {
+async function openReviewInConsole(r: TaggedReview) {
   try {
     await openUrl(reviewConsoleUrl(r));
   } catch (e: any) {
@@ -314,7 +424,9 @@ const LANG_OPTIONS: { value: string; label: string }[] = [
 type AiStatus = "idle" | "queued" | "generating" | "done" | "error";
 interface AiTask {
   id: string;
-  review: Review;
+  review: TaggedReview;
+  pkg: string; // 来源应用包名（批量模式下每条可能不同）
+  appLabel: string;
   instruction: string;
   language: string;
   status: AiStatus;
@@ -368,11 +480,12 @@ function cancelAddTpl() {
 }
 async function confirmAddTpl(c: GenCandidate) {
   if (addTplBusy.value) return;
+  const pkg = activeTask.value?.pkg || packageName.value.trim();
   addTplBusy.value = true;
   addTplError.value = "";
   try {
     const product = await invoke<string | null>("product_for_package", {
-      packageName: packageName.value.trim(),
+      packageName: pkg,
     });
     if (!product) {
       addTplError.value = "该应用没有对应的模板产品，无法收录。";
@@ -409,7 +522,7 @@ onUnmounted(() => {
   if (unlistenReplyLog) unlistenReplyLog();
 });
 
-function openAiDialog(r: Review) {
+function openAiDialog(r: TaggedReview) {
   // 已为该评论建过任务就直接展开它（避免重复 / 丢状态）
   const existing = aiTasks.value.find((t) => t.review.review_id === r.review_id);
   if (existing) {
@@ -419,6 +532,8 @@ function openAiDialog(r: Review) {
   const task: AiTask = {
     id: `ai-${++taskSeq}`,
     review: r,
+    pkg: r._pkg,
+    appLabel: r._app,
     instruction: "",
     language: "auto",
     status: "idle",
@@ -468,8 +583,8 @@ async function processQueue() {
   try {
     const res = await invoke<GenReplyResult>("generate_single_reply", {
       review: next.review,
-      product: selectedAppLabel.value || packageName.value,
-      packageName: packageName.value.trim(),
+      product: next.appLabel || next.pkg,
+      packageName: next.pkg,
       instruction: next.instruction.trim(),
       language: next.language,
       model: "claude-sonnet-4-6",
@@ -538,7 +653,7 @@ async function handleSubmitReply(task: AiTask) {
   task.error = "";
   try {
     await invoke("reply_to_review", {
-      packageName: packageName.value.trim(),
+      packageName: task.pkg,
       reviewId: task.review.review_id,
       replyText: text,
     });
@@ -589,8 +704,16 @@ async function handleSubmitReply(task: AiTask) {
             ←
           </button>
         </template>
-        <button class="fetch-btn" :disabled="loading || !packageName.trim()" @click="handleFetch">
+        <button class="fetch-btn" :disabled="loading || batchLoading || !packageName.trim()" @click="handleFetch">
           {{ loading ? "拉取中..." : "拉取评论" }}
+        </button>
+        <button
+          class="batch-fetch-btn"
+          :disabled="loading || batchLoading"
+          @click="handleBatchFetch"
+          title="按 Config 子页（Play Console 拉取配置）启用的应用并行批量拉取，各应用按其配置的星级/状态/日期筛选"
+        >
+          {{ batchLoading ? "批量拉取中..." : "📦 批量拉取" }}
         </button>
       </div>
       <div v-if="appsError" class="error small">应用列表加载失败：{{ appsError }}</div>
@@ -603,10 +726,12 @@ async function handleSubmitReply(task: AiTask) {
             :key="s"
             class="star-btn"
             :class="{ active: stars.includes(s) }"
-            :disabled="replyState === 'UPDATED'"
+            :disabled="replyState === 'UPDATED' || mode === 'batch'"
             @click="toggleStar(s)"
           >{{ s }} ★</button>
-          <span v-if="replyState === 'UPDATED'" class="star-hint">已忽略 · 显示全部星级</span>
+          <span v-if="mode === 'batch' && replyState === 'UPDATED'" class="star-hint">回复后又更新 · 显示所有星级</span>
+          <span v-else-if="mode === 'batch'" class="star-hint">批量模式星级按各应用 Config，不在此筛选</span>
+          <span v-else-if="replyState === 'UPDATED'" class="star-hint">已忽略 · 显示全部星级</span>
         </div>
       </div>
 
@@ -673,7 +798,11 @@ async function handleSubmitReply(task: AiTask) {
 
     <div v-if="errorMsg && !needRelogin" class="banner banner-error">{{ errorMsg }}</div>
 
-    <div v-if="summary" class="summary-row">
+    <div v-if="mode === 'batch' && batchSummary" class="summary-row">
+      <span class="summary-text">{{ batchSummary }} · 当前筛选显示 {{ filtered.length }} 条</span>
+      <span class="summary-app">· 星级/日期按各应用 Config；回复状态可在上方实时筛选</span>
+    </div>
+    <div v-else-if="summary" class="summary-row">
       <span class="summary-text">{{ summary }}</span>
       <span v-if="selectedAppLabel" class="summary-app">· {{ selectedAppLabel }}</span>
     </div>
@@ -681,6 +810,7 @@ async function handleSubmitReply(task: AiTask) {
     <div v-if="filtered.length > 0" class="review-list">
       <article v-for="r in filtered" :key="r.review_id" class="review-card">
         <div class="review-head">
+          <span v-if="mode === 'batch'" class="app-badge">{{ r._app }}</span>
           <span class="stars" :class="`stars-${r.star_rating}`">{{ starsDisplay(r.star_rating) }}</span>
           <span class="author">{{ r.author_name || "(匿名)" }}</span>
           <span class="ts">{{ formatTs(r.user_comment_ts) }}</span>
@@ -718,7 +848,7 @@ async function handleSubmitReply(task: AiTask) {
     </div>
 
     <div v-else-if="fetchedAt && !loading" class="empty-state">
-      当前筛选条件下没有评论。试试放宽星级或扩大日期范围。
+      当前筛选条件下没有评论。
     </div>
 
     <div v-else-if="!fetchedAt && !loading" class="empty-state">
@@ -992,6 +1122,33 @@ async function handleSubmitReply(task: AiTask) {
 .fetch-btn:disabled {
   background: #ccc;
   cursor: not-allowed;
+}
+.batch-fetch-btn {
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid #9f7aea;
+  border-radius: 6px;
+  background: white;
+  color: #6b46c1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.batch-fetch-btn:hover:not(:disabled) {
+  background: #9f7aea;
+  color: white;
+}
+.batch-fetch-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.app-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: #e9d8fd;
+  color: #553c9a;
 }
 
 .star-row {
