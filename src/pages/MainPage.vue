@@ -9,6 +9,7 @@ import ReviewPage from "./ReviewPage.vue";
 import ConfigPage from "./ConfigPage.vue";
 import BatchReplyPage from "./BatchReplyPage.vue";
 import TemplateManagerPage from "./TemplateManagerPage.vue";
+import GmailPage from "./GmailPage.vue";
 import SettingsPage from "./SettingsPage.vue";
 
 interface UserInfo {
@@ -61,6 +62,14 @@ const navItems: NavItem[] = [
       { id: "review-config", label: "Config", icon: "⚙" },
       { id: "review-batch-reply", label: "Batch Reply · Run", icon: "🤖" },
       { id: "review-templates", label: "模板管理", icon: "🗂" },
+    ],
+  },
+  {
+    id: "gmail",
+    label: "邮件",
+    icon: "📧",
+    children: [
+      { id: "gmail-inbox", label: "Gmail", icon: "📨" },
     ],
   },
   {
@@ -190,6 +199,9 @@ function onSlidesSelect(files: SlidesSelection[]) {
         <TemplateManagerPage
           v-show="activeOption === 'review-templates'"
           :active-option="activeOption"
+        />
+        <GmailPage
+          v-show="activeOption === 'gmail-inbox'"
         />
         <SettingsPage
           v-show="activeOption === 'settings-general'"

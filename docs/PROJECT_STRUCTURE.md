@@ -32,6 +32,8 @@ tester-app/
 │       ├── PlayConsoleConfigPage.vue # Play Console 拉取配置：每个 app 一张卡片，勾选启用 + 日期预设 + 星级 + 回复状态；显式「保存」写 localStorage `play-console-multi-config-v1`；ReviewPage 读它
 │       ├── BatchReplyConfigPage.vue # 批量回复配置（嵌在 ConfigPage 的 Batch Tab）：每个 app 一张卡片，独立勾选启用 + 日期预设 + 星级；显式「保存」按钮写 localStorage
 │       ├── BatchReplyPage.vue   # 批量回复执行：读保存的多 app 配置 → 并行拉评论 → 按 app 分组折叠 → AI 生成回复 → 逐条/一键提交
+│       ├── TemplateManagerPage.vue # 模板管理：按产品 tab 增删改模板 + xlsx 导入（挂 Review 工作区）
+│       ├── GmailPage.vue        # Gmail 邮件：读 Apps Script 同步的 Sheet，卡片列表 + 详情弹窗 + 已读隐藏 + 按 Chrome profile 打开邮件
 │       └── SettingsPage.vue     # 缓存管理设置
 ├── public/                      # 公共静态资源
 │   ├── tauri.svg                # Tauri logo
@@ -53,7 +55,8 @@ tester-app/
 │   │   ├── reviews.rs           # Google Play Developer API：评论拉取（list_play_reviews）/ 应用列表（list_play_apps）/ 评论回复（reply_to_review）
 │   │   ├── reply.rs             # 批量回复生成：写 pending JSON → 跑 claude /review-reply（--add-dir 模板目录 + prompt 传路径）→ 读回 candidates.json（reply-log 事件流）
 │   │   ├── skill_sync.rs        # Skill 热更新：从 GitHub 拉取 zipball 同步到 ~/.claude/skills/，启动时静默 + Settings 手动
-│   │   └── templates.rs         # 模板管理：~/.tester-app/templates/ 的增删改 + xlsx 导入；模板含 lang（en/zh-CN 双源）；写全文同时重建瘦身 index；skill 从此目录读
+│   │   ├── templates.rs         # 模板管理：~/.tester-app/templates/ 的增删改 + xlsx 导入；模板含 lang（en/zh-CN 双源）；写全文同时重建瘦身 index；skill 从此目录读
+│   │   └── chrome.rs            # 按指定 Chrome profile 打开 URL：读 Local State 列 profile（目录名↔显示名）+ open_url_in_chrome_profile（Gmail 多账号跨 profile 打开邮件深链）
 │   ├── scripts/                 # 内嵌资源（编译期 include_str!）
 │   │   └── diff_testcases.py    # 来自 testcase-eval-visual-report skill 的纯 Python diff 脚本
 │   ├── capabilities/            # Tauri 权限能力
@@ -70,7 +73,10 @@ tester-app/
 │       └── Square*.png          # Windows Store 各尺寸
 └── docs/                        # 项目文档
     ├── PROJECT_STRUCTURE.md     # 本文件
-    └── gotchas.md               # 踩过的坑（平台怪癖、外部约束、易复发 bug）
+    ├── decisions.md             # 架构决策记录（非显然选择的原因）
+    ├── gotchas.md               # 踩过的坑（平台怪癖、外部约束、易复发 bug）
+    ├── gmail-handoff.md         # Gmail 邮件接入交接文档（Apps Script 同步 + app 读表全过程 + 为何弃用直连 OAuth）
+    └── gmail-sync.gs            # Apps Script 脚本：定时把 Gmail 标签下未读同步到 Google Sheet（部署到各 Gmail 账号）
 ```
 
 # 运行时数据目录
@@ -127,6 +133,7 @@ tester-app/
 | 批量回复 · 配置 | `BatchReplyConfigPage.vue` | 多 app 卡片：每张卡片独立**日期预设**（自上一个工作日 / 昨天 / 今天 / 近 7 天 / 自定义）+ 星级；非自定义预设下显示「实际范围」预览（每分钟刷新一次，跨午夜自动重算）；顶部「全选/全不选/刷新/清空配置/保存」工具栏（清空配置 = 删除所有版本 localStorage key 并恢复出厂默认，带 confirm）；显式保存到 localStorage `batch-reply-multi-config-v3`（从旧 key v2/v1 迁移时**强制把日期预设重置为默认**，因为早期 v2 会把"自定义"这个迁移产物写进每个 app；读当前 v3 则保留用户显式选择）；应用列表缓存在 `batch-reply-apps-cache-v1` 让冷启动秒回 |
 | 批量回复 · 执行 | `BatchReplyPage.vue` | 进入时从 localStorage 读多 app 配置 → 「拉取候选评论」**在拉取时**调 `computeRange()` 把预设解析为绝对日期（所以配置一次永远新鲜）→ 并行调每个启用 app 的 `list_play_reviews`（不互相阻塞）→ 按 app 分组折叠展示（默认展开，组头显示 app 名 / 包名 / 当次实际日期范围 + 预设名 / 候选数）→ **「🔎 匹配模板并填充」调 `run_reply_skill`**（顶部下拉选回复语言默认 `auto`，模型固定 Sonnet）→ 命中模板的评论预填翻译好的模板正文（+中文预览）；未匹配的标「未匹配·需手动处理」留空手填 → 逐条提交直接发，「一键提交全部」弹 confirm 后跨 app 串行 + 200ms 间隔调 `reply_to_review`。每条评论可点「✋ 人工处理」手动标记（按 review_id 持久化到 localStorage `batch-reply-manual-ids-v1`，跨拉取/重启保留）——标记后**只**从「匹配模板并填充」里排除，仍可手填 / AI 单条回复 / 逐条或一键提交。每张候选卡片另有「🤖 AI 回复」按钮 → 弹单条生成弹窗（回复方向**可留空**，留空时后端让模型据评论自行判断方向〔含「无法更新」等常见问题的标准排查引导〕；+ 语言 → `generate_single_reply` 出 3 条风格各异候选）→「选用并填入」把文案灌进该卡片回复框（标记手动、清掉未匹配标），再走原有逐条/一键提交。**单条弹窗是多任务的**：可同时开多条（缩小成右下角竖直堆叠的悬浮条），生成走前端队列排队（后端 `ReplyState` 一次只跑一个），`reply-log` 路由到当前正在生成的那个任务、不污染批量匹配日志。每条候选也有「➕ 添加模板」收录入口（任意语言：英文存英文、其它用中文预览存中文、填类别 → `product_for_package` + `add_template` 带 lang）。与「匹配模板」是两条独立路径：模板匹配=批量命中翻译，AI 回复=单条 freeform 现生成 |
 | 模板管理 | `TemplateManagerPage.vue` | 挂在 Review 工作区。按产品 tab 切换（显示条数 + 关联 app），列出该产品模板，每条可改 category/正文 → `update_template`，删除走**内联两步确认**；顶部「+ 新增模板」→ `add_template`（后端按产品前缀自动生成 id）；「📥 从 xlsx 导入」用系统文件选择器（`@tauri-apps/plugin-dialog`）选 xlsx → 内联确认（覆盖该产品）→ `import_templates_xlsx`。所有写操作落 `~/.tester-app/templates/`，skill 直接读 |
+| Gmail 页 | `GmailPage.vue` | 读 Apps Script 同步出的 Google Sheet（手动粘贴表链接，存 localStorage `gmail-sources-v1`，每张表可配一个 Chrome profile）：复用 `read_sheet`/`get_sheet_tabs` 读 `Mail` tab、按表头名取列；列表每封固定 3 行（发件人+日期 / 主题 / 机翻中文），「详情」弹大卡（机翻上 / 原文下），「↗」按配的 Chrome profile 打开邮件深链（`open_url_in_chrome_profile`），「已读」本地隐藏（localStorage `gmail-read-ids-v1`，「↩ 撤销上一封」LIFO）。绕开 Gmail OAuth Testing 7 天过期，全程见 `gmail-handoff.md` |
 | 设置页 | `SettingsPage.vue` | 缓存大小查看与清理 |
 
 ## 后端模块
@@ -144,6 +151,7 @@ tester-app/
 | 反馈上传 | `feedback.rs` | `send_feedback` command：反查 manifest → 打包 zip（ai.html + human.html + report.html + 源文件 + meta.json）→ Telegram sendDocument multipart 上传 → 成功移到 `feedback_sent/`，失败留 `feedback_pending/`；`retry_pending_feedback` 重试；`is_feedback_configured` 探测是否配置好 token |
 | Skill 热更新 | `skill_sync.rs` | 内置 skill 列表（owner/repo）；用 GitHub Releases API（`/releases/latest`）拿 tag_name 做版本判断；`check_skill_updates` 比对本地 `.tester-app-version` 与远程 tag；`sync_all_skills` / `sync_skill` 下载 release zipball → 备份旧版 → 解压覆盖到 `~/.claude/skills/{name}/` → 写新版本；`get_skill_local_version` 给前端取版本号写进反馈 manifest |
 | 模板管理 | `templates.rs` | 7 个 command（无 State，纯文件读写）：`list_template_products`（产品+条数+关联 app）/ `product_for_package`（包名→产品，给「添加模板」收录用，null=该应用无模板产品）/ `list_templates` / `add_template`（按产品前缀 xfolder/mp3cutter/video2mp3 自动生成 id）/ `update_template` / `delete_template` / `import_templates_xlsx`（calamine 读 xlsx，复刻 build 解析口径：A 列类别继承、B 列英文、空 B 跳过，覆盖该产品，导入项 lang=en）。模板含 `lang`（en/zh-CN）**中英双源**：add/update 带 lang，skill 命中后据 lang 翻到回复语言（相同直接用）；存量无 lang 字段的按 en。**唯一写出口** `write_templates_and_index` 写 templates.json 同时由全文派生重建 index.json，二者永不漂移。`ensure_templates_dir` 首次从 `~/.claude/skills/review-reply/data/` 拷种子。`reply.rs` 复用其 `templates_dir()` / `ensure_templates_dir()` |
+| Chrome 打开 | `chrome.rs` | `list_chrome_profiles` 读 Chrome `Local State` 的 `profile.info_cache` 列出 profile（目录名 ↔ 显示名，用户按显示名选、存目录名）；`open_url_in_chrome_profile(url, profile_dir)` 用 `--profile-directory` 指定 profile 打开 URL（macOS 直接调 Chrome 二进制并 `open -a` 激活前台，Win/Linux 各自分支）。解决 Gmail 多账号分散在不同 Chrome profile 时，邮件深链跨 profile 跳不过去 |
 
 # 依赖库
 

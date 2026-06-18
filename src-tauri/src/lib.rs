@@ -1,4 +1,5 @@
 mod auth;
+mod chrome;
 mod claude;
 mod compare;
 mod feedback;
@@ -67,6 +68,8 @@ pub fn run() {
             templates::update_template,
             templates::delete_template,
             templates::import_templates_xlsx,
+            chrome::list_chrome_profiles,
+            chrome::open_url_in_chrome_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

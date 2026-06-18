@@ -91,3 +91,17 @@
 - **选择**：每条模板加 `lang` 字段（`en` / `zh-CN`，serde 缺省 `en`，存量 302 条自动按 en）。skill 命中后据 `lang` 把模板正文翻到回复语言（回复语言==lang 直接用原文）。
 - **「添加模板」任意语言都可收**：AI 候选总带中文预览 `text_zh`，所以英文候选存英文模板（lang=en）、其它语言（含中文）用 `text_zh` 存中文模板（lang=zh-CN）。按钮不再按语言禁用。
 - **不影响**：索引（不含 lang，匹配不需要）、category、模板管理 CRUD。skill 取全文命令改成同时取 `lang`+`text`。
+
+## Gmail 走 Apps Script 同步到 Sheet，不直连 Gmail OAuth
+
+- **背景**：要在 app 里看多个 Gmail 账号（既有 @inshot.com 域内、也有外部 @gmail.com）的邮件。最初做法是 app 独立 Gmail OAuth（`gmail.rs`，`gmail.readonly` scope，loopback+PKCE）直连拉取。
+- **致命问题——7 天过期**：为接外部 @gmail.com 账号，OAuth 同意屏幕从 **Internal** 改成 **External**；External 应用必须处于 Testing 或 Production。停在 **Testing** 状态下，refresh_token **固定 7 天过期**，过期后账号要重新走浏览器授权。
+  - 这是绑在**应用发布状态**上的策略，**不绑账号类型**：改成 External 后，**inshot 域内账号也一样 7 天过期**，不豁免（Internal 才豁免，但 Internal 用不了外部账号）。
+  - 区分两件事：「加测试用户名单」只解决**准入**（不在名单报 `access_denied`），是一次性配置；7 天过期是**token 续期**问题，名单不受影响、不用重配。
+- **为什么不走 Production**：`gmail.readonly` 是 Google **受限（Restricted）** scope（比"敏感"更严），发 Production 需品牌验证 + 每年一次 CASA 第三方安全评估，成本/周期过高。用户**两条路都不接受**（不忍 7 天、不走 Production）。
+- **选择**：把"访问 Gmail"从 app 的第三方 OAuth client 整个挪到**账号本人的 Apps Script**：每个 Gmail 账号部署 [gmail-sync.gs](gmail-sync.gs)，定时触发器（每 15 分）用 `GmailApp` 增量拉邮件写入**各自一张 Google Sheet**，表共享给 inshot 账号；app 复用 `sheets.rs`/`auth.rs` 读表（完全不碰 Gmail API）。
+- **为什么能消灭 7 天**：Apps Script 触发器以**账号本人**身份运行，授权由 Google 内部托管，不走第三方 OAuth client，不受同意屏幕发布状态影响；app 端读的是 Sheet，用现有 `auth.rs` 的 Sheets 授权（inshot 域内 Internal，本就稳定不过期）。两类账号都免疫 7 天，装一次长期跑。
+- **拒绝的方案**：(a) 忍 7 天重授权 — 每账号每周人工点一次，易忘、过期即停同步；(b) 发 Production — 受限 scope 验证 + CASA 太重；(c) 两套 OAuth client（inshot 走 Internal、外部走 External）— 双倍配置和代码复杂度，不值。
+- **已定范围（2026-06-17）**：第一阶段**只读同步**（脚本写表 / app 读表 / 回复外跳浏览器手动发，点 Gmail 深链 `#all/<threadId>`）；表**每账号各一张**；**发送回写留第二阶段**（app 写回复+「已确认」列 → 脚本扫已勾选行用 `GmailApp.reply` 代发，**不需要 `gmail.send` scope、不需要 Production**，逐封人工确认=勾选列）。
+- **代价**：失实时性（定时同步，可降到每 15 分）；每账号一次性装脚本+授权；正文受单元格 5 万字符限制（HTML 转纯文本、截断）；消费级账号脚本发信配额 ~100/天（只读阶段不涉及）。
+- **影响旧代码**：`gmail.rs`（OAuth 账号管理 + `list_messages`/`get_message`）+ `GmailPage.vue` 的 OAuth 直连**退役**；第二步起 app 改读表，待决定删除还是注释保留。详见 [gmail-handoff.md](gmail-handoff.md)。
