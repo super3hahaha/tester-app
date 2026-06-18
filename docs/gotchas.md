@@ -44,3 +44,22 @@ Tauri 的 webview（WKWebView / WebView2）对同步对话框 `window.confirm()`
 坑：ReviewPage / BatchReplyPage 的 AI 回复弹窗原本是**单例**（一个 `aiReview`/`aiDlg` + 一个 `aiGenerating`）。缩小第一条去回复第二条时，复用同一份状态 → 第二条上来就显示「停止」按钮，根本开不了新生成。
 
 修复模式（纯前端，不动 Rust）：弹窗状态改成**任务列表** `aiTasks: AiTask[]` + `activeTaskId`（展开中的那个，其余以悬浮条堆右下角）。生成走**前端队列**：`enqueueGenerate` 把任务标 `queued` → `processQueue` 用 `genBusy` 串行化，一次只 `invoke` 一个，结束后自动跑下一个排队的（这样永远不会撞上后端的 running 锁）。`reply-log` 监听里路由到 `aiTasks.find(t => t.status==='generating')` 那个任务，不再用全局 ref。停止：`queued` 直接出队不碰后端，`generating` 才 `invoke("stop_reply")`。
+
+## 模板预翻译：app 原生语言码 vs ISO 码必须归一
+
+模板 `translations` 的 key 用 **app 原生码**（`in` / `zh-rCN` / `zh-rTW`），而 review-reply 的回复语言来自 `target_language` / `reviewer_language`，是 **ISO 码**（`id` / `zh-CN` / `zh-TW`）。两套码不归一就永远命中不到预存译文、白白实时翻译。
+
+- skill 端（review-reply SKILL.md 第 5 步）查 `translations` 前先归一：`zh-CN`/`zh-Hans`→`zh-rCN`、`zh-TW`/`zh-Hant`→`zh-rTW`、`id`→`in`、`pt-BR`→`pt`。
+- 后端（`translate.rs` 经 `templates::is_source_lang`）同样处理：源 `zh-CN` 时目标 `zh-rCN` 视为同源，不翻不存（查询时归一到源直接用 text）。
+
+## 模板翻译分批：每批必须立刻写盘
+
+`translate_templates` 按 `CHUNK=1`（一条模板 × 多语言一次调用）轻量直出分批（不走 skill，见 decisions.md）。**每批 `apply_translations` 立刻落盘**——用户中途点停止（`stop_translate` 杀进程）/ 某批失败时，已完成的批次才不丢。取消返回「已完成部分已保存」，不是整批作废。
+
+## LLM 控不住字数：350 字符必须后端硬校验 + 压缩兜底
+
+模板翻译每条要 ≤ 350 字符（gp 回复硬限制），但**光靠 prompt 约束 LLM 字数不可靠**——haiku 实测把俄语模板翻成 371（俄/德/法/西比英文长 20-30%，直译就超）。`translate.rs` 三层兜底（单条重译 / 批量补全都走 `translate_one_batch`，故都生效）：
+1. prompt 把 350 写成硬上限、提示长语言主动精简（`build_prompt`）。
+2. 每批翻完按 `char_len`(=`chars().count()`) 校验，超 350 的发**一次压缩调用**（`build_compress_prompt`）改写到限内。
+3. 仍超的：写入但 emit `⚠ 仍超` 日志 + 前端编辑行字符数标红；单条重译完成后红 banner（无弹窗看不到日志，靠前端扫）、批量完成消息汇总「N 条仍超」。
+- 字符计数前后端要对齐：后端 `chars().count()` / 前端 `.length`，对 BMP 字符（俄/中/拉丁）一致，emoji 会差一点（少见，可接受）。

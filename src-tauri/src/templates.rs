@@ -27,6 +27,25 @@ fn norm_lang(lang: &str) -> String {
     }
 }
 
+/// 源文指纹：译文写回时记下当时 text 的 hash（存进 src_hash）。之后 text 变了、
+/// hash 对不上 → 译文「过期」（stale），UI 提示重译。见 `apply_translations`。
+pub(crate) fn text_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(text.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// 目标语言码（app 原生码，如 zh-rCN）是否其实就是模板的源语言——是的话不该翻译、
+/// 也不进 translations（查询时归一到源语言直接用 text）。源语言只有 en / zh-CN。
+pub(crate) fn is_source_lang(target_code: &str, source_lang: &str) -> bool {
+    let t = target_code.trim().to_lowercase();
+    match source_lang {
+        "zh-CN" => t == "zh-rcn",
+        _ => t == "en", // 源默认 en
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Template {
     pub id: String,
@@ -36,6 +55,13 @@ pub struct Template {
     // 旧数据无此字段 → 默认 en（存量 302 条都是英文源）。
     #[serde(default = "default_lang")]
     pub lang: String,
+    // 预翻译的各语言译文：app 原生语言码（ar/ru/zh-rCN/...）→ 译文，不含源语言。
+    // 由 template-translate skill 生成，review-reply 命中后直接取用、省掉运行时翻译。
+    #[serde(default)]
+    pub translations: BTreeMap<String, String>,
+    // 译文对应的源文指纹（翻译当时 text 的 hash）。text 改了对不上 → 译文过期。
+    #[serde(default)]
+    pub src_hash: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -171,7 +197,15 @@ fn product_prefix(product: &str, templates: &[Template]) -> String {
         "XFolder" => "xfolder".to_string(),
         "MP3 Cutter" => "mp3cutter".to_string(),
         "Video to MP3" => "video2mp3".to_string(),
-        _ => slug(product),
+        "通用" => "common".to_string(), // 跨 app 通用模板（中文名 slug 会空，固定前缀）
+        _ => {
+            let s = slug(product);
+            if s.is_empty() {
+                "tpl".to_string() // 纯非 ASCII 产品名兜底，避免空前缀生成 "-001"
+            } else {
+                s
+            }
+        }
     }
 }
 
@@ -255,11 +289,93 @@ pub fn product_for_package(package_name: String) -> Result<Option<String>, Strin
     Ok(None)
 }
 
+/// 给前端的视图：模板字段平铺 + 一个计算出来的 `stale`（译文是否过期）。
+#[derive(Serialize)]
+pub struct TemplateView {
+    #[serde(flatten)]
+    inner: Template,
+    // 有译文但源文 hash 对不上（text 改过却没重译）→ true，UI 标过期提示重译。
+    stale: bool,
+}
+
 #[tauri::command]
-pub fn list_templates(product: String) -> Result<Vec<Template>, String> {
+pub fn list_templates(product: String) -> Result<Vec<TemplateView>, String> {
     ensure_templates_dir()?;
     let f = read_templates()?;
-    Ok(f.products.get(&product).map(|p| p.templates.clone()).unwrap_or_default())
+    let list = f
+        .products
+        .get(&product)
+        .map(|p| p.templates.clone())
+        .unwrap_or_default();
+    Ok(list
+        .into_iter()
+        .map(|t| {
+            let stale = !t.translations.is_empty() && t.src_hash != text_hash(&t.text);
+            TemplateView { inner: t, stale }
+        })
+        .collect())
+}
+
+/// 读某产品的全部模板（原始 Template，含 translations）。供 translate.rs 用。
+pub(crate) fn load_templates_for(product: &str) -> Result<Vec<Template>, String> {
+    ensure_templates_dir()?;
+    let f = read_templates()?;
+    Ok(f
+        .products
+        .get(product)
+        .map(|p| p.templates.clone())
+        .unwrap_or_default())
+}
+
+/// 把一批译文合并写回指定产品的模板（translate.rs 每批调一次，增量写盘）。
+/// `updates`: id → { 语言码 → 译文 }。合并进各模板的 translations（覆盖同 key、保留其它），
+/// 并把命中的模板 src_hash 刷成当前 text 的 hash（表示译文已对齐当前源）。
+pub(crate) fn apply_translations(
+    product: &str,
+    updates: &BTreeMap<String, BTreeMap<String, String>>,
+) -> Result<(), String> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let mut f = read_templates()?;
+    let pt = f.products.get_mut(product).ok_or("产品不存在")?;
+    for t in pt.templates.iter_mut() {
+        if let Some(tr) = updates.get(&t.id) {
+            for (lang, text) in tr {
+                t.translations.insert(lang.clone(), text.clone());
+            }
+            t.src_hash = text_hash(&t.text);
+        }
+    }
+    write_templates_and_index(&mut f)?;
+    Ok(())
+}
+
+/// 手工编辑某条模板的某个语言内容（编辑行「已翻译语言下拉」里改了再保存）。
+/// 选的是源语言（en/zh-CN，或归一等于源的 app 码）→ 改 text 本身并刷新 src_hash
+/// （其它译文随之过期）；否则改对应的 translations 译文，不动 src_hash。
+#[tauri::command]
+pub fn set_template_translation(
+    product: String,
+    id: String,
+    lang: String,
+    text: String,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("内容不能为空。".into());
+    }
+    ensure_templates_dir()?;
+    let mut f = read_templates()?;
+    let pt = f.products.get_mut(&product).ok_or("产品不存在")?;
+    let t = pt.templates.iter_mut().find(|t| t.id == id).ok_or("模板不存在")?;
+    if lang == t.lang || is_source_lang(&lang, &t.lang) {
+        t.text = text.trim().to_string();
+        t.src_hash = text_hash(&t.text);
+    } else {
+        t.translations.insert(lang, text.trim().to_string());
+    }
+    write_templates_and_index(&mut f)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -281,6 +397,8 @@ pub fn add_template(
         category: category.trim().to_string(),
         text: text.trim().to_string(),
         lang: norm_lang(lang.as_deref().unwrap_or("en")),
+        translations: BTreeMap::new(),
+        src_hash: String::new(),
     });
     write_templates_and_index(&mut f)?;
     Ok(id)
@@ -412,6 +530,9 @@ pub fn import_templates_xlsx(product: String, path: String) -> Result<ImportResu
             },
             text: english.to_string(),
             lang: "en".to_string(), // xlsx B 列是英文源
+            // 覆盖导入 = 全新源，译文清空（导入后需在「补全多语言」重新生成）。
+            translations: BTreeMap::new(),
+            src_hash: String::new(),
         });
     }
 

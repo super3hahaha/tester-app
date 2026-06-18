@@ -105,3 +105,16 @@
 - **已定范围（2026-06-17）**：第一阶段**只读同步**（脚本写表 / app 读表 / 回复外跳浏览器手动发，点 Gmail 深链 `#all/<threadId>`）；表**每账号各一张**；**发送回写留第二阶段**（app 写回复+「已确认」列 → 脚本扫已勾选行用 `GmailApp.reply` 代发，**不需要 `gmail.send` scope、不需要 Production**，逐封人工确认=勾选列）。
 - **代价**：失实时性（定时同步，可降到每 15 分）；每账号一次性装脚本+授权；正文受单元格 5 万字符限制（HTML 转纯文本、截断）；消费级账号脚本发信配额 ~100/天（只读阶段不涉及）。
 - **影响旧代码**：`gmail.rs`（OAuth 账号管理 + `list_messages`/`get_message`）+ `GmailPage.vue` 的 OAuth 直连**退役**；第二步起 app 改读表，待决定删除还是注释保留。详见 [gmail-handoff.md](gmail-handoff.md)。
+
+## 模板多语言预翻译（translations 字段 + template-translate skill）
+
+- **背景**：review-reply 命中模板后每次都实时翻译到回复语言，重复、慢、费钱；模板是固定的，没必要每次翻。
+- **选择**：翻译从**运行时**挪到**一次性预生成**。每条模板存 `translations`（语言码→译文，22 种 app 原生码 `ar/de/…/zh-rCN/zh-rTW`）+ `src_hash`（翻译当时的源文指纹）。review-reply 命中后把回复语言归一成模板码，命中预存译文**直接用**，漏译/新语言才回退实时翻译。
+- **翻译执行 = 轻量直出 + haiku（不走 skill）**：`translate.rs` 直接 `claude --print`，**不 `--add-dir`、prompt 只内联这批模板、要求「不用工具、直接输出 JSON」、从 stdout 解析**，不写文件、不自检。每批 `CHUNK=5` 条、**每批立刻写回盘**（中断只丢这几条）。模型用 `claude-haiku-4-5`（前端 `TRANSLATE_MODEL`）。每条模板自带 `target_langs`，后端按「覆盖 / 只补缺失」精确算要翻什么。
+  - **为什么不走 agent/skill**（踩过的坑）：最初做成 `template-translate` skill（agent 模式 + `--add-dir` 模板目录 + Bash 写文件自检）。agent 因 `--add-dir` 自己读了 122KB 的 templates.json、自检失败会重写整份译文，**20 条就烧掉 30% 的 5 小时额度**。翻译是纯文本转换，不需要 agent 的工具/文件/自检——轻量直出省一个数量级。`template-translate` skill（super3hahaha，v0.0.2）已**退役**，`skill_sync` 注册可留可删（留着只是多同步一个不用的 skill）。
+  - 反思见 memory `plan-cost-first-and-spike`：定方案要先按成本打分 + 先小规模真跑再铺开。
+- **三种场景一套 UI**（模板管理「🌐 补全多语言」+ 每条「重译」）：首次铺底=整产品+全语言；单条重译=该条覆盖（源改了 `src_hash` 不符→stale 高亮提示）；新增语言=只补缺失、追加不覆盖。
+- **源语言不进 translations**：源 `en`/`zh-CN`，translations 只存其它语言；`is_source_lang` 判定 `zh-rCN↔zh-CN` 同源，避免把中文源再翻成中文。
+- **stale 机制**：改了源文 `text` 没重译 → `src_hash != hash(text)` → UI 标「源已改」。`update_template` 不主动动 `src_hash`，靠它自然变 stale；`list_templates` 返回 `TemplateView`（flatten + `stale`）。
+- **xlsx 导入清空译文**：覆盖导入=全新源，`translations` 清空，提示重新补全。
+- 详见 [handoff-template-i18n.md](handoff-template-i18n.md)。

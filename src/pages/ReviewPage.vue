@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { lastWorkdayBefore, toIso, computeRange } from "../utils/batchReplyDates";
 import { loadPlayConfig } from "../utils/playConsoleConfig";
+import { loadFavIds } from "../utils/templateFavorites";
 
 interface PlayApp {
   package_name: string;
@@ -668,6 +669,149 @@ async function handleSubmitReply(task: AiTask) {
     task.submitting = false;
   }
 }
+
+// ── 模板回复（快捷取用收藏模板，按评论语言自动填好译文）─────────────────────
+// 与「AI 回复」是两条独立路径：模板回复不调 LLM，直接从本地收藏的模板里挑一条，
+// 按评论语言匹配预存译文填入即可提交。
+interface TemplateView {
+  id: string;
+  category: string;
+  text: string;
+  lang: string; // 源语言 en / zh-CN
+  translations: Record<string, string>;
+  src_hash: string;
+  stale: boolean;
+}
+type FavTemplate = TemplateView & { product: string };
+
+const tplDlgReview = ref<TaggedReview | null>(null); // null = 弹窗关闭
+const tplLoading = ref(false);
+const tplError = ref("");
+const tplGeneral = ref<FavTemplate[]>([]); // 「通用」产品下的收藏
+const tplSpecific = ref<FavTemplate[]>([]); // 该评论 app 专属产品下的收藏
+const tplSpecificProduct = ref(""); // 专属产品名（弹窗分组标题用）
+const tplReplyText = ref("");
+const tplSelectedId = ref("");
+const tplUsedLang = ref(""); // 实际填入用的语言码
+const tplFallback = ref(false); // 无对应语言译文、回退英文源文
+const tplWantedLang = ref(""); // 回退时记下原本想要的语言（提示用）
+const tplSubmitting = ref(false);
+
+const tplReplyLen = computed(() => [...tplReplyText.value].length);
+const tplHasFavs = computed(
+  () => tplGeneral.value.length > 0 || tplSpecific.value.length > 0
+);
+
+// 评论语言（ISO/BCP-47）→ 模板译文 key（app 原生码）。规则对齐 review-reply skill：
+// zh-CN/zh-Hans→zh-rCN、zh-TW/zh-Hant→zh-rTW、id→in，其余取主子标签匹配。
+function normReviewLang(iso: string): string {
+  let l = (iso || "").trim().toLowerCase().replace(/_/g, "-");
+  if (l === "zh-cn" || l === "zh-hans" || l === "zh") return "zh-rcn";
+  if (l === "zh-tw" || l === "zh-hant") return "zh-rtw";
+  if (l === "id") return "in";
+  return l;
+}
+
+// 给一条模板挑出该评论语言对应的正文。先判是否就是源语言（直接用 text），
+// 再在 translations 里精确 / 主子标签匹配，都没有则回退英文源文（fallback=true）。
+function resolveTplText(
+  t: FavTemplate,
+  reviewerLang: string
+): { text: string; lang: string; fallback: boolean } {
+  const norm = (s: string) => s.trim().toLowerCase().replace(/_/g, "-");
+  const l = normReviewLang(reviewerLang);
+  const prim = l ? l.split("-")[0] : "en";
+  // 源语言直接用 text（无评论语言时也按源语言）
+  if (t.lang === "en" && (prim === "en" || !l)) return { text: t.text, lang: "en", fallback: false };
+  if (t.lang === "zh-CN" && prim === "zh") return { text: t.text, lang: "zh-CN", fallback: false };
+  // translations：先精确，再主子标签
+  const keys = Object.keys(t.translations || {});
+  let hit = keys.find((k) => norm(k) === l);
+  if (!hit) hit = keys.find((k) => norm(k).split("-")[0] === prim);
+  if (hit) return { text: t.translations[hit], lang: hit, fallback: false };
+  // 回退英文源文（其它源语言也回退到它的 text）
+  return { text: t.text, lang: t.lang, fallback: true };
+}
+
+async function openTplDialog(r: TaggedReview) {
+  tplDlgReview.value = r;
+  tplReplyText.value = "";
+  tplSelectedId.value = "";
+  tplError.value = "";
+  tplFallback.value = false;
+  tplUsedLang.value = "";
+  tplWantedLang.value = "";
+  tplGeneral.value = [];
+  tplSpecific.value = [];
+  tplSpecificProduct.value = "";
+  tplLoading.value = true;
+  try {
+    const favs = loadFavIds();
+    // 通用产品（可能不存在 → 返回空）
+    const gen = await invoke<TemplateView[]>("list_templates", { product: "通用" }).catch(() => []);
+    tplGeneral.value = gen.filter((t) => favs.has(t.id)).map((t) => ({ ...t, product: "通用" }));
+    // 该评论来源 app 的专属产品
+    const product = await invoke<string | null>("product_for_package", {
+      packageName: r._pkg,
+    }).catch(() => null);
+    if (product && product !== "通用") {
+      tplSpecificProduct.value = product;
+      const sp = await invoke<TemplateView[]>("list_templates", { product }).catch(() => []);
+      tplSpecific.value = sp.filter((t) => favs.has(t.id)).map((t) => ({ ...t, product }));
+    }
+  } catch (e: any) {
+    tplError.value = String(e);
+  } finally {
+    tplLoading.value = false;
+  }
+}
+
+function applyTemplate(item: FavTemplate) {
+  const r = tplDlgReview.value;
+  if (!r) return;
+  const res = resolveTplText(item, r.reviewer_language || "");
+  tplReplyText.value = res.text;
+  tplSelectedId.value = item.id;
+  tplUsedLang.value = res.lang;
+  tplFallback.value = res.fallback;
+  tplWantedLang.value = res.fallback ? r.reviewer_language || "" : "";
+  tplError.value = "";
+}
+
+function closeTplDialog() {
+  if (tplSubmitting.value) return;
+  tplDlgReview.value = null;
+}
+
+async function submitTplReply() {
+  const r = tplDlgReview.value;
+  if (!r || tplSubmitting.value) return;
+  const text = tplReplyText.value.trim();
+  if (!text) {
+    tplError.value = "回复内容为空。";
+    return;
+  }
+  if ([...text].length > 350) {
+    tplError.value = `回复超过 350 字符（当前 ${[...text].length}），请精简后再提交。`;
+    return;
+  }
+  tplSubmitting.value = true;
+  tplError.value = "";
+  try {
+    await invoke("reply_to_review", {
+      packageName: r._pkg,
+      reviewId: r.review_id,
+      replyText: text,
+    });
+    r.developer_reply = text;
+    r.developer_reply_ts = Math.floor(Date.now() / 1000);
+    tplDlgReview.value = null;
+  } catch (e: any) {
+    tplError.value = String(e);
+  } finally {
+    tplSubmitting.value = false;
+  }
+}
 </script>
 
 <template>
@@ -814,6 +958,9 @@ async function handleSubmitReply(task: AiTask) {
           <span class="stars" :class="`stars-${r.star_rating}`">{{ starsDisplay(r.star_rating) }}</span>
           <span class="author">{{ r.author_name || "(匿名)" }}</span>
           <span class="ts">{{ formatTs(r.user_comment_ts) }}</span>
+          <button class="tpl-reply-btn" @click="openTplDialog(r)" title="用收藏的常用模板快速回复（按评论语言自动填译文）">
+            📋 模板回复
+          </button>
           <button class="ai-btn" @click="openAiDialog(r)">
             🤖 {{ r.developer_reply ? "AI 重新回复" : "AI 回复" }}
           </button>
@@ -992,6 +1139,79 @@ async function handleSubmitReply(task: AiTask) {
         <div v-if="activeTask.usage" class="ai-usage">
           💰 本次用量：输入 {{ activeTask.usage.input_tokens ?? 0 }} · 输出 {{ activeTask.usage.output_tokens ?? 0 }} tokens
           <span v-if="activeTask.usage.total_cost_usd"> · 约 ${{ activeTask.usage.total_cost_usd.toFixed(4) }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 模板回复弹窗 -->
+    <div v-if="tplDlgReview" class="ai-overlay" @click.self="closeTplDialog">
+      <div class="ai-dialog tpl-dialog">
+        <div class="ai-dialog-head">
+          <span class="ai-title">📋 模板回复</span>
+          <button class="ai-close" :disabled="tplSubmitting" @click="closeTplDialog">✕</button>
+        </div>
+
+        <div class="ai-review-quote">
+          <span class="stars" :class="`stars-${tplDlgReview.star_rating}`">{{ starsDisplay(tplDlgReview.star_rating) }}</span>
+          <div class="ai-quote-body">
+            <div class="ai-quote-text">{{ tplDlgReview.text || "(无文字)" }}</div>
+            <div v-if="tplDlgReview.original_text" class="ai-quote-orig">
+              <span class="ai-quote-orig-label">原文：</span>{{ tplDlgReview.original_text }}
+            </div>
+            <div class="tpl-lang-line">评论语言：{{ tplDlgReview.reviewer_language || "未知" }}</div>
+          </div>
+        </div>
+
+        <div v-if="tplLoading" class="tpl-loading">加载收藏模板中…</div>
+        <div v-else-if="tplError && !tplHasFavs" class="ai-error">{{ tplError }}</div>
+        <div v-else-if="!tplHasFavs" class="tpl-empty">
+          还没有收藏任何模板。去「模板管理」页给常用模板点 ★ 收藏，这里就会出现（分「通用」和该应用「专用」两组）。
+        </div>
+        <template v-else>
+          <div v-if="tplGeneral.length" class="tpl-group">
+            <div class="tpl-group-title">通用</div>
+            <div class="tpl-btn-row">
+              <button
+                v-for="t in tplGeneral"
+                :key="t.id"
+                class="tpl-pick"
+                :class="{ active: tplSelectedId === t.id }"
+                @click="applyTemplate(t)"
+              >{{ t.category || "未分类" }}</button>
+            </div>
+          </div>
+          <div v-if="tplSpecific.length" class="tpl-group">
+            <div class="tpl-group-title">专用 · {{ tplSpecificProduct }}</div>
+            <div class="tpl-btn-row">
+              <button
+                v-for="t in tplSpecific"
+                :key="t.id"
+                class="tpl-pick"
+                :class="{ active: tplSelectedId === t.id }"
+                @click="applyTemplate(t)"
+              >{{ t.category || "未分类" }}</button>
+            </div>
+          </div>
+        </template>
+
+        <div v-if="tplSelectedId || tplReplyText" class="ai-final">
+          <label class="ai-label">回复内容（可手动微调）</label>
+          <div v-if="tplFallback" class="tpl-fallback-note">
+            ⚠️ 该模板没有「{{ tplWantedLang || "该语言" }}」译文，已用{{ tplUsedLang === "zh-CN" ? "中文" : "英文" }}源文填入，可手动改后再提交。
+          </div>
+          <div v-else-if="tplUsedLang" class="tpl-used-note">已按评论语言填入译文（{{ tplUsedLang }}）</div>
+          <textarea v-model="tplReplyText" class="ai-final-text" rows="4"></textarea>
+          <div class="ai-final-foot">
+            <span class="ai-charcount" :class="{ over: tplReplyLen > 350 }">{{ tplReplyLen }} / 350</span>
+            <button
+              class="ai-submit-btn"
+              :disabled="tplSubmitting || !tplReplyText.trim() || tplReplyLen > 350"
+              @click="submitTplReply"
+            >
+              {{ tplSubmitting ? "提交中…" : "确认提交到 Play" }}
+            </button>
+          </div>
+          <div v-if="tplError" class="ai-error">{{ tplError }}</div>
         </div>
       </div>
     </div>
@@ -1452,11 +1672,27 @@ async function handleSubmitReply(task: AiTask) {
   background: white;
   color: #667eea;
   cursor: pointer;
-  margin-left: auto;
   flex-shrink: 0;
 }
 .ai-btn:hover {
   background: #667eea;
+  color: white;
+}
+.tpl-reply-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  border: 1px solid #9f7aea;
+  border-radius: 6px;
+  background: white;
+  color: #6b46c1;
+  cursor: pointer;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.tpl-reply-btn:hover {
+  background: #9f7aea;
   color: white;
 }
 .web-btn {
@@ -1879,5 +2115,66 @@ async function handleSubmitReply(task: AiTask) {
   border-top: 1px solid #eee;
   font-size: 11px;
   color: #999;
+}
+
+/* ── 模板回复弹窗 ── */
+.tpl-dialog {
+  max-width: 560px;
+}
+.tpl-lang-line {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #6b46c1;
+}
+.tpl-loading,
+.tpl-empty {
+  font-size: 13px;
+  color: #888;
+  padding: 16px 4px;
+  line-height: 1.6;
+}
+.tpl-group {
+  margin-top: 12px;
+}
+.tpl-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a5568;
+  margin-bottom: 8px;
+}
+.tpl-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tpl-pick {
+  padding: 6px 14px;
+  font-size: 13px;
+  border: 1px solid #cbd5e0;
+  border-radius: 16px;
+  background: white;
+  color: #2d3748;
+  cursor: pointer;
+}
+.tpl-pick:hover {
+  border-color: #9f7aea;
+  background: #faf5ff;
+}
+.tpl-pick.active {
+  border-color: #9f7aea;
+  background: #9f7aea;
+  color: white;
+}
+.tpl-fallback-note {
+  font-size: 12px;
+  color: #975a16;
+  background: #fffaf0;
+  border: 1px solid #fbd38d;
+  border-radius: 6px;
+  padding: 5px 10px;
+}
+.tpl-used-note {
+  font-size: 11px;
+  color: #2f855a;
 }
 </style>

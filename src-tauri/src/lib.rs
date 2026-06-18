@@ -9,11 +9,13 @@ mod reviews;
 mod sheets;
 mod skill_sync;
 mod templates;
+mod translate;
 
 use auth::AuthState;
 use claude::ClaudeState;
 use compare::CompareState;
 use reply::ReplyState;
+use translate::TranslateState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -24,6 +26,7 @@ pub fn run() {
         .manage(ClaudeState::new())
         .manage(CompareState::new())
         .manage(ReplyState::new())
+        .manage(TranslateState::new())
         .invoke_handler(tauri::generate_handler![
             auth::check_auth,
             auth::start_login,
@@ -68,6 +71,9 @@ pub fn run() {
             templates::update_template,
             templates::delete_template,
             templates::import_templates_xlsx,
+            templates::set_template_translation,
+            translate::translate_templates,
+            translate::stop_translate,
             chrome::list_chrome_profiles,
             chrome::open_url_in_chrome_profile,
         ])

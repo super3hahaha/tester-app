@@ -413,7 +413,15 @@ const currentLabel = computed(
             <span class="from">{{ selectedMail.from || "(未知发件人)" }}</span>
             <span class="ts">{{ selectedMail.date }}</span>
           </div>
-          <button class="detail-close" @click="closeDetail">✕</button>
+          <div class="detail-head-actions">
+            <button class="read-btn" @click="markRead(selectedMail)" title="标为已读，下次拉取不再显示">
+              标为已读
+            </button>
+            <button class="web-btn" @click="openInGmail(selectedMail)" title="在 Gmail 中打开该会话，本人回复">
+              ↗ 在 Gmail 中打开
+            </button>
+            <button class="detail-close" @click="closeDetail">✕</button>
+          </div>
         </div>
         <div class="detail-subject">{{ selectedMail.subject || "(无主题)" }}</div>
         <div v-if="hasAttachment(selectedMail)" class="detail-att">📎 {{ selectedMail.attachments }}</div>
@@ -425,15 +433,6 @@ const currentLabel = computed(
         <div class="detail-section">
           <div class="detail-label">原文</div>
           <div class="detail-text orig">{{ selectedMail.body || "(无正文)" }}</div>
-        </div>
-
-        <div class="detail-foot">
-          <button class="read-btn" @click="markRead(selectedMail)" title="标为已读，下次拉取不再显示">
-            标为已读
-          </button>
-          <button class="web-btn" @click="openInGmail(selectedMail)" title="在 Gmail 中打开该会话，本人回复">
-            ↗ 在 Gmail 中打开
-          </button>
         </div>
       </div>
     </div>
@@ -775,11 +774,11 @@ const currentLabel = computed(
   border-left-color: #cbd5e0;
   background: #fafafa;
 }
-.detail-foot {
-  margin-top: 16px;
+.detail-head-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 .web-btn {
   padding: 6px 14px;
