@@ -100,6 +100,7 @@ pub async fn translate_templates(
     langs: Vec<String>,
     overwrite: bool,
     channel: Option<String>,
+    namespace: Option<String>,
     model: Option<String>,
     app: AppHandle,
     state: State<'_, TranslateState>,
@@ -112,7 +113,7 @@ pub async fn translate_templates(
         *running = true;
     }
     let result =
-        translate_inner(product, ids, langs, overwrite, channel, model, app.clone()).await;
+        translate_inner(product, ids, langs, overwrite, channel, namespace, model, app.clone()).await;
     *state.running.lock().unwrap() = false;
     *state.child_pid.lock().unwrap() = None;
     match &result {
@@ -160,16 +161,18 @@ async fn translate_inner(
     langs: Vec<String>,
     overwrite: bool,
     channel: Option<String>,
+    namespace: Option<String>,
     model: Option<String>,
     app: AppHandle,
 ) -> Result<TranslateResult, String> {
     let channel = channel.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "gp".into());
+    let ns = namespace.as_deref().unwrap_or("gp").to_string();
     let langs: Vec<String> = langs.into_iter().filter(|s| !s.trim().is_empty()).collect();
     if langs.is_empty() {
         return Err("没有选择任何目标语言。".into());
     }
 
-    let all = crate::templates::load_templates_for(&product)?;
+    let all = crate::templates::load_templates_for(&product, &ns)?;
     let id_filter: Option<std::collections::HashSet<String>> =
         ids.map(|v| v.into_iter().collect());
 
@@ -243,7 +246,7 @@ async fn translate_inner(
             translate_one_batch(&claude_path, &channel, chunk, model.as_deref(), &app).await?;
 
         // 增量写回：这一批立刻落盘，取消/失败也保住已完成的。
-        crate::templates::apply_translations(&product, &updates)?;
+        crate::templates::apply_translations(&product, &ns, &updates)?;
         done_templates += updates.len();
         done_units += updates.values().map(|m| m.len()).sum::<usize>();
         // 警告本批漏翻的（模型没返回某些 id/语言）
@@ -303,12 +306,17 @@ fn build_prompt(channel: &str, chunk: &[Job]) -> String {
         )
     };
 
+    let scenario = if channel == "email" {
+        "邮件客服回复模板"
+    } else {
+        "Google Play 应用商店回复模板"
+    };
     format!(
-        r#"你是专业本地化翻译。把下面的 Google Play 回复模板从各自的源语言忠实翻译到它的每个目标语言。
+        r#"你是专业本地化翻译。把下面的{scenario}从各自的源语言忠实翻译到它的每个目标语言。
 不要使用任何工具，不要读写任何文件，直接输出结果。
 
 【规则】
-1. 忠实翻译，保持语义和语气（道歉/感谢/求评分/引导排查等），不增删、不编造。
+1. 忠实翻译，保持语义和语气（道歉/感谢/引导排查等），不增删、不编造。
 2. 原样保留不翻译：邮箱、版本号、产品名（XFolder / MP3 Cutter / Video to MP3 / Android / Google Play）、emoji/表情、占位符（如 {{name}} / %s / %1$s）。
 3. 长度：{len_rule}
 4. 语言码用「app 原生码」，**原样**作为输出 key（如 zh-rCN / zh-rTW / in / kn-rIN 等 `*-rIN`），不要改写成 ISO 码。

@@ -80,15 +80,18 @@ const DEFAULT_CODES = [
   "ar", "cs", "de", "es", "fa", "fr", "in", "it", "ja", "ko", "ms",
   "nl", "pl", "pt", "ro", "ru", "th", "tr", "uk", "vi", "zh-rCN", "zh-rTW",
 ];
-// 翻译用 haiku：纯文本转换任务，haiku 足够且单价是 sonnet 的 1/3；质量不够再换。
-const TRANSLATE_MODEL = "claude-haiku-4-5";
+interface ModelConfig { reply: string; analysis: string; translate: string; }
+const modelConfig = ref<ModelConfig>({ reply: "claude-sonnet-4-6", analysis: "claude-sonnet-4-6", translate: "claude-haiku-4-5" });
+invoke<ModelConfig>("get_model_config").then(c => { modelConfig.value = c; }).catch(() => {});
+const TRANSLATE_MODEL = computed(() => modelConfig.value.translate);
 const LANGS_STORE_KEY = "tpl-translate-langs";
 
 function langName(code: string): string {
   return LANGS.find((l) => l.code === code)?.name || "";
 }
 
-const props = defineProps<{ activeOption?: string }>();
+const props = defineProps<{ activeOption?: string; triggerOption?: string; namespace?: string }>();
+const NS = computed(() => props.namespace ?? "gp");
 
 const products = ref<ProductInfo[]>([]);
 const selectedProduct = ref("");
@@ -176,7 +179,7 @@ async function loadProducts() {
   loading.value = true;
   error.value = "";
   try {
-    products.value = await invoke<ProductInfo[]>("list_template_products");
+    products.value = await invoke<ProductInfo[]>("list_template_products", { namespace: NS.value });
     if (
       products.value.length > 0 &&
       !products.value.some((p) => p.product === selectedProduct.value)
@@ -199,6 +202,7 @@ async function loadTemplates() {
   try {
     templates.value = await invoke<Template[]>("list_templates", {
       product: selectedProduct.value,
+      namespace: NS.value,
     });
   } catch (e: any) {
     error.value = String(e);
@@ -221,17 +225,19 @@ function cancelNewProduct() {
   showNewProduct.value = false;
   newProductName.value = "";
 }
-// 新建产品：前端临时占位，加第一条模板后由 add_template 真正落地（loadProducts 刷新）。
-function createProduct() {
+async function createProduct() {
   const name = newProductName.value.trim();
   if (!name) return;
   showNewProduct.value = false;
   newProductName.value = "";
-  if (!products.value.some((p) => p.product === name)) {
-    products.value.push({ product: name, count: 0, apps: [] });
+  try {
+    await invoke("create_template_product", { product: name, namespace: NS.value });
+    await loadProducts();
+    selectProduct(name);
+    flash(`已创建产品「${name}」`);
+  } catch (e: any) {
+    error.value = String(e);
   }
-  selectProduct(name);
-  flash(`已切到「${name}」，加第一条模板即创建该产品`);
 }
 
 function flash(msg: string) {
@@ -254,11 +260,11 @@ async function addTemplate() {
       category: newCategory.value,
       text: newText.value,
       lang: newLang.value,
+      namespace: NS.value,
     });
     newCategory.value = "";
     newText.value = "";
     await loadProducts(); // 刷新条数 + 列表
-    flash("已新增模板（到「补全多语言」生成译文）");
   } catch (e: any) {
     error.value = String(e);
   }
@@ -277,6 +283,7 @@ async function saveTemplate(t: Template) {
           id: t.id,
           lang: l,
           text: v,
+          namespace: NS.value,
         });
       }
     }
@@ -287,6 +294,7 @@ async function saveTemplate(t: Template) {
       category: t.category,
       text: t.text,
       lang: t.lang,
+      namespace: NS.value,
     });
     await loadTemplates(); // 刷新 stale / 覆盖度
     flash(`已保存 ${t.id}`);
@@ -312,9 +320,8 @@ function armDelete(id: string) {
 async function doDelete(id: string) {
   error.value = "";
   try {
-    await invoke("delete_template", { product: selectedProduct.value, id });
+    await invoke("delete_template", { product: selectedProduct.value, id, namespace: NS.value });
     await loadProducts();
-    flash(`已删除 ${id}`);
   } catch (e: any) {
     error.value = String(e);
   }
@@ -341,15 +348,16 @@ async function retranslateOne(t: Template) {
         ids: [t.id],
         langs: group,
         overwrite: true,
-        channel: "gp",
-        model: TRANSLATE_MODEL,
+        channel: NS.value === "email" ? "email" : "gp",
+        namespace: NS.value,
+        model: TRANSLATE_MODEL.value,
       });
       retransDone.value = Math.min(langs.length, i + group.length);
       await loadTemplates(); // 每组写回后刷新该条覆盖度
     }
     // 单条重译没弹窗看不到日志 → 完成后扫该条仍超 350 的语言，红色 banner 提示
     const fresh = templates.value.find((x) => x.id === t.id);
-    const over = fresh
+    const over = (NS.value !== 'email' && fresh)
       ? Object.entries(fresh.translations || {})
           .filter(([, v]) => (v as string).length > 350)
           .map(([l]) => l)
@@ -396,6 +404,7 @@ async function confirmImport() {
     const res = await invoke<ImportResult>("import_templates_xlsx", {
       product: selectedProduct.value,
       path: pendingImportPath.value,
+      namespace: NS.value,
     });
     pendingImportPath.value = "";
     await loadProducts();
@@ -458,19 +467,20 @@ async function runBatchTranslate() {
     const r = await invoke<TranslateResult>("translate_templates", {
       product: selectedProduct.value,
       ids: null,
-      langs: selectedLangs.value,
+      langs: [...selectedLangs.value],
       overwrite: overwriteMode.value,
-      channel: "gp",
-      model: TRANSLATE_MODEL,
+      channel: NS.value === "email" ? "email" : "gp",
+      namespace: NS.value,
+      model: TRANSLATE_MODEL.value,
     });
     await loadTemplates();
     translateDone.value = true;
     translateMinimized.value = false; // 完成自动弹回大窗，显示「好的」
-    const overCount = templates.value.reduce(
+    const overCount = NS.value !== 'email' ? templates.value.reduce(
       (n, t) =>
         n + Object.values(t.translations || {}).filter((v) => (v as string).length > 350).length,
       0
-    );
+    ) : 0;
     let msg = `补全完成：${r.templates} 条模板 / ${r.units} 条译文`;
     if (overCount) msg += ` · ⚠ ${overCount} 条仍超 350（已标红）`;
     flash(msg);
@@ -491,7 +501,7 @@ watch(
   (v) => {
     translateDone.value = false; // 改了语言 → 恢复「开始翻译」
     try {
-      localStorage.setItem(LANGS_STORE_KEY, JSON.stringify(v));
+      localStorage.setItem(LANGS_STORE_KEY, JSON.stringify([...v]));
     } catch {}
   },
   { deep: true }
@@ -541,7 +551,7 @@ onUnmounted(() => {
 watch(
   () => props.activeOption,
   (v) => {
-    if (v === "review-templates") loadProducts();
+    if (v === (props.triggerOption ?? "review-templates")) loadProducts();
   }
 );
 </script>
@@ -549,10 +559,10 @@ watch(
 <template>
   <div class="template-page">
     <header class="page-header">
-      <h3>模板管理</h3>
+      <h3>{{ NS === 'email' ? 'Gmail模板管理' : 'GP模板管理' }}</h3>
       <p class="subtitle">
-        分产品维护 Google Play 回复模板 + 预翻译多语言。改动存本地
-        <code>~/.tester-app/templates/</code>，批量回复时 skill 命中模板优先取预存译文。
+        分产品维护回复模板 + 预翻译多语言。改动存本地
+        <code>~/.tester-app/{{ NS === 'email' ? 'email-templates' : 'templates' }}/</code>
       </p>
     </header>
 
@@ -572,7 +582,7 @@ watch(
         <span class="tab-count">{{ p.count }}</span>
       </button>
       <span v-if="!loading && products.length === 0" class="empty-hint">
-        暂无产品模板。先到 Settings 同步 review-reply skill，或用下方「从 xlsx 导入」。
+        暂无产品模板。用「+ 新建产品」或「从 xlsx 导入」。
       </span>
       <template v-if="!showNewProduct">
         <button class="new-product-btn" :disabled="translating" @click="startNewProduct">
@@ -595,7 +605,6 @@ watch(
       <span v-if="selectedInfo.apps.length">
         关联应用：{{ selectedInfo.apps.join("、") }}
       </span>
-      <span v-else class="muted">（package_map 里暂无关联应用）</span>
 
       <div class="meta-spacer"></div>
 
@@ -701,7 +710,7 @@ watch(
           >
             🌐 {{ Object.keys(t.translations || {}).length }}<template v-if="t.stale"> · 源已改</template>
           </span>
-          <span class="tpl-len" :class="{ over: curText(t).length > 350 }">
+          <span class="tpl-len" :class="{ over: NS !== 'email' && curText(t).length > 350 }">
             {{ curText(t).length }} 字符
           </span>
           <div class="tpl-head-spacer"></div>
@@ -729,7 +738,7 @@ watch(
         <textarea
           :value="curText(t)"
           class="tpl-text"
-          rows="3"
+          :rows="NS === 'email' ? 6 : 3"
           :disabled="translating"
           :placeholder="curLang(t) === t.lang ? '源正文' : `${curLang(t)} 译文`"
           @input="setCurText(t, ($event.target as HTMLTextAreaElement).value)"

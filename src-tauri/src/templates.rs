@@ -83,9 +83,18 @@ fn data_dir() -> PathBuf {
     dirs::home_dir().unwrap().join(".tester-app")
 }
 
-/// 模板数据目录 `~/.tester-app/templates/`（reply.rs 也用它告诉 skill 去哪读）。
+/// namespace → 存储目录。"email" → `~/.tester-app/email-templates/`，其它 → `~/.tester-app/templates/`。
+fn ns_dir(namespace: &str) -> PathBuf {
+    if namespace == "email" {
+        data_dir().join("email-templates")
+    } else {
+        data_dir().join("templates")
+    }
+}
+
+/// 模板数据目录（review/GP 用）`~/.tester-app/templates/`（reply.rs 也用它告诉 skill 去哪读）。
 pub fn templates_dir() -> PathBuf {
-    data_dir().join("templates")
+    ns_dir("gp")
 }
 
 /// skill_sync 把 review-reply 下载到这里，首次迁移从它拷种子。
@@ -106,14 +115,14 @@ fn now_secs() -> String {
         .to_string()
 }
 
-/// 确保模板目录存在并已初始化。首次（无 templates.json）从 skill 已同步的 data/
-/// 拷三个 json 作种子；连种子也没有就建空结构。返回目录路径。
-pub fn ensure_templates_dir() -> Result<PathBuf, String> {
-    let dir = templates_dir();
+/// 确保指定 namespace 的模板目录存在并已初始化。
+/// GP（默认）：首次从 review-reply skill data/ 拷种子；email：直接建空结构。
+pub fn ensure_templates_dir_ns(namespace: &str) -> Result<PathBuf, String> {
+    let dir = ns_dir(namespace);
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建模板目录失败：{}", e))?;
 
     let tpl = dir.join("templates.json");
-    if !tpl.exists() {
+    if !tpl.exists() && namespace != "email" {
         let seed = skill_data_dir();
         for f in ["templates.json", "index.json", "package_map.json"] {
             let src = seed.join(f);
@@ -123,33 +132,37 @@ pub fn ensure_templates_dir() -> Result<PathBuf, String> {
             }
         }
     }
-    // 仍没有 templates.json（skill 未同步过）→ 建空结构
     if !tpl.exists() {
         let mut empty = TemplatesFile {
             version: now_secs(),
             source_file: String::new(),
             products: BTreeMap::new(),
         };
-        write_templates_and_index(&mut empty)?;
+        write_templates_and_index_to(&dir, &mut empty)?;
     } else if !dir.join("index.json").exists() {
-        // 有全文但缺索引（种子不全）→ 由全文重建一次
-        let mut f = read_templates()?;
-        write_templates_and_index(&mut f)?;
+        let mut f = read_templates_from(&dir)?;
+        write_templates_and_index_to(&dir, &mut f)?;
     }
     Ok(dir)
 }
 
-fn read_templates() -> Result<TemplatesFile, String> {
-    let dir = templates_dir();
+/// 向后兼容：不传 namespace 时用 GP 目录。
+pub fn ensure_templates_dir() -> Result<PathBuf, String> {
+    ensure_templates_dir_ns("gp")
+}
+
+fn read_templates_from(dir: &PathBuf) -> Result<TemplatesFile, String> {
     let s = std::fs::read_to_string(dir.join("templates.json"))
         .map_err(|e| format!("读取 templates.json 失败：{}", e))?;
     serde_json::from_str(&s).map_err(|e| format!("templates.json 不是合法 JSON：{}", e))
 }
 
-/// 唯一的写出口：写 templates.json 的同时由全文派生重建 index.json，二者永远一致。
-fn write_templates_and_index(f: &mut TemplatesFile) -> Result<(), String> {
-    let dir = templates_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建模板目录失败：{}", e))?;
+fn read_templates_ns(namespace: &str) -> Result<TemplatesFile, String> {
+    read_templates_from(&ns_dir(namespace))
+}
+
+fn write_templates_and_index_to(dir: &PathBuf, f: &mut TemplatesFile) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建模板目录失败：{}", e))?;
     f.version = now_secs();
 
     let tpl_str =
@@ -179,25 +192,35 @@ fn write_templates_and_index(f: &mut TemplatesFile) -> Result<(), String> {
     Ok(())
 }
 
-fn slug(s: &str) -> String {
+fn write_templates_and_index_ns(namespace: &str, f: &mut TemplatesFile) -> Result<(), String> {
+    write_templates_and_index_to(&ns_dir(namespace), f)
+}
+
+/// 向后兼容（reply.rs 里只用 GP 模板目录）。
+fn read_templates() -> Result<TemplatesFile, String> {
+    read_templates_ns("gp")
+}
+fn write_templates_and_index(f: &mut TemplatesFile) -> Result<(), String> {
+    write_templates_and_index_ns("gp", f)
+}
+
+pub(crate) fn slug(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .collect::<String>()
         .to_lowercase()
 }
 
-/// 该产品的 id 前缀：优先沿用现有模板的前缀，否则用已知映射，最后退回 slug。
-fn product_prefix(product: &str, templates: &[Template]) -> String {
+/// 该产品的 id 前缀：优先沿用现有模板的前缀，否则退回 slug。
+pub(crate) fn product_prefix(product: &str, templates: &[Template]) -> String {
     if let Some(t) = templates.first() {
         if let Some(i) = t.id.rfind('-') {
             return t.id[..i].to_string();
         }
     }
     match product {
-        "XFolder" => "xfolder".to_string(),
-        "MP3 Cutter" => "mp3cutter".to_string(),
-        "Video to MP3" => "video2mp3".to_string(),
-        "通用" => "common".to_string(), // 跨 app 通用模板（中文名 slug 会空，固定前缀）
+        // 中文名兜底规则（非具体产品）：纯中文名 slug 会为空，给「通用」一个稳定前缀。
+        "通用" => "common".to_string(),
         _ => {
             let s = slug(product);
             if s.is_empty() {
@@ -222,14 +245,14 @@ fn next_id(product: &str, templates: &[Template]) -> String {
     format!("{}-{:03}", prefix, max_seq(templates) + 1)
 }
 
-// ── package_map（包名↔产品）：第一期只读，用于在列表里显示产品关联的 app ──
+// ── package_map（包名↔产品）：只有 GP namespace 有，email 直接返回 None ──
 
-fn read_package_map() -> Option<serde_json::Value> {
-    let s = std::fs::read_to_string(templates_dir().join("package_map.json")).ok()?;
+fn read_package_map_ns(namespace: &str) -> Option<serde_json::Value> {
+    let s = std::fs::read_to_string(ns_dir(namespace).join("package_map.json")).ok()?;
     serde_json::from_str(&s).ok()
 }
 
-fn apps_for_product(pkgmap: &Option<serde_json::Value>, product: &str) -> Vec<String> {
+fn apps_for_product_from(pkgmap: &Option<serde_json::Value>, product: &str) -> Vec<String> {
     let mut out = vec![];
     if let Some(m) = pkgmap.as_ref().and_then(|v| v.get("mapping")).and_then(|v| v.as_object()) {
         for entry in m.values() {
@@ -247,25 +270,41 @@ fn apps_for_product(pkgmap: &Option<serde_json::Value>, product: &str) -> Vec<St
 
 #[derive(Serialize)]
 pub struct ProductInfo {
-    product: String,
-    count: usize,
-    apps: Vec<String>,
+    pub(crate) product: String,
+    pub(crate) count: usize,
+    pub(crate) apps: Vec<String>,
 }
 
 #[tauri::command]
-pub fn list_template_products() -> Result<Vec<ProductInfo>, String> {
-    ensure_templates_dir()?;
-    let f = read_templates()?;
-    let pkgmap = read_package_map();
+pub fn list_template_products(namespace: Option<String>) -> Result<Vec<ProductInfo>, String> {
+    let ns = namespace.as_deref().unwrap_or("gp");
+    ensure_templates_dir_ns(ns)?;
+    let f = read_templates_ns(ns)?;
+    let pkgmap = read_package_map_ns(ns);
     Ok(f
         .products
         .iter()
         .map(|(prod, pt)| ProductInfo {
             product: prod.clone(),
             count: pt.templates.len(),
-            apps: apps_for_product(&pkgmap, prod),
+            apps: apps_for_product_from(&pkgmap, prod),
         })
         .collect())
+}
+
+/// 创建空产品（若已存在则幂等）。前端「新建产品」时立刻落盘，不再依赖加第一条模板才持久化。
+#[tauri::command]
+pub fn create_template_product(product: String, namespace: Option<String>) -> Result<(), String> {
+    let product = product.trim().to_string();
+    if product.is_empty() {
+        return Err("产品名不能为空。".into());
+    }
+    let ns = namespace.as_deref().unwrap_or("gp");
+    ensure_templates_dir_ns(ns)?;
+    let mut f = read_templates_ns(ns)?;
+    f.products.entry(product).or_default();
+    write_templates_and_index_ns(ns, &mut f)?;
+    Ok(())
 }
 
 /// 按包名查它对应的模板产品（XFolder/MP3 Cutter/...）。返回 None 表示该应用没有
@@ -273,7 +312,7 @@ pub fn list_template_products() -> Result<Vec<ProductInfo>, String> {
 #[tauri::command]
 pub fn product_for_package(package_name: String) -> Result<Option<String>, String> {
     ensure_templates_dir()?;
-    let pkgmap = read_package_map();
+    let pkgmap = read_package_map_ns("gp");
     if let Some(m) = pkgmap
         .as_ref()
         .and_then(|v| v.get("mapping"))
@@ -299,9 +338,10 @@ pub struct TemplateView {
 }
 
 #[tauri::command]
-pub fn list_templates(product: String) -> Result<Vec<TemplateView>, String> {
-    ensure_templates_dir()?;
-    let f = read_templates()?;
+pub fn list_templates(product: String, namespace: Option<String>) -> Result<Vec<TemplateView>, String> {
+    let ns = namespace.as_deref().unwrap_or("gp");
+    ensure_templates_dir_ns(ns)?;
+    let f = read_templates_ns(ns)?;
     let list = f
         .products
         .get(&product)
@@ -317,9 +357,9 @@ pub fn list_templates(product: String) -> Result<Vec<TemplateView>, String> {
 }
 
 /// 读某产品的全部模板（原始 Template，含 translations）。供 translate.rs 用。
-pub(crate) fn load_templates_for(product: &str) -> Result<Vec<Template>, String> {
-    ensure_templates_dir()?;
-    let f = read_templates()?;
+pub(crate) fn load_templates_for(product: &str, namespace: &str) -> Result<Vec<Template>, String> {
+    ensure_templates_dir_ns(namespace)?;
+    let f = read_templates_ns(namespace)?;
     Ok(f
         .products
         .get(product)
@@ -332,12 +372,13 @@ pub(crate) fn load_templates_for(product: &str) -> Result<Vec<Template>, String>
 /// 并把命中的模板 src_hash 刷成当前 text 的 hash（表示译文已对齐当前源）。
 pub(crate) fn apply_translations(
     product: &str,
+    namespace: &str,
     updates: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> Result<(), String> {
     if updates.is_empty() {
         return Ok(());
     }
-    let mut f = read_templates()?;
+    let mut f = read_templates_ns(namespace)?;
     let pt = f.products.get_mut(product).ok_or("产品不存在")?;
     for t in pt.templates.iter_mut() {
         if let Some(tr) = updates.get(&t.id) {
@@ -347,7 +388,7 @@ pub(crate) fn apply_translations(
             t.src_hash = text_hash(&t.text);
         }
     }
-    write_templates_and_index(&mut f)?;
+    write_templates_and_index_ns(namespace, &mut f)?;
     Ok(())
 }
 
@@ -360,12 +401,14 @@ pub fn set_template_translation(
     id: String,
     lang: String,
     text: String,
+    namespace: Option<String>,
 ) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("内容不能为空。".into());
     }
-    ensure_templates_dir()?;
-    let mut f = read_templates()?;
+    let ns = namespace.as_deref().unwrap_or("gp");
+    ensure_templates_dir_ns(ns)?;
+    let mut f = read_templates_ns(ns)?;
     let pt = f.products.get_mut(&product).ok_or("产品不存在")?;
     let t = pt.templates.iter_mut().find(|t| t.id == id).ok_or("模板不存在")?;
     if lang == t.lang || is_source_lang(&lang, &t.lang) {
@@ -374,7 +417,7 @@ pub fn set_template_translation(
     } else {
         t.translations.insert(lang, text.trim().to_string());
     }
-    write_templates_and_index(&mut f)?;
+    write_templates_and_index_ns(ns, &mut f)?;
     Ok(())
 }
 
@@ -384,12 +427,14 @@ pub fn add_template(
     category: String,
     text: String,
     lang: Option<String>,
+    namespace: Option<String>,
 ) -> Result<String, String> {
     if text.trim().is_empty() {
         return Err("模板正文不能为空。".into());
     }
-    ensure_templates_dir()?;
-    let mut f = read_templates()?;
+    let ns = namespace.as_deref().unwrap_or("gp");
+    ensure_templates_dir_ns(ns)?;
+    let mut f = read_templates_ns(ns)?;
     let pt = f.products.entry(product.clone()).or_default();
     let id = next_id(&product, &pt.templates);
     pt.templates.push(Template {
@@ -400,7 +445,7 @@ pub fn add_template(
         translations: BTreeMap::new(),
         src_hash: String::new(),
     });
-    write_templates_and_index(&mut f)?;
+    write_templates_and_index_ns(ns, &mut f)?;
     Ok(id)
 }
 
@@ -411,12 +456,14 @@ pub fn update_template(
     category: String,
     text: String,
     lang: Option<String>,
+    namespace: Option<String>,
 ) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("模板正文不能为空。".into());
     }
-    ensure_templates_dir()?;
-    let mut f = read_templates()?;
+    let ns = namespace.as_deref().unwrap_or("gp");
+    ensure_templates_dir_ns(ns)?;
+    let mut f = read_templates_ns(ns)?;
     let pt = f.products.get_mut(&product).ok_or("产品不存在")?;
     let t = pt.templates.iter_mut().find(|t| t.id == id).ok_or("模板不存在")?;
     t.category = category.trim().to_string();
@@ -424,21 +471,22 @@ pub fn update_template(
     if let Some(l) = lang {
         t.lang = norm_lang(&l);
     }
-    write_templates_and_index(&mut f)?;
+    write_templates_and_index_ns(ns, &mut f)?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn delete_template(product: String, id: String) -> Result<(), String> {
-    ensure_templates_dir()?;
-    let mut f = read_templates()?;
+pub fn delete_template(product: String, id: String, namespace: Option<String>) -> Result<(), String> {
+    let ns = namespace.as_deref().unwrap_or("gp");
+    ensure_templates_dir_ns(ns)?;
+    let mut f = read_templates_ns(ns)?;
     let pt = f.products.get_mut(&product).ok_or("产品不存在")?;
     let before = pt.templates.len();
     pt.templates.retain(|t| t.id != id);
     if pt.templates.len() == before {
         return Err("模板不存在".into());
     }
-    write_templates_and_index(&mut f)?;
+    write_templates_and_index_ns(ns, &mut f)?;
     Ok(())
 }
 
@@ -471,8 +519,9 @@ fn cell_to_string(d: &Data) -> String {
 /// A 列类别（空则继承上一行）、B 列英文模板（空则跳过）、C 列起忽略、无表头。
 /// 选哪个 sheet：名字归一化（去空格转小写）后与产品名匹配，匹配不到用第一个 sheet。
 #[tauri::command]
-pub fn import_templates_xlsx(product: String, path: String) -> Result<ImportResult, String> {
-    ensure_templates_dir()?;
+pub fn import_templates_xlsx(product: String, path: String, namespace: Option<String>) -> Result<ImportResult, String> {
+    let ns = namespace.as_deref().unwrap_or("gp");
+    ensure_templates_dir_ns(ns)?;
     let mut wb = open_workbook_auto(&path).map_err(|e| format!("打开 xlsx 失败：{}", e))?;
 
     let norm = |s: &str| -> String {
@@ -501,7 +550,7 @@ pub fn import_templates_xlsx(product: String, path: String) -> Result<ImportResu
 
     // 沿用该产品现有前缀（覆盖后重新从 001 编号）
     let existing = {
-        let f = read_templates()?;
+        let f = read_templates_ns(ns)?;
         f.products.get(&product).map(|p| p.templates.clone()).unwrap_or_default()
     };
     let prefix = product_prefix(&product, &existing);
@@ -541,8 +590,8 @@ pub fn import_templates_xlsx(product: String, path: String) -> Result<ImportResu
     }
 
     let count = imported.len();
-    let mut f = read_templates()?;
+    let mut f = read_templates_ns(ns)?;
     f.products.insert(product, ProductTemplates { templates: imported });
-    write_templates_and_index(&mut f)?;
+    write_templates_and_index_ns(ns, &mut f)?;
     Ok(ImportResult { count, sheet: sheet_name, warning })
 }

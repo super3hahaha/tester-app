@@ -22,11 +22,6 @@ const SKILLS: &[SkillSource] = &[
         owner: "super3hahaha",
         repo: "review-reply",
     },
-    SkillSource {
-        name: "template-translate",
-        owner: "super3hahaha",
-        repo: "template-translate",
-    },
 ];
 
 // GitHub API requires a User-Agent on every request. Anything identifying works.
@@ -71,15 +66,33 @@ struct LatestRelease {
     zipball_url: String,
 }
 
+fn github_token() -> String {
+    crate::model_config::load().github_token
+}
+
+fn github_client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
+fn add_github_auth(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    let token = github_token();
+    if token.is_empty() {
+        builder
+    } else {
+        builder.header("Authorization", format!("Bearer {}", token))
+    }
+}
+
 async fn fetch_latest_release(src: &SkillSource) -> Result<LatestRelease, String> {
     let url = format!(
         "https://api.github.com/repos/{}/{}/releases/latest",
         src.owner, src.repo
     );
-    let resp = reqwest::Client::new()
+    let req = github_client()
         .get(&url)
         .header("User-Agent", UA)
-        .header("Accept", "application/vnd.github+json")
+        .header("Accept", "application/vnd.github+json");
+    let resp = add_github_auth(req)
         .send()
         .await
         .map_err(|e| format!("GitHub API request failed: {}", e))?;
@@ -133,9 +146,10 @@ fn backup_existing_skill(name: &str, old_version: Option<&str>) -> Result<Option
 }
 
 async fn download_zipball(url: &str) -> Result<Vec<u8>, String> {
-    let resp = reqwest::Client::new()
+    let req = github_client()
         .get(url)
-        .header("User-Agent", UA)
+        .header("User-Agent", UA);
+    let resp = add_github_auth(req)
         .send()
         .await
         .map_err(|e| format!("Zipball download failed: {}", e))?;
