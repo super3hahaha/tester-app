@@ -8,6 +8,27 @@ const loading = ref(false);
 const clearing = ref(false);
 const message = ref("");
 
+const MODEL_OPTIONS = [
+  { label: "Sonnet 4.6（推荐）", value: "claude-sonnet-4-6" },
+  { label: "Haiku 4.5（快速省额）", value: "claude-haiku-4-5" },
+];
+
+interface ModelConfig {
+  reply: string;
+  analysis: string;
+  translate: string;
+  github_token: string;
+}
+
+const modelConfig = ref<ModelConfig>({
+  reply: "claude-sonnet-4-6",
+  analysis: "claude-sonnet-4-6",
+  translate: "claude-haiku-4-5",
+  github_token: "",
+});
+const modelSaving = ref(false);
+const modelMessage = ref("");
+
 interface ClaudeAccountInfo {
   installed: boolean;
   cli_path: string | null;
@@ -56,7 +77,30 @@ onMounted(() => {
   refreshCacheSize();
   refreshClaude();
   refreshSkillStatuses();
+  loadModelConfig();
 });
+
+async function loadModelConfig() {
+  try {
+    modelConfig.value = await invoke<ModelConfig>("get_model_config");
+  } catch {
+    // use defaults
+  }
+}
+
+async function saveModelConfig() {
+  modelSaving.value = true;
+  modelMessage.value = "";
+  try {
+    await invoke("save_model_config", { config: modelConfig.value });
+    modelMessage.value = "已保存";
+    setTimeout(() => { modelMessage.value = ""; }, 2000);
+  } catch (e: any) {
+    modelMessage.value = "保存失败：" + String(e);
+  } finally {
+    modelSaving.value = false;
+  }
+}
 
 async function refreshSkillStatuses() {
   skillChecking.value = true;
@@ -153,6 +197,7 @@ function formatBytes(bytes: number): string {
   <div class="settings-page">
     <h3>Settings</h3>
 
+    <div class="top-row">
     <!-- Claude CLI -->
     <div class="section">
       <div class="section-title">Claude CLI</div>
@@ -229,11 +274,61 @@ function formatBytes(bytes: number): string {
       </div>
     </div>
 
+    <!-- 模型配置 -->
+    <div class="section">
+      <div class="section-title">模型配置</div>
+      <div class="section-desc">为各功能选择调用的 Claude 模型。Haiku 更快更省额度，Sonnet 质量更高。</div>
+
+      <div class="model-row">
+        <span class="model-label">回复生成</span>
+        <select v-model="modelConfig.reply" class="model-select">
+          <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+      </div>
+      <div class="model-row">
+        <span class="model-label">评论分析</span>
+        <select v-model="modelConfig.analysis" class="model-select">
+          <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+      </div>
+      <div class="model-row">
+        <span class="model-label">模板翻译</span>
+        <select v-model="modelConfig.translate" class="model-select">
+          <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+      </div>
+
+      <div class="model-actions">
+        <button class="sync-btn" @click="saveModelConfig" :disabled="modelSaving">
+          {{ modelSaving ? "保存中..." : "保存" }}
+        </button>
+        <span v-if="modelMessage" class="model-msg">{{ modelMessage }}</span>
+      </div>
+    </div>
+    </div><!-- end top-row -->
+
     <!-- Skill 更新 -->
     <div class="section">
       <div class="section-title">Skill 更新</div>
       <div class="section-desc">
         App 启动时会自动从 GitHub 拉取 skill 最新版本到 <code>~/.claude/skills/</code>。也可以在这里手动检查。
+      </div>
+
+      <div class="token-row">
+        <span class="token-label">GitHub Token</span>
+        <input
+          v-model="modelConfig.github_token"
+          type="password"
+          class="token-input"
+          placeholder="ghp_xxxx（可选，解决 API 限流）"
+        />
+        <button class="token-save-btn" @click="saveModelConfig" :disabled="modelSaving">
+          {{ modelSaving ? "保存中..." : "保存" }}
+        </button>
+      </div>
+      <div class="token-hint">
+        不配置时匿名调用（60次/小时），遇到限流报 403 时填入
+        <a href="#" @click.prevent="openUrl('https://github.com/settings/tokens/new?description=tester-app&scopes=')">GitHub PAT</a>（无需任何权限）。
       </div>
 
       <div v-if="skillChecking && skillStatuses.length === 0" class="skill-loading">
@@ -335,6 +430,16 @@ h3 {
   font-size: 16px;
   margin-bottom: 20px;
 }
+.top-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 0;
+  align-items: start;
+}
+.top-row .section {
+  max-width: none;
+}
 .section {
   background: white;
   border: 1px solid #e5e5e5;
@@ -342,6 +447,92 @@ h3 {
   padding: 20px;
   max-width: 560px;
   margin-bottom: 16px;
+}
+.model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid #f3f3f3;
+}
+.model-row:last-of-type {
+  border-bottom: none;
+}
+.model-label {
+  font-size: 13px;
+  color: #2d3748;
+}
+.model-select {
+  font-size: 12px;
+  padding: 5px 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #333;
+  cursor: pointer;
+  outline: none;
+}
+.model-select:focus {
+  border-color: #667eea;
+}
+.token-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.token-label {
+  font-size: 12px;
+  color: #4a5568;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.token-save-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  border: 1px solid #667eea;
+  background: #667eea;
+  color: white;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.token-save-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.token-input {
+  font-size: 12px;
+  padding: 5px 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #333;
+  outline: none;
+  flex: 1;
+  min-width: 0;
+  max-width: 280px;
+}
+.token-input:focus {
+  border-color: #667eea;
+}
+.token-hint {
+  font-size: 11px;
+  color: #a0aec0;
+  margin: 4px 0 0 0;
+}
+.token-hint a {
+  color: #667eea;
+}
+.model-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+.model-msg {
+  font-size: 12px;
+  color: #48bb78;
 }
 
 /* Claude CLI section */

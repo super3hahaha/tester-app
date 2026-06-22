@@ -407,6 +407,10 @@ interface GenReplyResult {
   usage: { input_tokens?: number; output_tokens?: number; total_cost_usd?: number } | null;
 }
 
+interface ModelConfig { reply: string; analysis: string; translate: string; }
+const modelConfig = ref<ModelConfig>({ reply: "claude-sonnet-4-6", analysis: "claude-sonnet-4-6", translate: "claude-haiku-4-5" });
+invoke<ModelConfig>("get_model_config").then(c => { modelConfig.value = c; }).catch(() => {});
+
 const LANG_OPTIONS: { value: string; label: string }[] = [
   { value: "auto", label: "跟随评论语言" },
   { value: "en", label: "英文 en" },
@@ -588,7 +592,7 @@ async function processQueue() {
       packageName: next.pkg,
       instruction: next.instruction.trim(),
       language: next.language,
-      model: "claude-sonnet-4-6",
+      model: modelConfig.value.reply,
     });
     next.candidates = Array.isArray(res.candidates) ? res.candidates : [];
     next.usage = res.usage;
@@ -812,6 +816,199 @@ async function submitTplReply() {
     tplSubmitting.value = false;
   }
 }
+
+// ── 评论分析（🔍 单条分析：分析问题 + 推荐回复）─────────────────────────────
+// 与「AI 回复」平行的一条独立路径：点「🔍 分析」即弹窗并自动开跑，分析 app 知识块
+// 注入的提示词，给出分类/问题/信息缺口 + 一条可直接发布的推荐回复。多任务、可缩小，
+// 生成串行（后端 AnalysisState 一次只跑一个，前端 anBusy + processAnQueue 排队），
+// 走独立的 analysis-log 事件通道，与 AI 回复互不污染。
+interface AnalysisReply {
+  language: string;
+  text: string;
+  text_zh: string;
+  char_count: number;
+}
+interface AnalysisData {
+  category: string;
+  issues: string[];
+  info_gaps: string[];
+  analysis: string;
+  reply: AnalysisReply;
+}
+interface AnalysisResultRaw {
+  analysis: AnalysisData;
+  usage: GenReplyResult["usage"];
+}
+
+type AnStatus = "idle" | "queued" | "generating" | "done" | "error";
+interface AnTask {
+  id: string;
+  review: TaggedReview;
+  pkg: string;
+  appLabel: string;
+  language: string;
+  status: AnStatus;
+  submitting: boolean;
+  data: AnalysisData | null;
+  editText: string; // 推荐回复，可微调后提交
+  error: string;
+  log: string;
+  usage: GenReplyResult["usage"];
+}
+
+const anTasks = ref<AnTask[]>([]);
+const activeAnId = ref<string | null>(null);
+let anSeq = 0;
+let anBusy = false; // 队列调度：是否有分析正在调后端
+
+const activeAn = computed(
+  () => anTasks.value.find((t) => t.id === activeAnId.value) ?? null
+);
+const minimizedAnTasks = computed(() =>
+  anTasks.value.filter((t) => t.id !== activeAnId.value)
+);
+
+let unlistenAnalysisLog: UnlistenFn | null = null;
+onMounted(async () => {
+  unlistenAnalysisLog = await listen<{ text: string; kind: string; done: boolean }>(
+    "analysis-log",
+    (e) => {
+      const gen = anTasks.value.find((t) => t.status === "generating");
+      if (gen) gen.log = e.payload.text;
+    }
+  );
+});
+onUnmounted(() => {
+  if (unlistenAnalysisLog) unlistenAnalysisLog();
+});
+
+function openAnalysis(r: TaggedReview) {
+  // 已为该评论建过分析任务就直接展开它（避免重复 / 丢状态）
+  const existing = anTasks.value.find((t) => t.review.review_id === r.review_id);
+  if (existing) {
+    activeAnId.value = existing.id;
+    return;
+  }
+  const task: AnTask = {
+    id: `an-${++anSeq}`,
+    review: r,
+    pkg: r._pkg,
+    appLabel: r._app,
+    language: "auto",
+    status: "idle",
+    submitting: false,
+    data: null,
+    editText: "",
+    error: "",
+    log: "",
+    usage: null,
+  };
+  anTasks.value.push(task);
+  activeAnId.value = task.id;
+  enqueueAnalysis(task); // 打开即自动开跑
+}
+
+function closeAnTask(task: AnTask) {
+  if (task.status === "generating" || task.submitting) return;
+  anTasks.value = anTasks.value.filter((t) => t.id !== task.id);
+  if (activeAnId.value === task.id) activeAnId.value = null;
+}
+function minimizeAn() {
+  activeAnId.value = null;
+}
+function restoreAn(id: string) {
+  activeAnId.value = id;
+}
+
+function enqueueAnalysis(task: AnTask) {
+  if (task.status === "generating" || task.status === "queued") return;
+  task.status = "queued";
+  task.error = "";
+  task.log = "";
+  task.data = null;
+  processAnQueue();
+}
+
+async function processAnQueue() {
+  if (anBusy) return;
+  const next = anTasks.value.find((t) => t.status === "queued");
+  if (!next) return;
+  anBusy = true;
+  next.status = "generating";
+  try {
+    const res = await invoke<AnalysisResultRaw>("generate_analysis", {
+      review: next.review,
+      product: next.appLabel || next.pkg,
+      packageName: next.pkg,
+      language: next.language,
+      model: modelConfig.value.analysis,
+    });
+    next.data = res.analysis ?? null;
+    next.usage = res.usage;
+    next.editText = next.data?.reply?.text ?? "";
+    if (!next.data) {
+      next.status = "error";
+      next.error = "未返回分析结果，请重试。";
+    } else {
+      next.status = "done";
+    }
+  } catch (e: any) {
+    const msg = String(e);
+    next.error = msg === "CANCELLED" ? "已取消分析。" : msg;
+    next.status = "error";
+  } finally {
+    anBusy = false;
+    processAnQueue(); // 接着跑下一个排队中的任务
+  }
+}
+
+async function stopAnTask(task: AnTask) {
+  if (task.status === "queued") {
+    task.status = task.data ? "done" : "idle";
+    return;
+  }
+  if (task.status === "generating") {
+    try {
+      await invoke("stop_analysis");
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function anEditLen(task: AnTask | null): number {
+  return task ? [...task.editText].length : 0;
+}
+
+async function submitAnReply(task: AnTask) {
+  if (!task || task.submitting) return;
+  const text = task.editText.trim();
+  if (!text) {
+    task.error = "回复内容为空。";
+    return;
+  }
+  if ([...text].length > 350) {
+    task.error = `回复超过 350 字符（当前 ${[...text].length}），请精简后再提交。`;
+    return;
+  }
+  task.submitting = true;
+  task.error = "";
+  try {
+    await invoke("reply_to_review", {
+      packageName: task.pkg,
+      reviewId: task.review.review_id,
+      replyText: text,
+    });
+    task.review.developer_reply = text;
+    task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
+    anTasks.value = anTasks.value.filter((t) => t.id !== task.id);
+    if (activeAnId.value === task.id) activeAnId.value = null;
+  } catch (e: any) {
+    task.error = String(e);
+  } finally {
+    task.submitting = false;
+  }
+}
 </script>
 
 <template>
@@ -958,6 +1155,9 @@ async function submitTplReply() {
           <span class="stars" :class="`stars-${r.star_rating}`">{{ starsDisplay(r.star_rating) }}</span>
           <span class="author">{{ r.author_name || "(匿名)" }}</span>
           <span class="ts">{{ formatTs(r.user_comment_ts) }}</span>
+          <button class="an-btn" @click="openAnalysis(r)" title="分析这条评论暴露的问题并给出推荐回复">
+            🔍 分析
+          </button>
           <button class="tpl-reply-btn" @click="openTplDialog(r)" title="用收藏的常用模板快速回复（按评论语言自动填译文）">
             📋 模板回复
           </button>
@@ -1140,6 +1340,135 @@ async function submitTplReply() {
           💰 本次用量：输入 {{ activeTask.usage.input_tokens ?? 0 }} · 输出 {{ activeTask.usage.output_tokens ?? 0 }} tokens
           <span v-if="activeTask.usage.total_cost_usd"> · 约 ${{ activeTask.usage.total_cost_usd.toFixed(4) }}</span>
         </div>
+      </div>
+    </div>
+
+    <!-- 评论分析弹窗（展开中的任务） -->
+    <div v-if="activeAn" class="ai-overlay" @click.self="minimizeAn">
+      <div class="ai-dialog">
+        <div class="ai-dialog-head">
+          <span class="ai-title">🔍 评论分析</span>
+          <div class="ai-head-btns">
+            <button class="ai-min" title="缩小（分析继续）" @click="minimizeAn">—</button>
+            <button
+              class="ai-close"
+              :disabled="activeAn.status === 'generating' || activeAn.submitting"
+              @click="closeAnTask(activeAn)"
+            >✕</button>
+          </div>
+        </div>
+
+        <div class="ai-review-quote">
+          <span class="stars" :class="`stars-${activeAn.review.star_rating}`">{{ starsDisplay(activeAn.review.star_rating) }}</span>
+          <div class="ai-quote-body">
+            <div class="ai-quote-text">{{ activeAn.review.text || "(无文字)" }}</div>
+            <div v-if="activeAn.review.original_text" class="ai-quote-orig">
+              <span class="ai-quote-orig-label">原文：</span>{{ activeAn.review.original_text }}
+            </div>
+          </div>
+        </div>
+
+        <div class="ai-input-row">
+          <label class="ai-label">回复语言</label>
+          <select
+            v-model="activeAn.language"
+            class="ai-lang-select"
+            :disabled="activeAn.status === 'generating' || activeAn.status === 'queued'"
+          >
+            <option v-for="o in LANG_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+          </select>
+          <button
+            v-if="activeAn.status === 'generating'"
+            class="ai-stop-btn"
+            @click="stopAnTask(activeAn)"
+          >■ 停止</button>
+          <button
+            v-else-if="activeAn.status === 'queued'"
+            class="ai-stop-btn"
+            @click="stopAnTask(activeAn)"
+          >排队中…取消</button>
+          <button
+            v-else
+            class="ai-gen-btn"
+            @click="enqueueAnalysis(activeAn)"
+          >{{ activeAn.data ? "重新分析" : "开始分析" }}</button>
+        </div>
+
+        <div v-if="activeAn.status === 'generating'" class="ai-generating">
+          <span class="ai-spinner">⏳</span> 分析中…
+          <span v-if="activeAn.log" class="ai-log">{{ activeAn.log }}</span>
+        </div>
+        <div v-else-if="activeAn.status === 'queued'" class="ai-generating">
+          <span class="ai-spinner">⏳</span> 排队等待中…（前面还有任务在分析）
+        </div>
+
+        <div v-if="activeAn.error" class="ai-error">{{ activeAn.error }}</div>
+
+        <div v-if="activeAn.data" class="an-result">
+          <div class="an-cat-row">
+            <span class="an-cat">{{ activeAn.data.category }}</span>
+          </div>
+          <div v-if="activeAn.data.issues && activeAn.data.issues.length" class="an-section">
+            <div class="an-h">推断的用户问题</div>
+            <ol class="an-list">
+              <li v-for="(it, i) in activeAn.data.issues" :key="i">{{ it }}</li>
+            </ol>
+          </div>
+          <div v-if="activeAn.data.info_gaps && activeAn.data.info_gaps.length" class="an-section">
+            <div class="an-h">信息缺口</div>
+            <ul class="an-list">
+              <li v-for="(g, i) in activeAn.data.info_gaps" :key="i">{{ g }}</li>
+            </ul>
+          </div>
+          <div v-if="activeAn.data.analysis" class="an-section">
+            <div class="an-h">总体判断与处理方向</div>
+            <div class="an-analysis">{{ activeAn.data.analysis }}</div>
+          </div>
+        </div>
+
+        <div v-if="activeAn.data" class="ai-final">
+          <label class="ai-label">推荐回复（可手动微调后提交）</label>
+          <div v-if="activeAn.data.reply && activeAn.data.reply.text_zh" class="an-reply-zh">
+            <span class="an-reply-zh-label">中文：</span>{{ activeAn.data.reply.text_zh }}
+          </div>
+          <textarea v-model="activeAn.editText" class="ai-final-text" rows="4"></textarea>
+          <div class="ai-final-foot">
+            <span class="ai-charcount" :class="{ over: anEditLen(activeAn) > 350 }">{{ anEditLen(activeAn) }} / 350</span>
+            <button
+              class="ai-submit-btn"
+              :disabled="activeAn.submitting || !activeAn.editText.trim() || anEditLen(activeAn) > 350"
+              @click="submitAnReply(activeAn)"
+            >
+              {{ activeAn.submitting ? "提交中…" : "确认提交到 Play" }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="activeAn.usage" class="ai-usage">
+          💰 本次用量：输入 {{ activeAn.usage.input_tokens ?? 0 }} · 输出 {{ activeAn.usage.output_tokens ?? 0 }} tokens
+          <span v-if="activeAn.usage.total_cost_usd"> · 约 ${{ activeAn.usage.total_cost_usd.toFixed(4) }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 缩小后的左下角悬浮条（分析任务，与 AI 回复分列两侧避免重叠） -->
+    <div v-if="minimizedAnTasks.length" class="ai-mini-stack an-mini-stack">
+      <div
+        v-for="t in minimizedAnTasks"
+        :key="t.id"
+        class="ai-mini-bar"
+        :class="{ 'is-error': t.status === 'error', 'is-done': t.status === 'done' }"
+        @click="restoreAn(t.id)"
+      >
+        <span class="ai-mini-text">
+          🔍 <span class="ai-mini-quote">{{ (t.review.text || t.review.original_text || "(无文字)").slice(0, 16) }}</span>
+          <template v-if="t.status === 'generating'">· 分析中…</template>
+          <template v-else-if="t.status === 'queued'">· 排队中</template>
+          <template v-else-if="t.status === 'error'">· 失败</template>
+          <template v-else-if="t.data">· 已就绪</template>
+          <template v-else>· 待分析</template>
+        </span>
+        <button class="ai-mini-open" @click.stop="restoreAn(t.id)">展开</button>
       </div>
     </div>
 
@@ -1688,12 +2017,86 @@ async function submitTplReply() {
   background: white;
   color: #6b46c1;
   cursor: pointer;
-  margin-left: auto;
   flex-shrink: 0;
 }
 .tpl-reply-btn:hover {
   background: #9f7aea;
   color: white;
+}
+.an-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  border: 1px solid #38a169;
+  border-radius: 6px;
+  background: white;
+  color: #2f855a;
+  cursor: pointer;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.an-btn:hover {
+  background: #38a169;
+  color: white;
+}
+
+/* 分析结果区 */
+.an-result {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #f7fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+.an-cat-row {
+  margin-bottom: 8px;
+}
+.an-cat {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 10px;
+  background: #c6f6d5;
+  color: #22543d;
+}
+.an-section {
+  margin-top: 10px;
+}
+.an-h {
+  font-size: 11px;
+  font-weight: 600;
+  color: #4a5568;
+  margin-bottom: 4px;
+}
+.an-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #2d3748;
+}
+.an-analysis {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #2d3748;
+}
+.an-reply-zh {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #718096;
+  margin-bottom: 6px;
+}
+.an-reply-zh-label {
+  color: #a0aec0;
+}
+
+/* 分析任务的悬浮条堆到左下角，避开 AI 回复（右下角） */
+.an-mini-stack {
+  right: auto;
+  left: 20px;
+  align-items: flex-start;
 }
 .web-btn {
   padding: 4px 12px;

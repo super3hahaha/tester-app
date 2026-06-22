@@ -1,9 +1,11 @@
+mod analysis;
 mod auth;
 mod chrome;
 mod claude;
 mod compare;
 mod feedback;
 mod manifest;
+mod model_config;
 mod reply;
 mod reviews;
 mod sheets;
@@ -11,6 +13,7 @@ mod skill_sync;
 mod templates;
 mod translate;
 
+use analysis::AnalysisState;
 use auth::AuthState;
 use claude::ClaudeState;
 use compare::CompareState;
@@ -27,6 +30,7 @@ pub fn run() {
         .manage(CompareState::new())
         .manage(ReplyState::new())
         .manage(TranslateState::new())
+        .manage(AnalysisState::new())
         .invoke_handler(tauri::generate_handler![
             auth::check_auth,
             auth::start_login,
@@ -65,6 +69,7 @@ pub fn run() {
             reply::stop_reply,
             reply::generate_single_reply,
             templates::list_template_products,
+            templates::create_template_product,
             templates::product_for_package,
             templates::list_templates,
             templates::add_template,
@@ -74,6 +79,13 @@ pub fn run() {
             templates::set_template_translation,
             translate::translate_templates,
             translate::stop_translate,
+            analysis::list_knowledge,
+            analysis::read_knowledge,
+            analysis::write_knowledge,
+            analysis::generate_analysis,
+            analysis::stop_analysis,
+            model_config::get_model_config,
+            model_config::save_model_config,
             chrome::list_chrome_profiles,
             chrome::open_url_in_chrome_profile,
         ])
