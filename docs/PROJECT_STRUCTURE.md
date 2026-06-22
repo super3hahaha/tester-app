@@ -34,6 +34,7 @@ tester-app/
 │       ├── BatchReplyConfigPage.vue # 批量回复配置（嵌在 ConfigPage 的 Batch Tab）：每个 app 一张卡片，独立勾选启用 + 日期预设 + 星级；显式「保存」按钮写 localStorage
 │       ├── BatchReplyPage.vue   # 批量回复执行：读保存的多 app 配置 → 并行拉评论 → 按 app 分组折叠 → AI 生成回复 → 逐条/一键提交
 │       ├── TemplateManagerPage.vue # 模板管理：按产品 tab 增删改模板 + xlsx 导入 + 多语言预翻译 + 每条 ★收藏（挂 Review 工作区）
+│       ├── KnowledgeConfigPage.vue # 知识配置：按产品 tab 编辑「应用知识块」(.md)，左编辑右实时预览 + 插入骨架 + 保存；供评论分析注入 {app_knowledge}（挂 Review 工作区，与模板管理同级）
 │       ├── GmailPage.vue        # Gmail 邮件：读 Apps Script 同步的 Sheet，卡片列表 + 详情弹窗 + 已读隐藏 + 按 Chrome profile 打开邮件
 │       └── SettingsPage.vue     # 缓存管理设置
 ├── public/                      # 公共静态资源
@@ -57,6 +58,7 @@ tester-app/
 │   │   ├── reply.rs             # 批量回复生成：写 pending JSON → 跑 claude /review-reply（--add-dir 模板目录 + prompt 传路径）→ 读回 candidates.json（reply-log 事件流）
 │   │   ├── skill_sync.rs        # Skill 热更新：从 GitHub 拉取 zipball 同步到 ~/.claude/skills/，启动时静默 + Settings 手动
 │   │   ├── templates.rs         # 模板管理：~/.tester-app/templates/ 的增删改 + xlsx 导入；模板含 lang（en/zh-CN 双源）+ translations（预存各语言译文）；写全文同时重建瘦身 index；skill 从此目录读
+│   │   ├── analysis.rs         # 评论分析：①「知识配置」每产品一份知识块 .md 的 list/read/write（存 ~/.tester-app/review-analysis/{slug}.md，文件名复用 templates 的 product_prefix）；②「🔍 分析」generate_analysis/stop_analysis（独立 AnalysisState + analysis-log 通道）：按 package→产品读知识块注入 {app_knowledge}，跑 claude --print 直出 JSON 对象（分类/问题/信息缺口/总体判断 + 一条推荐回复），与 reply.rs 同构但解析对象、状态独立
 │   │   ├── translate.rs         # 模板多语言预翻译：轻量直出（claude --print，不走 skill、不读写文件）+ haiku，逐批翻译写回 translations；translate-log/progress 进度 + stop_translate 可取消
 │   │   └── chrome.rs            # 按指定 Chrome profile 打开 URL：读 Local State 列 profile（目录名↔显示名）+ open_url_in_chrome_profile（Gmail 多账号跨 profile 打开邮件深链）
 │   ├── scripts/                 # 内嵌资源（编译期 include_str!）
@@ -101,6 +103,7 @@ tester-app/
 ├── reviews/                     # 批量回复中转：每次 AI 生成的输入/输出 JSON（供调试回看）
 │   ├── pending-reviews-{ts}.json            # 写给 review-reply skill 的输入（target_language + channel + groups[]）
 │   └── pending-reviews-{ts}.candidates.json # skill 产出的候选回复，前端读回回填
+├── review-analysis/             # 评论分析「知识配置」：每个产品一份应用知识块 .md（{slug}.md，如 xfolder.md）；知识配置页维护，分析时按评论来源 app 注入提示词
 ├── templates/                   # 回复模板（模板管理页维护）；review-reply skill 运行时从这里读
 │   ├── templates.json           # 全文权威源 {version, products:{产品:{templates:[{id,category,text,lang}]}}}（lang=en/zh-CN 源语言，缺省 en）
 │   ├── index.json               # 瘦身索引（id+category），写 templates 时由后端自动重建；skill 匹配只读它
@@ -130,7 +133,7 @@ tester-app/
 | Slides 页 | `SlidesPage.vue` | 三栏布局：文件列表 + 大图预览 + 缩略图条，支持多页勾选 |
 | 生成页 | `GeneratePage.vue` | 展示选择摘要 → 一键导出并调用 Claude → 终端风格日志 → 多轮对话输入 |
 | 对比页 | `ComparePage.vue` | 双栏选择（AI 原始 vs 人工修改）→ 导出 HTML → 调 Claude skill 生成 diff → "在 Chrome 中打开"按钮 |
-| 评论页 | `ReviewPage.vue` | Play Console 评论（原单应用页保留）。两种拉取：①「拉取评论」调 `list_play_reviews` 拉选中单个 app，按页面星级/回复状态/日期本地筛选；②「📦 批量拉取」从 `play-console-multi-config-v1` 读启用 app → 并行 `list_play_reviews` → 各 app 按其 Config 配置（星级/状态/日期）筛选后合并成**一个扁平列表**（按时间倒序，每条带应用标签 `_app`/`_pkg`，批量模式下页面筛选不适用）。每张评论卡片带「🤖 AI 回复」+「添加模板」，提交/收录用该条评论来源 app 的包名（`_pkg`）；「在网页打开」深链仅对当前选中 app 有效，其它退回应用列表页 | → 弹窗输入「回复方向」(一句指令) + 选回复语言(默认跟随评论语言) → 调 `generate_single_reply` 现场生成 **3 条不同风格**候选 → 点选/手动微调(实时 350 字符计数) → confirm 后调 `reply_to_review` 提交并本地回填为「已回复」。**与批量回复不同**：这里是 freeform 现生成(走 `claude --print` 直出 JSON 数组)，不走模板匹配。另有「📋 模板回复」按钮 → 弹窗按「通用 / 该 app 专用」两组列出**收藏的模板**（按钮=模板 category 名）→ 点一条按评论语言（`reviewer_language` 归一成 app 码）匹配预存译文自动填入 → 可微调（350 计数）→ 提交（`reply_to_review`）；无对应语言译文则回退英文源文并提示。每条候选可点「➕ 添加模板」把好回复收录进该应用对应产品的模板库（任意语言都可收：英文存英文模板，其它语言用候选中文预览 text_zh 存中文模板；收录时内联填类别 → `product_for_package` 解析产品 → `add_template` 带 lang） |
+| 评论页 | `ReviewPage.vue` | Play Console 评论（原单应用页保留）。两种拉取：①「拉取评论」调 `list_play_reviews` 拉选中单个 app，按页面星级/回复状态/日期本地筛选；②「📦 批量拉取」从 `play-console-multi-config-v1` 读启用 app → 并行 `list_play_reviews` → 各 app 按其 Config 配置（星级/状态/日期）筛选后合并成**一个扁平列表**（按时间倒序，每条带应用标签 `_app`/`_pkg`，批量模式下页面筛选不适用）。每张评论卡片带「🔍 分析」+「🤖 AI 回复」+「📋 模板回复」+「添加模板」，提交/收录用该条评论来源 app 的包名（`_pkg`）；「🔍 分析」点开即弹窗并自动分析（注入该 app 知识块），输出分类/问题/信息缺口/判断 + 一条可微调直发的推荐回复，多任务可缩小（悬浮条堆左下角，与 AI 回复右下角分列）、生成串行；「在网页打开」深链仅对当前选中 app 有效，其它退回应用列表页 | → 弹窗输入「回复方向」(一句指令) + 选回复语言(默认跟随评论语言) → 调 `generate_single_reply` 现场生成 **3 条不同风格**候选 → 点选/手动微调(实时 350 字符计数) → confirm 后调 `reply_to_review` 提交并本地回填为「已回复」。**与批量回复不同**：这里是 freeform 现生成(走 `claude --print` 直出 JSON 数组)，不走模板匹配。另有「📋 模板回复」按钮 → 弹窗按「通用 / 该 app 专用」两组列出**收藏的模板**（按钮=模板 category 名）→ 点一条按评论语言（`reviewer_language` 归一成 app 码）匹配预存译文自动填入 → 可微调（350 计数）→ 提交（`reply_to_review`）；无对应语言译文则回退英文源文并提示。每条候选可点「➕ 添加模板」把好回复收录进该应用对应产品的模板库（任意语言都可收：英文存英文模板，其它语言用候选中文预览 text_zh 存中文模板；收录时内联填类别 → `product_for_package` 解析产品 → `add_template` 带 lang） |
 | 配置页（容器） | `ConfigPage.vue` | 纯配置页：顶部 Tab 切换「Play Console 拉取配置」/「Batch Reply 配置」，分别嵌 `PlayConsoleConfigPage` / `BatchReplyConfigPage`（v-show 常驻挂载，各管自己的 localStorage）。挂在 Review 工作区的 `review-config` 入口 |
 | Play Console · 配置 | `PlayConsoleConfigPage.vue` | 多 app 卡片：勾选启用 + 日期预设 + 星级 + **回复状态**（全部/无回复/已回复/回复后又更新；选「回复后又更新」时星级置灰忽略）；非自定义预设显示「实际范围」预览（每分钟刷新）；顶部全选/全不选/刷新/清空配置/保存工具栏；写 localStorage `play-console-multi-config-v1`，应用列表缓存与 Batch 共用 `batch-reply-apps-cache-v1`。ReviewPage 读它作每个 app 的拉取/筛选默认值 |
 | 批量回复 · 配置 | `BatchReplyConfigPage.vue` | 多 app 卡片：每张卡片独立**日期预设**（自上一个工作日 / 昨天 / 今天 / 近 7 天 / 自定义）+ 星级；非自定义预设下显示「实际范围」预览（每分钟刷新一次，跨午夜自动重算）；顶部「全选/全不选/刷新/清空配置/保存」工具栏（清空配置 = 删除所有版本 localStorage key 并恢复出厂默认，带 confirm）；显式保存到 localStorage `batch-reply-multi-config-v3`（从旧 key v2/v1 迁移时**强制把日期预设重置为默认**，因为早期 v2 会把"自定义"这个迁移产物写进每个 app；读当前 v3 则保留用户显式选择）；应用列表缓存在 `batch-reply-apps-cache-v1` 让冷启动秒回 |
@@ -155,6 +158,7 @@ tester-app/
 | Skill 热更新 | `skill_sync.rs` | 内置 skill 列表（owner/repo）；用 GitHub Releases API（`/releases/latest`）拿 tag_name 做版本判断；`check_skill_updates` 比对本地 `.tester-app-version` 与远程 tag；`sync_all_skills` / `sync_skill` 下载 release zipball → 备份旧版 → 解压覆盖到 `~/.claude/skills/{name}/` → 写新版本；`get_skill_local_version` 给前端取版本号写进反馈 manifest |
 | 模板管理 | `templates.rs` | 7 个 command（无 State，纯文件读写）：`list_template_products`（产品+条数+关联 app）/ `product_for_package`（包名→产品，给「添加模板」收录用，null=该应用无模板产品）/ `list_templates` / `add_template`（按产品前缀 xfolder/mp3cutter/video2mp3 自动生成 id）/ `update_template` / `delete_template` / `import_templates_xlsx`（calamine 读 xlsx，复刻 build 解析口径：A 列类别继承、B 列英文、空 B 跳过，覆盖该产品，导入项 lang=en）。模板含 `lang`（en/zh-CN）**中英双源**：add/update 带 lang，skill 命中后据 lang 翻到回复语言（相同直接用）；存量无 lang 字段的按 en。**唯一写出口** `write_templates_and_index` 写 templates.json 同时由全文派生重建 index.json，二者永不漂移。`ensure_templates_dir` 首次从 `~/.claude/skills/review-reply/data/` 拷种子。`reply.rs` 复用其 `templates_dir()` / `ensure_templates_dir()` |
 | 模板多语言预翻译 | `translate.rs` | `translate_templates(product, ids, langs, overwrite, channel, model)` + `stop_translate`：每条按（覆盖/只补缺失 + 排除同源码）算 target_langs，CHUNK=1 逐条 spawn `claude --print`（**不 --add-dir、prompt 只内联本批、禁工具/不读写文件、stdout 解析**，避免 agent 读全量 templates.json 烧额度），每批 `apply_translations` 增量写回 + 刷 src_hash；350 字符硬校验（超长压缩重试一次仍超则标红警告）；`translate-log`（含用量）+ `translate-progress`（进度条）事件；复刻 reply.rs 的取消逻辑。模型默认 haiku。详见 `handoff-template-i18n.md` |
+| 评论分析 | `analysis.rs` | ①「知识配置」`list_knowledge` / `read_knowledge` / `write_knowledge`（无 State，每产品一份 `~/.tester-app/review-analysis/{slug}.md`，文件名复用 `templates::product_prefix`）；②「🔍 单条分析」`generate_analysis(review, product, package_name, language, model)` + `stop_analysis`：按 `package_name` 调 `product_for_package` 解析产品 → 读该产品知识块注入 `{app_knowledge}` → 跑 `claude --print`（无 skill、无文件往返）→ `extract_json_object` 抠出 JSON 对象解析成 `{category, issues[], info_gaps[], analysis, reply{language,text,text_zh,char_count}}` + usage。**独立 `AnalysisState`（running + child_pid）+ `analysis-log` 事件通道**，与 reply.rs 的 `ReplyState`/`reply-log` 互不污染（同 decisions.md 状态隔离原则）；与 `generate_single_reply` 同构，差异：解析对象（非数组）、注入知识块 |
 | Chrome 打开 | `chrome.rs` | `list_chrome_profiles` 读 Chrome `Local State` 的 `profile.info_cache` 列出 profile（目录名 ↔ 显示名，用户按显示名选、存目录名）；`open_url_in_chrome_profile(url, profile_dir)` 用 `--profile-directory` 指定 profile 打开 URL（macOS 直接调 Chrome 二进制并 `open -a` 激活前台，Win/Linux 各自分支）。解决 Gmail 多账号分散在不同 Chrome profile 时，邮件深链跨 profile 跳不过去 |
 
 # 依赖库

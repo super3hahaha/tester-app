@@ -84,7 +84,7 @@ grep -n Gmail src/pages/MainPage.vue
 | **第一步** | **Apps Script 同步**:每账号部署 [gmail-sync.gs](gmail-sync.gs),每天定时拉标签下「未读」写入各自 Sheet、写后标记已读出队,表共享给 inshot 账号 | **✅ 已跑通**(2026-06-17,`filemanager.feedback@gmail.com` + 标签 `⭐mp3cutter-50字+-`,单账号验证) |
 | 第二步 | **app 读表 + 卡片 UI**:新建 [GmailPage.vue](../src/pages/GmailPage.vue) 挂进 MainPage「📧 邮件」workspace。手动粘贴表链接、读 `Mail` tab、按表头名取列;列表每封固定 3 行(发件人+日期/主题/机翻中文)、「详情」弹大卡(机翻上/原文下)、「已读」本地隐藏+LIFO 撤销、「↗」用配的 Chrome profile 打开(新增 [chrome.rs](../src-tauri/src/chrome.rs))。详见 §3b | **✅ 已实测**(读表+Chrome profile 打开 OK;详情/已读/撤销为最新改动) |
 | 第三步 | 选中邮件 → Claude 翻译正文为中文(参照 `reply.rs` 的 `call_claude_for_reply`) | 未开始 |
-| 第四步 | 生成回复草稿(模板 + AI),供用户复制后外跳 Gmail 粘贴发送 | 未开始 |
+| 第四步 | 生成回复草稿(模板 + AI),供用户复制后外跳 Gmail 粘贴发送 | **模板回复·部分完成**(模板回复弹窗加「复制并跳转 ↗」按钮 `copyAndJump`:复制模板文案 + 按配的 Chrome profile 打开该会话深链,粘贴即发;= 方案 A。AI 现生成草稿尚未接) |
 | 第二阶段 | **发送回写**:app 把已确认回复写回 Sheet 的「回复内容」+「✅已确认」列;Apps Script 扫描已勾选行用 `GmailApp.reply` 代发(自动串线程,**无需 `gmail.send` scope、无需 Production**)。逐封人工确认 = 勾选列 | 未开始 |
 | 后续 | Gmail 专用回复模板管理(现有 `templates` 按 package_name 维度,Gmail 无此维度,需适配:按账号分组 + keywords 匹配主题/正文) | 未开始 |
 
