@@ -9,7 +9,9 @@ import ReviewPage from "./ReviewPage.vue";
 import ConfigPage from "./ConfigPage.vue";
 import BatchReplyPage from "./BatchReplyPage.vue";
 import TemplateManagerPage from "./TemplateManagerPage.vue";
+import KnowledgeConfigPage from "./KnowledgeConfigPage.vue";
 import GmailPage from "./GmailPage.vue";
+import AppScriptPage from "./AppScriptPage.vue";
 import SettingsPage from "./SettingsPage.vue";
 
 interface UserInfo {
@@ -61,7 +63,8 @@ const navItems: NavItem[] = [
       { id: "review-play", label: "Play Console", icon: "▶" },
       { id: "review-config", label: "Config", icon: "⚙" },
       { id: "review-batch-reply", label: "Batch Reply · Run", icon: "🤖" },
-      { id: "review-templates", label: "模板管理", icon: "🗂" },
+      { id: "review-templates", label: "GP模板管理", icon: "🗂" },
+      { id: "review-knowledge", label: "知识配置", icon: "📚" },
     ],
   },
   {
@@ -70,6 +73,8 @@ const navItems: NavItem[] = [
     icon: "📧",
     children: [
       { id: "gmail-inbox", label: "Gmail", icon: "📨" },
+      { id: "gmail-appscript", label: "App Script", icon: "⚙️" },
+      { id: "gmail-templates", label: "Gmail模板管理", icon: "🗂" },
     ],
   },
   {
@@ -200,8 +205,21 @@ function onSlidesSelect(files: SlidesSelection[]) {
           v-show="activeOption === 'review-templates'"
           :active-option="activeOption"
         />
+        <KnowledgeConfigPage
+          v-show="activeOption === 'review-knowledge'"
+          :active-option="activeOption"
+        />
         <GmailPage
           v-show="activeOption === 'gmail-inbox'"
+        />
+        <AppScriptPage
+          v-show="activeOption === 'gmail-appscript'"
+        />
+        <TemplateManagerPage
+          v-show="activeOption === 'gmail-templates'"
+          :active-option="activeOption"
+          trigger-option="gmail-templates"
+          namespace="email"
         />
         <SettingsPage
           v-show="activeOption === 'settings-general'"

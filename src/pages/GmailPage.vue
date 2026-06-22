@@ -19,6 +19,23 @@ interface MailSource {
   id: string; // spreadsheet id
   label: string; // 备注（账号邮箱等）
   profileDir?: string; // 用哪个 Chrome profile 打开邮件（目录名；空=系统默认浏览器）
+  templateProduct?: string; // 关联的邮件模板产品名
+}
+
+interface TemplateView {
+  id: string;
+  category: string;
+  text: string;
+  lang: string;
+  translations: Record<string, string>;
+  src_hash: string;
+  stale: boolean;
+}
+
+interface ProductInfo {
+  product: string;
+  count: number;
+  apps: string[];
 }
 
 interface ChromeProfile {
@@ -56,11 +73,75 @@ const errorMsg = ref("");
 const fetchedAt = ref<number | null>(null);
 const sheetUrl = ref("");
 
-// 添加表单（仿 ReviewPage 手填包名切换）
+// 添加表单
 const adding = ref(false);
 const newUrl = ref("");
 const newLabel = ref("");
 const newProfile = ref("");
+const newTemplateProduct = ref("");
+
+// 邮件模板产品列表（email namespace）
+const emailProducts = ref<ProductInfo[]>([]);
+
+// 模板回复弹窗
+const tplMail = ref<Mail | null>(null);
+const tplLoading = ref(false);
+const tplTemplates = ref<TemplateView[]>([]);
+const tplSelectedId = ref("");
+const tplText = ref("");
+const tplCopied = ref(false);
+const tplLang = ref("en");
+
+// 从所有已加载模板中收集可用语言码
+const tplLangOptions = computed(() => {
+  const set = new Set<string>();
+  set.add("en");
+  for (const t of tplTemplates.value) {
+    for (const k of Object.keys(t.translations || {})) set.add(k);
+  }
+  return Array.from(set);
+});
+
+const LANG_LABEL: Record<string, string> = {
+  en: "English",
+  zh: "中文",
+  ar: "العربية",
+  fa: "فارسی",
+  ru: "Русский",
+  ko: "한국어",
+  ja: "日本語",
+  de: "Deutsch",
+  fr: "Français",
+  es: "Español",
+  pt: "Português",
+  tr: "Türkçe",
+  id: "Indonesia",
+  th: "ไทย",
+  vi: "Tiếng Việt",
+};
+
+function detectLang(text: string): string {
+  if (!text) return "en";
+  // 统计各脚本字符数，取最多的
+  const counts: Record<string, number> = {};
+  const inc = (k: string) => { counts[k] = (counts[k] || 0) + 1; };
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (cp >= 0x0600 && cp <= 0x06FF) inc("fa"); // 阿拉伯/波斯（fa 概率更高）
+    else if (cp >= 0x4E00 && cp <= 0x9FFF) inc("zh");
+    else if (cp >= 0x3040 && cp <= 0x30FF) inc("ja");
+    else if (cp >= 0xAC00 && cp <= 0xD7A3) inc("ko");
+    else if (cp >= 0x0400 && cp <= 0x04FF) inc("ru");
+    else if (cp >= 0x0E00 && cp <= 0x0E7F) inc("th");
+  }
+  const winner = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+  return winner ? winner[0] : "en";
+}
+
+function tplTextForLang(t: TemplateView | undefined, lang: string): string {
+  if (!t) return "";
+  return (t.translations?.[lang]) || t.text;
+}
 
 // 本机 Chrome 的 profile 列表（显示名 ↔ 目录名）
 const chromeProfiles = ref<ChromeProfile[]>([]);
@@ -68,6 +149,14 @@ const chromeProfiles = ref<ChromeProfile[]>([]);
 const currentSource = computed(
   () => sources.value.find((s) => s.id === selectedId.value) || null
 );
+
+async function loadEmailProducts() {
+  try {
+    emailProducts.value = await invoke<ProductInfo[]>("list_template_products", { namespace: "email" });
+  } catch {
+    emailProducts.value = [];
+  }
+}
 
 onMounted(() => {
   try {
@@ -82,6 +171,7 @@ onMounted(() => {
     readIds.value = [];
   }
   loadChromeProfiles();
+  loadEmailProducts();
   if (sources.value.length > 0) {
     selectedId.value = sources.value[0].id;
     loadMails();
@@ -130,7 +220,7 @@ function addSource() {
     return;
   }
   const label = newLabel.value.trim() || `表 ${id.slice(0, 6)}…`;
-  sources.value.push({ id, label, profileDir: newProfile.value || undefined });
+  sources.value.push({ id, label, profileDir: newProfile.value || undefined, templateProduct: newTemplateProduct.value || undefined });
   cancelAdd();
   selectSource(id);
 }
@@ -140,7 +230,13 @@ function cancelAdd() {
   newUrl.value = "";
   newLabel.value = "";
   newProfile.value = "";
+  newTemplateProduct.value = "";
   errorMsg.value = "";
+}
+
+function onTemplateProductChange(e: Event) {
+  const val = (e.target as HTMLSelectElement).value;
+  if (currentSource.value) currentSource.value.templateProduct = val || undefined;
 }
 
 function removeCurrent() {
@@ -285,6 +381,57 @@ function hasAttachment(m: Mail) {
   return m.attachments && m.attachments !== "无";
 }
 
+async function openTplDialog(m: Mail) {
+  tplMail.value = m;
+  tplTemplates.value = [];
+  tplSelectedId.value = "";
+  tplText.value = "";
+  tplCopied.value = false;
+  // 先用正文启发式预选语言
+  tplLang.value = detectLang(m.body || "");
+  const product = currentSource.value?.templateProduct;
+  if (!product) return;
+  tplLoading.value = true;
+  try {
+    tplTemplates.value = await invoke<TemplateView[]>("list_templates", { product, namespace: "email" });
+  } catch {
+    tplTemplates.value = [];
+  } finally {
+    tplLoading.value = false;
+  }
+}
+
+function closeTplDialog() {
+  tplMail.value = null;
+}
+
+function applyTpl(t: TemplateView) {
+  tplSelectedId.value = t.id;
+  tplText.value = tplTextForLang(t, tplLang.value);
+  tplCopied.value = false;
+}
+
+function onTplLangChange() {
+  const t = tplTemplates.value.find((x) => x.id === tplSelectedId.value);
+  if (t) tplText.value = tplTextForLang(t, tplLang.value);
+  tplCopied.value = false;
+}
+
+// 方案 A：先把模板文案复制到剪贴板，再打开该邮件的 Gmail 深链，跳过去直接粘贴发送。
+// 复制失败（无剪贴板权限等）也继续跳转，不挡用户。
+async function copyAndJump() {
+  if (!tplText.value) return;
+  try {
+    await navigator.clipboard.writeText(tplText.value);
+    tplCopied.value = true;
+    setTimeout(() => { tplCopied.value = false; }, 2000);
+  } catch {
+    // 复制失败也继续跳转
+  }
+  if (tplMail.value) await openInGmail(tplMail.value);
+  closeTplDialog();
+}
+
 const currentLabel = computed(
   () => sources.value.find((s) => s.id === selectedId.value)?.label || ""
 );
@@ -367,6 +514,33 @@ const currentLabel = computed(
           选登录了该 Gmail 账号的那个 Chrome 资料，「在 Gmail 中打开」就会跳到对的窗口
         </span>
       </div>
+
+      <!-- 关联模板产品 -->
+      <div class="form-row profile-row">
+        <label class="form-label">模板</label>
+        <select
+          v-if="!adding"
+          :value="currentSource?.templateProduct || ''"
+          @change="onTemplateProductChange"
+          @focus="loadEmailProducts"
+          class="src-select"
+          :disabled="!selectedId"
+        >
+          <option value="">不关联模板</option>
+          <option v-for="p in emailProducts" :key="p.product" :value="p.product">
+            {{ p.product }}（{{ p.count }} 条）
+          </option>
+        </select>
+        <select v-else v-model="newTemplateProduct" @focus="loadEmailProducts" class="src-select">
+          <option value="">不关联模板</option>
+          <option v-for="p in emailProducts" :key="p.product" :value="p.product">
+            {{ p.product }}（{{ p.count }} 条）
+          </option>
+        </select>
+        <span class="profile-hint">
+          关联后查看邮件时可一键调出该产品的回复模板
+        </span>
+      </div>
     </section>
 
     <div v-if="errorMsg" class="banner banner-error">{{ errorMsg }}</div>
@@ -387,6 +561,12 @@ const currentLabel = computed(
           <span class="ts">{{ m.date }}</span>
           <span v-if="hasAttachment(m)" class="att-dot" :title="m.attachments">📎</span>
           <div class="mi-actions">
+            <button
+              v-if="currentSource?.templateProduct"
+              class="tpl-btn"
+              @click="openTplDialog(m)"
+              title="从关联模板里挑一条复制"
+            >📋</button>
             <button class="detail-btn" @click="openDetail(m)">详情</button>
             <button class="open-btn" @click="openInGmail(m)" title="在 Gmail 中打开该会话，本人回复">↗</button>
             <button class="read-btn" @click="markRead(m)" title="标为已读，下次拉取不再显示">已读</button>
@@ -405,6 +585,52 @@ const currentLabel = computed(
       还没有添加邮件表。粘贴 Apps Script 同步生成的 Google Sheet 链接即可开始。
     </div>
 
+    <!-- 模板回复弹窗 -->
+    <div v-if="tplMail" class="detail-overlay tpl-overlay" @click.self="closeTplDialog">
+      <div class="tpl-dialog">
+        <div class="tpl-dialog-head">
+          <span class="tpl-dialog-title">📋 模板回复 · {{ currentSource?.templateProduct }}</span>
+          <button class="detail-close" @click="closeTplDialog">✕</button>
+        </div>
+        <div class="tpl-mail-quote">
+          <div class="tpl-quote-subj">{{ tplMail.subject || "(无主题)" }}</div>
+          <div class="tpl-quote-from">{{ tplMail.from }}</div>
+        </div>
+        <div v-if="tplLoading" class="tpl-state">加载模板中…</div>
+        <div v-else-if="tplTemplates.length === 0" class="tpl-state">
+          该产品还没有模板，先去「邮件 → 模板管理」添加。
+        </div>
+        <template v-else>
+          <div class="tpl-group-title">选择模板</div>
+          <div class="tpl-btn-row">
+            <button
+              v-for="t in tplTemplates"
+              :key="t.id"
+              class="tpl-pick"
+              :class="{ active: tplSelectedId === t.id }"
+              @click="applyTpl(t)"
+            >{{ t.category || t.id }}</button>
+          </div>
+          <div v-if="tplText" class="tpl-preview">
+            <div class="tpl-preview-label-row">
+              <span class="tpl-preview-label">模板内容（可在 Gmail 里粘贴后微调）</span>
+              <select class="tpl-lang-select" v-model="tplLang" @change="onTplLangChange">
+                <option v-for="code in tplLangOptions" :key="code" :value="code">
+                  {{ LANG_LABEL[code] || code }}
+                </option>
+              </select>
+            </div>
+            <textarea class="tpl-preview-text" :value="tplText" readonly rows="5"></textarea>
+            <div class="tpl-preview-foot">
+              <button class="tpl-copy-btn" @click="copyAndJump" title="复制文案并在 Gmail 中打开该会话，粘贴即可发送">
+                {{ tplCopied ? "已复制 ✓ 正在跳转…" : "复制并跳转 ↗" }}
+              </button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
     <!-- 详情大卡片：机翻中文在上，原文在下 -->
     <div v-if="selectedMail" class="detail-overlay" @click.self="closeDetail">
       <div class="detail-card">
@@ -416,6 +642,13 @@ const currentLabel = computed(
           <div class="detail-head-actions">
             <button class="read-btn" @click="markRead(selectedMail)" title="标为已读，下次拉取不再显示">
               标为已读
+            </button>
+            <button
+              v-if="currentSource?.templateProduct"
+              class="web-btn tpl-web-btn"
+              @click="openTplDialog(selectedMail)"
+            >
+              📋 模板回复
             </button>
             <button class="web-btn" @click="openInGmail(selectedMail)" title="在 Gmail 中打开该会话，本人回复">
               ↗ 在 Gmail 中打开
@@ -799,5 +1032,166 @@ const currentLabel = computed(
   text-align: center;
   font-size: 13px;
   color: #999;
+}
+
+.tpl-btn {
+  padding: 3px 8px;
+  font-size: 13px;
+  border: 1px solid #9f7aea;
+  border-radius: 6px;
+  background: white;
+  color: #6b46c1;
+  cursor: pointer;
+}
+.tpl-btn:hover {
+  background: #faf5ff;
+}
+.tpl-web-btn {
+  border-color: #9f7aea;
+  color: #6b46c1;
+}
+.tpl-web-btn:hover {
+  background: #9f7aea;
+  color: white;
+}
+
+/* 模板回复弹窗 */
+.tpl-overlay {
+  z-index: 1010;
+}
+.tpl-dialog {
+  background: white;
+  border-radius: 12px;
+  width: 100%;
+  max-width: min(660px, calc(100vw - 80px));
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 18px 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+.tpl-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.tpl-dialog-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #2d3748;
+}
+.tpl-mail-quote {
+  background: #f7fafc;
+  border-left: 3px solid #9f7aea;
+  border-radius: 0 6px 6px 0;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+}
+.tpl-quote-subj {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a202c;
+}
+.tpl-quote-from {
+  font-size: 11px;
+  color: #718096;
+  margin-top: 2px;
+}
+.tpl-state {
+  font-size: 13px;
+  color: #888;
+  padding: 12px 0;
+}
+.tpl-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a5568;
+  margin-bottom: 8px;
+}
+.tpl-preview-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.tpl-preview-label-row .tpl-preview-label {
+  margin-bottom: 0;
+}
+.tpl-lang-select {
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #4a5568;
+  cursor: pointer;
+  outline: none;
+}
+.tpl-lang-select:focus {
+  border-color: #9f7aea;
+}
+.tpl-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.tpl-pick {
+  padding: 6px 14px;
+  font-size: 13px;
+  border: 1px solid #cbd5e0;
+  border-radius: 16px;
+  background: white;
+  color: #2d3748;
+  cursor: pointer;
+}
+.tpl-pick:hover {
+  border-color: #9f7aea;
+  background: #faf5ff;
+}
+.tpl-pick.active {
+  border-color: #9f7aea;
+  background: #9f7aea;
+  color: white;
+}
+.tpl-preview {
+  border-top: 1px solid #edf2f7;
+  padding-top: 12px;
+}
+.tpl-preview-label {
+  font-size: 11px;
+  color: #718096;
+  margin-bottom: 6px;
+}
+.tpl-preview-text {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  font-family: inherit;
+  resize: vertical;
+  background: #fafafa;
+  color: #2d3748;
+}
+.tpl-preview-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+.tpl-copy-btn {
+  padding: 6px 20px;
+  font-size: 13px;
+  border: 1px solid #667eea;
+  background: #667eea;
+  color: white;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.tpl-copy-btn:hover {
+  background: #5a67d8;
 }
 </style>
