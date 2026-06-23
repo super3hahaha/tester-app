@@ -37,6 +37,15 @@ Tauri 的 webview（WKWebView / WebView2）对同步对话框 `window.confirm()`
 - 危险/批量操作 → 用**内联两步确认**：第一次点把按钮置为 armed 态（文案变"再点一次确认"+ 变色），4 秒内再点才执行，超时 `setTimeout` 复位。零依赖，见 `BatchReplyPage.handleSubmitAll` / `BatchReplyConfigPage.resetAll`。
 - 真要原生弹窗 → 装 `@tauri-apps/plugin-dialog` 的 `confirm/ask`（异步），需加依赖 + 权限 + 重新 build。
 
+## Claude CLI 并发模型：跨模块并行、同模块互斥、无全局上限
+
+调 claude cli 的有 4 个模块，**各自持有独立的状态锁**（互不感知）：`claude.rs::ClaudeState`（测试用例生成）/ `reply.rs::ReplyState`（评论回复）/ `translate.rs::TranslateState`（模板翻译）/ `analysis.rs::AnalysisState`（评论分析）。每个 State 有自己的 `running` + `child_pid`。
+
+- **同一模块内 = 串行（互斥）**：进入先查自己的 `running`，已在跑直接 `Err`（如「已有回复生成任务在进行中」/「Claude is already running」）。第二次调用被拒，不排队。
+- **不同模块之间 = 并行**：锁独立，每个任务 `Command::new(claude_path).spawn()` 起一个**独立 claude 子进程**。回复+翻译+分析同时触发 = 3 个 claude 进程真正并行。
+
+**没有全局并发上限**（lib.rs / 各模块均无 Semaphore）。当前只有 4 个功能，最多 4 个并发进程，不至于打到速率限制，故**刻意不加**全局信号量（2026-06-23 决定）。后续若功能变多、或某模块改成内部批量并发起多进程，撞 429 会是明显信号 —— 届时再加一个跨模块共享的 `tokio::sync::Semaphore`（spawn 前先拿令牌）。
+
 ## 单条 AI 回复：后端一次只跑一个，前端必须自己排队 + 按任务路由日志
 
 `reply.rs::ReplyState` 只有一个全局 `running` 锁 + 一个 `child_pid`，`generate_single_reply` 一进来发现 `running` 就直接 `Err("已有回复生成任务在进行中")`。`stop_reply` 也只杀那一个 `child_pid`。`reply-log` 事件是全局广播，**不带任务标识**。
