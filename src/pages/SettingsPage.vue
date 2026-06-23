@@ -22,6 +22,7 @@ const updateState = ref<UpdateState>("idle");
 const updateInfo = ref<UpdateInfo | null>(null);
 const updateError = ref("");
 const downloadProgress = ref({ downloaded: 0, total: 0 });
+const showUpdateModal = ref(false);
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -46,6 +47,7 @@ async function checkUpdate() {
     if (info) {
       updateInfo.value = info;
       updateState.value = "available";
+      showUpdateModal.value = true;
     } else {
       updateState.value = "latest";
       setTimeout(() => { updateState.value = "idle"; }, 3000);
@@ -489,7 +491,7 @@ async function copyText(text: string) {
           <!-- available -->
           <template v-if="updateState === 'available' && updateInfo">
             <span class="update-new-badge">v{{ updateInfo.version }} 可更新</span>
-            <button class="download-btn" @click="startDownload">下载并安装</button>
+            <button class="download-btn" @click="showUpdateModal = true">查看更新</button>
           </template>
 
           <!-- downloading -->
@@ -537,6 +539,24 @@ async function copyText(text: string) {
 
       <div v-if="message" class="message" :class="{ error: message.startsWith('Failed') }">
         {{ message }}
+      </div>
+    </div>
+
+    <!-- 更新弹窗 -->
+    <div v-if="showUpdateModal && updateInfo" class="modal-mask" @click.self="showUpdateModal = false">
+      <div class="modal-box">
+        <div class="modal-header">
+          <span class="modal-title">发现新版本 v{{ updateInfo.version }}</span>
+          <button class="modal-close" @click="showUpdateModal = false">✕</button>
+        </div>
+        <div class="modal-body">
+          <pre v-if="updateInfo.body" class="release-notes">{{ updateInfo.body }}</pre>
+          <p v-else class="release-empty">暂无更新说明</p>
+        </div>
+        <div class="modal-footer">
+          <button class="modal-cancel" @click="showUpdateModal = false">稍后再说</button>
+          <button class="download-btn" @click="showUpdateModal = false; startDownload()">下载并安装</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1111,5 +1131,89 @@ h3 {
   font-size: 11px;
   color: #c53030;
   word-break: break-all;
+}
+
+/* 更新弹窗 */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-box {
+  background: white;
+  border-radius: 12px;
+  width: 480px;
+  max-width: 90vw;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid #f0f0f0;
+}
+.modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #2d3748;
+}
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 14px;
+  color: #aaa;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.modal-close:hover {
+  background: #f5f5f5;
+  color: #555;
+}
+.modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
+.release-notes {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #444;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-family: inherit;
+}
+.release-empty {
+  font-size: 13px;
+  color: #aaa;
+  margin: 0;
+}
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 20px 18px;
+  border-top: 1px solid #f0f0f0;
+}
+.modal-cancel {
+  padding: 7px 16px;
+  font-size: 13px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #555;
+  cursor: pointer;
+}
+.modal-cancel:hover {
+  background: #f5f5f5;
 }
 </style>
