@@ -35,6 +35,32 @@ pub fn find_claude() -> Option<String> {
         }
     }
 
+    // Claude Desktop App 安装的 CLI，路径含版本号需要 glob
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let base = PathBuf::from(&home)
+            .join("Library")
+            .join("Application Support")
+            .join("Claude")
+            .join("claude-code");
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            let mut versions: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            // 取最新版本（字典序最大）
+            versions.sort();
+            if let Some(latest) = versions.last() {
+                let bin = latest.join("claude.app").join("Contents").join("MacOS").join("claude");
+                if bin.exists() {
+                    return Some(bin.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
     if cfg!(windows) {
         let output = std::process::Command::new("cmd")
             .args(["/c", "where", "claude"])
