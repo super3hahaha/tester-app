@@ -466,7 +466,7 @@ async function copyText(text: string) {
       <div class="version-row">
         <div class="version-left">
           <span class="version-label">当前版本</span>
-          <span class="version-value">v1.0.0</span>
+          <span class="version-value">v1.0.1</span>
         </div>
         <div class="version-right">
           <!-- idle / latest -->
