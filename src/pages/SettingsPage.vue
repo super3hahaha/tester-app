@@ -247,12 +247,15 @@ async function refreshClaude() {
   }
 }
 
+const copyMessage = ref("");
+
 async function copyText(text: string) {
   try {
     await navigator.clipboard.writeText(text);
-    message.value = "Copied: " + text;
+    copyMessage.value = "已复制";
+    setTimeout(() => { copyMessage.value = ""; }, 2000);
   } catch {
-    message.value = "Copy failed";
+    copyMessage.value = "复制失败";
   }
 }
 
@@ -336,6 +339,7 @@ async function copyText(text: string) {
         >
           Claude Code 文档 ↗
         </a>
+        <span v-if="copyMessage" class="copy-message">{{ copyMessage }}</span>
       </div>
     </div>
 
@@ -772,6 +776,10 @@ h3 {
 }
 .doc-link:hover {
   text-decoration: underline;
+}
+.copy-message {
+  font-size: 12px;
+  color: #48bb78;
 }
 .section-title {
   font-size: 14px;
