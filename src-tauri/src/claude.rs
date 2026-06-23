@@ -21,7 +21,11 @@ pub fn find_claude() -> Option<String> {
         let home = std::env::var("HOME").unwrap_or_default();
         vec![
             PathBuf::from("/usr/local/bin/claude"),
+            PathBuf::from("/opt/homebrew/bin/claude"),
             PathBuf::from(&home).join(".npm-global").join("bin").join("claude"),
+            PathBuf::from(&home).join(".nvm").join("versions").join("node").join("current").join("bin").join("claude"),
+            PathBuf::from(&home).join("Library").join("pnpm").join("claude"),
+            PathBuf::from(&home).join(".local").join("bin").join("claude"),
         ]
     };
 
@@ -46,15 +50,20 @@ pub fn find_claude() -> Option<String> {
             }
         }
     } else {
-        let output = std::process::Command::new("which")
-            .arg("claude")
-            .output()
-            .ok()?;
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout);
-            let p = path.trim();
-            if !p.is_empty() {
-                return Some(p.to_string());
+        // 通过 login shell 查找，确保 nvm/homebrew 等 PATH 都加载
+        for shell in &["/bin/zsh", "/bin/bash"] {
+            let output = std::process::Command::new(shell)
+                .args(["-l", "-c", "which claude"])
+                .output()
+                .ok();
+            if let Some(out) = output {
+                if out.status.success() {
+                    let path = String::from_utf8_lossy(&out.stdout);
+                    let p = path.trim();
+                    if !p.is_empty() {
+                        return Some(p.to_string());
+                    }
+                }
             }
         }
     }
