@@ -139,6 +139,14 @@ fn generate_code_challenge(verifier: &str) -> String {
 // ---- OAuth config ----
 
 fn load_oauth_config() -> Result<OAuthConfig, String> {
+    // 优先从编译时嵌入的内容读取（打包后可用）
+    const EMBEDDED: &str = include_str!("../credentials/oauth.json");
+    if !EMBEDDED.trim().is_empty() {
+        let file: OAuthFile = serde_json::from_str(EMBEDDED)
+            .map_err(|e| format!("Cannot parse embedded oauth.json: {}", e))?;
+        return Ok(file.installed);
+    }
+    // 开发环境回退
     let candidates = [
         PathBuf::from("credentials/oauth.json"),
         PathBuf::from("src-tauri/credentials/oauth.json"),
