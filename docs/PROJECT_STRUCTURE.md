@@ -33,7 +33,7 @@ tester-app/
 │       ├── PlayConsoleConfigPage.vue # Play Console 拉取配置：每个 app 一张卡片，勾选启用 + 日期预设 + 星级 + 回复状态；显式「保存」写 localStorage `play-console-multi-config-v1`；ReviewPage 读它
 │       ├── BatchReplyConfigPage.vue # 批量回复配置（嵌在 ConfigPage 的 Batch Tab）：每个 app 一张卡片，独立勾选启用 + 日期预设 + 星级；显式「保存」按钮写 localStorage
 │       ├── BatchReplyPage.vue   # 批量回复执行：读保存的多 app 配置 → 并行拉评论 → 按 app 分组折叠 → AI 生成回复 → 逐条/一键提交
-│       ├── TemplateManagerPage.vue # 模板管理：按产品 tab 增删改模板 + xlsx 导入 + 多语言预翻译 + 每条 ★收藏（挂 Review 工作区）
+│       ├── TemplateManagerPage.vue # 模板管理：按产品 tab 增删改模板 + xlsx 导入/导出 + 多语言预翻译 + 每条 ★收藏（挂 Review 工作区）
 │       ├── KnowledgeConfigPage.vue # 知识配置：按产品 tab 编辑「应用知识块」(.md)，左编辑右实时预览 + 插入骨架 + 保存；供评论分析注入 {app_knowledge}（挂 Review 工作区，与模板管理同级）
 │       ├── GmailPage.vue        # Gmail 邮件：读 Apps Script 同步的 Sheet，卡片列表 + 详情弹窗 + 已读隐藏 + 按 Chrome profile 打开邮件；可关联邮件回复模板产品（email namespace）
 │       ├── AppScriptPage.vue    # App Script 配置：管理待维护的 Apps Script 项目列表（每项含备注/Chrome profile/跳转链接），点「打开 ↗」用指定 profile 打开（默认 https://script.google.com/home?hl=zh-cn）
@@ -58,15 +58,15 @@ tester-app/
 │   │   ├── reviews.rs           # Google Play Developer API：评论拉取（list_play_reviews）/ 应用列表（list_play_apps）/ 评论回复（reply_to_review）
 │   │   ├── reply.rs             # 批量回复生成：写 pending JSON → 跑 claude /review-reply（--add-dir 模板目录 + prompt 传路径）→ 读回 candidates.json（reply-log 事件流）
 │   │   ├── skill_sync.rs        # Skill 热更新：从 GitHub 拉取 zipball 同步到 ~/.claude/skills/，启动时静默 + Settings 手动
-│   │   ├── templates.rs         # 模板管理：~/.tester-app/templates/ 的增删改 + xlsx 导入；模板含 lang（en/zh-CN 双源）+ translations（预存各语言译文）；写全文同时重建瘦身 index；skill 从此目录读
+│   │   ├── templates.rs         # 模板管理：~/.tester-app/templates/ 的增删改 + xlsx 导入/导出（export_templates_xlsx：A 类别/B 英文/C 起各语言）；模板含 lang（en/zh-CN 双源）+ translations（预存各语言译文）；写全文同时重建瘦身 index；skill 从此目录读
 │   │   ├── analysis.rs          # 评论分析：①「知识配置」每产品一份知识块 .md 的 list/read/write（存 ~/.tester-app/review-analysis/{slug}.md，文件名复用 templates 的 product_prefix）；②「🔍 分析」generate_analysis/stop_analysis（独立 AnalysisState + analysis-log 通道）：按 package→产品读知识块注入 {app_knowledge}，跑 claude --print 直出 JSON 对象（分类/问题/信息缺口/总体判断 + 一条推荐回复），与 reply.rs 同构但解析对象、状态独立
-│   │   ├── model_config.rs      # 模型配置持久化（~/.tester-app/model-config.json）：get_model_config / save_model_config；字段 reply/analysis/translate（Claude 模型 ID）+ github_token（供 skill_sync 访问私有 release）
+│   │   ├── model_config.rs      # 模型配置持久化（~/.tester-app/model-config.json）：get_model_config / save_model_config；字段 reply/analysis/translate（Claude 模型 ID）+ github_token（供 skill_sync 访问私有 release）+ cli_engine（"claude"|"codex"）+ codex_model（engine=codex 时传给 codex exec 的模型）
 │   │   ├── translate.rs         # 模板多语言预翻译：轻量直出（claude --print，不走 skill、不读写文件）+ haiku，逐批翻译写回 translations；translate-log/progress 进度 + stop_translate 可取消
 │   │   └── chrome.rs            # 按指定 Chrome profile 打开 URL：读 Local State 列 profile（目录名↔显示名）+ open_url_in_chrome_profile（Gmail 多账号跨 profile 打开邮件深链）
 │   ├── scripts/                 # 内嵌资源（编译期 include_str!）
 │   │   └── diff_testcases.py    # 来自 testcase-eval-visual-report skill 的纯 Python diff 脚本
 │   ├── capabilities/            # Tauri 权限能力
-│   │   └── default.json         # 默认权限：core:default、opener:default、dialog:allow-open
+│   │   └── default.json         # 默认权限：core:default、opener:default、dialog:allow-open、dialog:allow-save
 │   ├── credentials/             # OAuth 凭据（已 gitignore）
 │   │   └── oauth.json           # Google OAuth client_id / client_secret
 │   └── icons/                   # 应用图标（多平台多尺寸）
@@ -81,9 +81,7 @@ tester-app/
     ├── PROJECT_STRUCTURE.md     # 本文件
     ├── decisions.md             # 架构决策记录（非显然选择的原因）
     ├── gotchas.md               # 踩过的坑（平台怪癖、外部约束、易复发 bug）
-    ├── gmail-handoff.md         # Gmail 邮件接入交接文档（Apps Script 同步 + app 读表全过程 + 为何弃用直连 OAuth）
-    ├── gmail-sync.gs            # Apps Script 脚本：定时把 Gmail 标签下未读同步到 Google Sheet（部署到各 Gmail 账号）
-    └── handoff-template-i18n.md # 模板多语言预翻译改造交接文档（背景/设计决策/分步进度，含为何弃用 template-translate skill 改轻量直出）
+    └── gmail-sync.gs            # Apps Script 脚本：定时把 Gmail 标签下未读同步到 Google Sheet（部署到各 Gmail 账号）
 ```
 
 # 运行时数据目录
