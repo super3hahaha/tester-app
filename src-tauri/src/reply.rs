@@ -242,27 +242,78 @@ fn build_gen_prompt(
 }
 
 /// Extract a JSON array substring from possibly-fenced / prose-wrapped model
-/// output: slice from the first '[' to the last ']'.
+/// output. Uses bracket-counting to find the matching closing bracket.
 fn extract_json_array(s: &str) -> Option<&str> {
     let start = s.find('[')?;
-    let end = s.rfind(']')?;
-    if end > start {
-        Some(&s[start..=end])
-    } else {
-        None
+    let bytes = s.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escape {
+            escape = false;
+        } else if in_string {
+            match b {
+                b'\\' => escape = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+        } else {
+            match b {
+                b'"' => in_string = true,
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&s[start..=i]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
     }
+    None
 }
 
 /// Extract a JSON object substring from possibly-fenced / prose-wrapped model
-/// output: slice from the first '{' to the last '}'.
+/// output. Uses bracket-counting to find the matching closing brace, so stray
+/// '}' characters in trailing prose don't corrupt the slice.
 fn extract_json_object(s: &str) -> Option<&str> {
     let start = s.find('{')?;
-    let end = s.rfind('}')?;
-    if end > start {
-        Some(&s[start..=end])
-    } else {
-        None
+    let bytes = s.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escape {
+            escape = false;
+        } else if in_string {
+            match b {
+                b'\\' => escape = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+        } else {
+            match b {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&s[start..=i]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
     }
+    None
 }
 
 /// Generate 3 style-varied Google Play reply candidates for ONE review, driven by
