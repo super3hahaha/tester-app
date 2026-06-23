@@ -34,6 +34,12 @@ jobs:
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
+      - name: Write OAuth credentials
+        shell: bash
+        run: |
+          mkdir -p src-tauri/credentials
+          echo '${{ secrets.OAUTH_JSON }}' > src-tauri/credentials/oauth.json
+
       - name: Install dependencies
         run: npm install
 
