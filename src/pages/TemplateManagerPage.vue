@@ -108,6 +108,13 @@ const newLang = ref("en"); // 源语言，默认英文
 // 新建产品（如「通用」：跨 app 通用模板，翻一次各 app 复用）
 const showNewProduct = ref(false);
 const newProductName = ref("");
+const confirmDeleteProduct = ref<string | null>(null);
+
+// 管理关联弹窗
+interface PkgMapRow { package: string; display: string; product: string | null }
+const showPkgMapModal = ref(false);
+const pkgMapRows = ref<PkgMapRow[]>([]);
+const pkgMapSaving = ref(false);
 
 // 编辑行「查看语言」：id → 当前查看的语言码（默认源语言）。
 const viewLang = ref<Record<string, string>>({});
@@ -235,6 +242,43 @@ async function createProduct() {
     await loadProducts();
     selectProduct(name);
     flash(`已创建产品「${name}」`);
+  } catch (e: any) {
+    error.value = String(e);
+  }
+}
+
+async function openPkgMapModal() {
+  try {
+    const rows = await invoke<PkgMapRow[]>("get_package_map");
+    pkgMapRows.value = rows;
+    showPkgMapModal.value = true;
+  } catch (e: any) {
+    error.value = String(e);
+  }
+}
+function closePkgMapModal() {
+  showPkgMapModal.value = false;
+}
+async function savePkgMap() {
+  pkgMapSaving.value = true;
+  try {
+    await invoke("save_package_map", { entries: pkgMapRows.value });
+    showPkgMapModal.value = false;
+    await loadProducts();
+    flash("关联已保存");
+  } catch (e: any) {
+    error.value = String(e);
+  } finally {
+    pkgMapSaving.value = false;
+  }
+}
+
+async function deleteProduct(product: string) {
+  confirmDeleteProduct.value = null;
+  try {
+    await invoke("delete_template_product", { product, namespace: NS.value });
+    await loadProducts();
+    flash(`已删除产品「${product}」`);
   } catch (e: any) {
     error.value = String(e);
   }
@@ -608,16 +652,34 @@ watch(
 
     <!-- 产品选择 -->
     <div class="product-tabs">
-      <button
+      <span
         v-for="p in products"
         :key="p.product"
-        class="product-tab"
+        class="product-tab-wrap"
         :class="{ active: p.product === selectedProduct }"
-        @click="selectProduct(p.product)"
+        @mouseleave="confirmDeleteProduct === p.product && (confirmDeleteProduct = null)"
       >
-        {{ p.product }}
-        <span class="tab-count">{{ p.count }}</span>
-      </button>
+        <button
+          class="product-tab"
+          :class="{ active: p.product === selectedProduct }"
+          @click="selectProduct(p.product)"
+        >
+          {{ p.product }}
+          <span class="tab-count">{{ p.count }}</span>
+        </button>
+        <button
+          v-if="confirmDeleteProduct !== p.product"
+          class="tab-delete-btn"
+          title="删除产品"
+          @click.stop="confirmDeleteProduct = p.product"
+        >×</button>
+        <button
+          v-else
+          class="tab-delete-confirm-btn"
+          title="确认删除（不可恢复）"
+          @click.stop="deleteProduct(p.product)"
+        >确认删除?</button>
+      </span>
       <span v-if="!loading && products.length === 0" class="empty-hint">
         暂无产品模板。用「+ 新建产品」或「从 xlsx 导入」。
       </span>
@@ -642,6 +704,7 @@ watch(
       <span v-if="selectedInfo.apps.length">
         关联应用：{{ selectedInfo.apps.join("、") }}
       </span>
+      <button class="pkg-map-btn" @click="openPkgMapModal">管理关联</button>
 
       <div class="meta-spacer"></div>
 
@@ -909,8 +972,53 @@ watch(
         <button class="mini-expand" @click.stop="translateMinimized = false">展开</button>
       </div>
     </div>
+
+    <!-- 管理关联弹窗 -->
+    <div v-if="showPkgMapModal" class="modal-overlay" @click.self="closePkgMapModal">
+      <div class="modal-box pkg-map-modal">
+        <div class="modal-header">
+          <h3>管理包名关联</h3>
+          <button class="modal-close" @click="closePkgMapModal">×</button>
+        </div>
+        <div class="pkg-map-body">
+          <table class="pkg-map-table">
+            <thead>
+              <tr>
+                <th>包名</th>
+                <th>显示名</th>
+                <th>关联产品</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, i) in pkgMapRows" :key="i">
+                <td><input v-model="row.package" class="pkg-input" placeholder="com.example.app" /></td>
+                <td><input v-model="row.display" class="pkg-input" placeholder="App Name" /></td>
+                <td>
+                  <select v-model="row.product" class="pkg-select">
+                    <option :value="null">— 无（纯生成）</option>
+                    <option v-for="p in products" :key="p.product" :value="p.product">{{ p.product }}</option>
+                  </select>
+                </td>
+                <td>
+                  <button class="pkg-del-btn" @click="pkgMapRows.splice(i, 1)">删除</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <button class="pkg-add-btn" @click="pkgMapRows.push({ package: '', display: '', product: null })">+ 新增</button>
+        </div>
+        <div class="modal-footer">
+          <button class="modal-cancel-btn" @click="closePkgMapModal">取消</button>
+          <button class="modal-save-btn" :disabled="pkgMapSaving" @click="savePkgMap">
+            {{ pkgMapSaving ? "保存中…" : "保存" }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
+
 
 <style scoped>
 .template-page {
@@ -974,6 +1082,47 @@ watch(
   border-color: #667eea;
   background: #667eea;
   color: white;
+}
+.product-tab-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.tab-delete-btn {
+  display: none;
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: none;
+  background: #e53e3e;
+  color: white;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+}
+.product-tab-wrap:hover .tab-delete-btn {
+  display: flex;
+}
+.tab-delete-confirm-btn {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  border: none;
+  background: #e53e3e;
+  color: white;
+  font-size: 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  padding: 1px 6px;
+  white-space: nowrap;
+  z-index: 1;
 }
 .tab-count {
   font-size: 11px;
@@ -1544,4 +1693,133 @@ watch(
   border-color: #c53030;
   color: #c53030;
 }
+
+/* 管理关联按钮 */
+.pkg-map-btn {
+  font-size: 12px;
+  padding: 2px 8px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+  color: #4a5568;
+  margin-left: 8px;
+}
+.pkg-map-btn:hover { background: #f7fafc; }
+
+/* 弹窗通用 */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-box {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.modal-header h3 { margin: 0; font-size: 15px; }
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 18px;
+  cursor: pointer;
+  color: #718096;
+  line-height: 1;
+  padding: 0 4px;
+}
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px;
+  border-top: 1px solid #e2e8f0;
+}
+.modal-cancel-btn {
+  padding: 6px 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+}
+.modal-save-btn {
+  padding: 6px 16px;
+  border: none;
+  border-radius: 6px;
+  background: #667eea;
+  color: white;
+  cursor: pointer;
+}
+.modal-save-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* 包名关联弹窗 */
+.pkg-map-modal { width: 700px; }
+.pkg-map-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  flex: 1;
+}
+.pkg-map-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.pkg-map-table th {
+  text-align: left;
+  padding: 6px 8px;
+  color: #718096;
+  font-weight: 500;
+  border-bottom: 1px solid #e2e8f0;
+}
+.pkg-map-table td { padding: 5px 8px; }
+.pkg-input {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  font-size: 12px;
+  box-sizing: border-box;
+}
+.pkg-select {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid #e2e8f0;
+  border-radius: 5px;
+  font-size: 12px;
+}
+.pkg-del-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid #fed7d7;
+  border-radius: 5px;
+  background: #fff5f5;
+  color: #c53030;
+  cursor: pointer;
+}
+.pkg-del-btn:hover { background: #fed7d7; }
+.pkg-add-btn {
+  margin-top: 10px;
+  font-size: 12px;
+  padding: 4px 12px;
+  border: 1px dashed #cbd5e0;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+  color: #4a5568;
+}
+.pkg-add-btn:hover { background: #f7fafc; }
 </style>

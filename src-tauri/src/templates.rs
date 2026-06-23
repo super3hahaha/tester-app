@@ -253,6 +253,49 @@ fn read_package_map_ns(namespace: &str) -> Option<serde_json::Value> {
     serde_json::from_str(&s).ok()
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PackageMappingEntry {
+    pub package: String,
+    pub display: String,
+    pub product: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_package_map() -> Result<Vec<PackageMappingEntry>, String> {
+    let pkgmap = read_package_map_ns("gp");
+    let mut out = vec![];
+    if let Some(m) = pkgmap.as_ref().and_then(|v| v.get("mapping")).and_then(|v| v.as_object()) {
+        for (pkg, entry) in m {
+            let display = entry.get("display").and_then(|d| d.as_str()).unwrap_or("").to_string();
+            let product = entry.get("product").and_then(|p| p.as_str()).map(|s| s.to_string());
+            out.push(PackageMappingEntry { package: pkg.clone(), display, product });
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn save_package_map(entries: Vec<PackageMappingEntry>) -> Result<(), String> {
+    let path = ns_dir("gp").join("package_map.json");
+    let existing_raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut root: serde_json::Value = serde_json::from_str(&existing_raw)
+        .unwrap_or_else(|_| serde_json::json!({ "mapping": {} }));
+
+    let mut mapping = serde_json::Map::new();
+    for e in &entries {
+        let val = serde_json::json!({
+            "product": e.product,
+            "display": e.display,
+        });
+        mapping.insert(e.package.clone(), val);
+    }
+    root["mapping"] = serde_json::Value::Object(mapping);
+
+    let s = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    std::fs::write(&path, s).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn apps_for_product_from(pkgmap: &Option<serde_json::Value>, product: &str) -> Vec<String> {
     let mut out = vec![];
     if let Some(m) = pkgmap.as_ref().and_then(|v| v.get("mapping")).and_then(|v| v.as_object()) {
@@ -486,6 +529,19 @@ pub fn delete_template(product: String, id: String, namespace: Option<String>) -
     pt.templates.retain(|t| t.id != id);
     if pt.templates.len() == before {
         return Err("模板不存在".into());
+    }
+    write_templates_and_index_ns(ns, &mut f)?;
+    Ok(())
+}
+
+/// 删除整个产品（含其下所有模板）。
+#[tauri::command]
+pub fn delete_template_product(product: String, namespace: Option<String>) -> Result<(), String> {
+    let ns = namespace.as_deref().unwrap_or("gp");
+    ensure_templates_dir_ns(ns)?;
+    let mut f = read_templates_ns(ns)?;
+    if f.products.remove(&product).is_none() {
+        return Err("产品不存在".into());
     }
     write_templates_and_index_ns(ns, &mut f)?;
     Ok(())
