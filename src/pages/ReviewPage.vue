@@ -46,6 +46,11 @@ interface PersistedConfig {
 }
 
 const STORAGE_KEY = "review-page-config-v3";
+// 上次视图指针：进页面据此恢复（"single" = 恢复当前 app 快照 / "batch" = 拼装批量视图）
+const LAST_VIEW_KEY = "review-last-view-v1";
+const SNAP_VERSION = 1;
+// 挂载期间抑制「切换应用自动加载快照」的 watch，避免与 restoreLastView 抢状态。
+let booting = true;
 
 const apps = ref<PlayApp[]>([]);
 const appsLoading = ref(false);
@@ -106,8 +111,122 @@ onMounted(async () => {
       // ignore corrupt cache
     }
   }
-  loadApps();
+  await loadApps();
+  await restoreLastView();
+  booting = false;
 });
+
+// 切换应用下拉框 → 进入单视图并加载该 app 的本地快照（无则清空，等用户点拉取）。
+// 挂载期 booting=true 时跳过，交给 restoreLastView 统一处理。
+watch(packageName, async (pkg, old) => {
+  if (booting || pkg === old) return;
+  mode.value = "single";
+  batchSummary.value = "";
+  localStorage.setItem(LAST_VIEW_KEY, "single");
+  const snap = await loadSnapshot(pkg.trim());
+  reviews.value = snap?.reviews ?? [];
+  fetchedAt.value = snap?.fetchedAt ?? null;
+});
+
+// ── 评论快照持久化（per-app 文件，批量视图派生）────────────────────────────
+interface Snapshot {
+  reviews: TaggedReview[];
+  fetchedAt: number | null;
+}
+
+async function saveSnapshot(key: string, list: TaggedReview[], at: number | null) {
+  try {
+    await invoke("save_reviews_snapshot", {
+      key,
+      data: { version: SNAP_VERSION, reviews: list, fetchedAt: at },
+    });
+  } catch (e) {
+    // 持久化失败不阻塞主流程
+    console.warn("save reviews snapshot failed:", e);
+  }
+}
+
+async function loadSnapshot(key: string): Promise<Snapshot | null> {
+  if (!key) return null;
+  try {
+    const data = await invoke<any>("load_reviews_snapshot", { key });
+    if (!data || !Array.isArray(data.reviews)) return null;
+    return { reviews: data.reviews as TaggedReview[], fetchedAt: data.fetchedAt ?? null };
+  } catch (e) {
+    console.warn("load reviews snapshot failed:", e);
+    return null;
+  }
+}
+
+// 回复成功后，按 review_id 改写该 app 快照文件里那一条（读-改-写，与当前视图无关，
+// 单视图/批量视图都保持一致；该 app 无快照则跳过）。
+async function persistReplyToSnapshot(
+  pkg: string,
+  reviewId: string,
+  replyText: string,
+  ts: number
+) {
+  const snap = await loadSnapshot(pkg);
+  if (!snap) return;
+  const hit = snap.reviews.find((r) => r.review_id === reviewId);
+  if (!hit) return;
+  hit.developer_reply = replyText;
+  hit.developer_reply_ts = ts;
+  await saveSnapshot(pkg, snap.reviews, snap.fetchedAt);
+}
+
+// 用各启用 app 的 per-app 快照拼装批量视图（不打 API）。无任何可用快照返回 false。
+async function restoreBatch(): Promise<boolean> {
+  const config = loadPlayConfig();
+  const enabled = config
+    ? Object.entries(config.perApp).filter(([, c]) => c.enabled)
+    : [];
+  if (enabled.length === 0) return false;
+  batchStarsByPkg.value = {};
+  const all: TaggedReview[] = [];
+  let any = false;
+  let latest = 0;
+  for (const [pkg, cfg] of enabled) {
+    const snap = await loadSnapshot(pkg);
+    if (!snap) continue;
+    any = true;
+    if (snap.fetchedAt && snap.fetchedAt > latest) latest = snap.fetchedAt;
+    const range = computeRange(cfg.datePreset, {
+      fromDate: cfg.customFromDate,
+      toDate: cfg.customToDate,
+    });
+    const from = range.fromDate
+      ? Math.floor(new Date(range.fromDate + "T00:00:00").getTime() / 1000)
+      : 0;
+    const to = range.toDate
+      ? Math.floor(new Date(range.toDate + "T23:59:59").getTime() / 1000)
+      : Number.MAX_SAFE_INTEGER;
+    batchStarsByPkg.value[pkg] = [...cfg.stars];
+    for (const r of snap.reviews) {
+      if (r.user_comment_ts >= from && r.user_comment_ts <= to) all.push(r);
+    }
+  }
+  if (!any) return false;
+  all.sort((a, b) => b.user_comment_ts - a.user_comment_ts);
+  reviews.value = all;
+  mode.value = "batch";
+  fetchedAt.value = latest || null;
+  batchSummary.value = `已从本地快照恢复批量视图（${enabled.length} 个应用，按当前配置筛选）`;
+  return true;
+}
+
+// 进页面恢复上次视图：batch → 拼装；否则恢复当前 app 的单视图快照。
+async function restoreLastView() {
+  if (localStorage.getItem(LAST_VIEW_KEY) === "batch") {
+    if (await restoreBatch()) return;
+  }
+  const snap = await loadSnapshot(packageName.value.trim());
+  if (snap) {
+    reviews.value = snap.reviews;
+    fetchedAt.value = snap.fetchedAt;
+    mode.value = "single";
+  }
+}
 
 watch([packageName, developerId, appId, stars, replyState, apps], () => {
   const cfg: PersistedConfig = {
@@ -184,6 +303,8 @@ async function handleFetch() {
     mode.value = "single";
     batchSummary.value = "";
     fetchedAt.value = Date.now();
+    localStorage.setItem(LAST_VIEW_KEY, "single");
+    saveSnapshot(pkg, reviews.value, fetchedAt.value);
   } catch (e: any) {
     const msg = String(e);
     if (msg.startsWith("NEED_RELOGIN_SCOPE")) {
@@ -246,6 +367,10 @@ async function handleBatchFetch() {
         // 只按日期界定窗口，保留全部星级（供「回复后又更新」忽略星级时显示）；
         // 各 app 的 Config 星级记到 map，展示时再过滤（见 filtered）。
         batchStarsByPkg.value[pkg] = [...cfg.stars];
+        // 把该 app 的**全量**列表（日期筛选之前）落一份 per-app 快照，与单 app 拉取
+        // 写的格式一致、可互换；批量视图重进时由这些快照派生（见 restoreBatch）。
+        const taggedFull = list.map((r) => ({ ...r, _pkg: pkg, _app: appName }));
+        saveSnapshot(pkg, taggedFull, Date.now());
         const dated = list.filter(
           (r) => r.user_comment_ts >= from && r.user_comment_ts <= to
         );
@@ -271,6 +396,7 @@ async function handleBatchFetch() {
   batchSummary.value = `批量拉取 ${enabled.length} 个应用 · 拉到 ${matchedTotal} 条` +
     (failed > 0 ? `（${failed} 个失败）` : "") + ` · ${parts.join("、")}`;
   fetchedAt.value = Date.now();
+  localStorage.setItem(LAST_VIEW_KEY, "batch");
   batchLoading.value = false;
 }
 
@@ -665,6 +791,7 @@ async function handleSubmitReply(task: AiTask) {
     // 本地回填，UI 立即反映为「已回复」
     task.review.developer_reply = text;
     task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
+    persistReplyToSnapshot(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
     aiTasks.value = aiTasks.value.filter((t) => t.id !== task.id);
     if (activeTaskId.value === task.id) activeTaskId.value = null;
   } catch (e: any) {
@@ -809,6 +936,7 @@ async function submitTplReply() {
     });
     r.developer_reply = text;
     r.developer_reply_ts = Math.floor(Date.now() / 1000);
+    persistReplyToSnapshot(r._pkg, r.review_id, text, r.developer_reply_ts);
     tplDlgReview.value = null;
   } catch (e: any) {
     tplError.value = String(e);
@@ -1001,6 +1129,7 @@ async function submitAnReply(task: AnTask) {
     });
     task.review.developer_reply = text;
     task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
+    persistReplyToSnapshot(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
     anTasks.value = anTasks.value.filter((t) => t.id !== task.id);
     if (activeAnId.value === task.id) activeAnId.value = null;
   } catch (e: any) {

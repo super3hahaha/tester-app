@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use tauri::State;
 
 use crate::auth::AuthState;
@@ -377,4 +378,54 @@ pub async fn list_play_apps(state: State<'_, AuthState>) -> Result<Vec<PlayApp>,
     // Alphabetical for stable UI ordering.
     out.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
     Ok(out)
+}
+
+// ---- 评论快照持久化（reviews-cache）----
+//
+// Play reviews API 只返回最近约 7 天，且每次进页面都要重拉很烦。每个 app 的
+// 「全量拉取列表」按包名各存一份 `~/.tester-app/reviews-cache/{key}.json`，单 app
+// 拉取与批量拉取写的是同一种文件、可互换；批量视图由前端读多份按需拼装。
+//
+// 后端只做透明读写：payload 是 serde_json::Value，原样落盘 / 读回，不认识 Review
+// 结构 —— 这样以后前端 Review 字段怎么改都不用动 Rust。
+
+fn reviews_cache_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap()
+        .join(".tester-app")
+        .join("reviews-cache")
+}
+
+/// 把 key（包名或 `__batch__`）规整成安全文件名：非 [A-Za-z0-9._-] 一律转 `_`。
+fn snapshot_path(key: &str) -> PathBuf {
+    let safe: String = key
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .collect();
+    reviews_cache_dir().join(format!("{}.json", safe))
+}
+
+#[tauri::command]
+pub fn save_reviews_snapshot(key: String, data: serde_json::Value) -> Result<(), String> {
+    if key.trim().is_empty() {
+        return Err("snapshot key 不能为空".to_string());
+    }
+    let path = snapshot_path(&key);
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+    // 先写临时文件再 rename，避免写一半被读到损坏的 JSON。
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn load_reviews_snapshot(key: String) -> Result<Option<serde_json::Value>, String> {
+    let path = snapshot_path(&key);
+    match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s).map(Some).map_err(|e| e.to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
