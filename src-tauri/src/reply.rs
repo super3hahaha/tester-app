@@ -253,6 +253,18 @@ fn extract_json_array(s: &str) -> Option<&str> {
     }
 }
 
+/// Extract a JSON object substring from possibly-fenced / prose-wrapped model
+/// output: slice from the first '{' to the last '}'.
+fn extract_json_object(s: &str) -> Option<&str> {
+    let start = s.find('{')?;
+    let end = s.rfind('}')?;
+    if end > start {
+        Some(&s[start..=end])
+    } else {
+        None
+    }
+}
+
 /// Generate 3 style-varied Google Play reply candidates for ONE review, driven by
 /// a freeform user instruction. Unlike `run_reply_skill` (template-match only),
 /// this calls `claude --print` directly with a self-contained prompt and parses
@@ -683,4 +695,228 @@ async fn run_reply_skill_inner(
         output: parsed,
         usage,
     })
+}
+
+// ── 邮件 AI 回复 ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct MailReplyResult {
+    pub language: String,
+    pub text: String,
+    pub text_zh: String,
+    pub char_count: i64,
+    pub usage: Option<serde_json::Value>,
+}
+
+fn build_mail_reply_prompt(body: &str, instruction: &str, lang: &str) -> String {
+    let instruction_block = if instruction.trim().is_empty() {
+        "用户未指定方向。请根据正文自行判断：能定位到具体问题的，给针对性回应和可操作的下一步；\
+信息不足的，礼貌请用户补充具体表现或复现步骤；纯好评则简短真诚地感谢。不要编造原因或空泛套话。"
+    } else {
+        instruction
+    };
+
+    format!(
+        r#"你是一个应用开发团队的支持人员，正在草拟一封邮件回复。
+根据下面的【邮件信息】和【回复方向】生成回复草稿，严格遵守【硬性标准】。
+不要使用任何工具，直接给出结果。
+
+【邮件信息】
+- 正文原文：{body}
+
+【回复方向】
+{instruction}
+
+【硬性标准】
+1. 回复语言：用 {lang} 语言回复。
+2. 长度适中：3–6 句话，不堆废话，也不过短失礼。
+3. 不编造、不乱承诺：不编造具体功能、时间节点；不做无法兑现的承诺。
+4. 语气：专业、友好、真诚；有问题先道歉再给下一步，好评真诚感谢。
+5. 退款诉求：不直接给退款流程，先了解具体问题，尝试帮用户解决。
+6. 格式：纯文本，不加 Markdown，可合理换段，不加"Dear Sir/Madam"等过度正式称呼。
+
+【输出格式】
+只输出一个 JSON 对象，不要任何额外文字：
+{{ "language": "实际语言 ISO 码", "text": "回复正文", "text_zh": "中文预览", "char_count": 正文字符数 }}"#,
+        body = body,
+        instruction = instruction_block,
+        lang = lang,
+    )
+}
+
+#[tauri::command]
+pub async fn generate_mail_reply(
+    body: String,
+    instruction: String,
+    language: String,
+    model: Option<String>,
+    app: AppHandle,
+    state: State<'_, ReplyState>,
+) -> Result<MailReplyResult, String> {
+    {
+        let mut running = state.running.lock().unwrap();
+        if *running {
+            return Err("已有回复生成任务在进行中。".into());
+        }
+        *running = true;
+    }
+    let result = generate_mail_reply_inner(body, instruction, language, model, app.clone()).await;
+    *state.running.lock().unwrap() = false;
+    *state.child_pid.lock().unwrap() = None;
+    match &result {
+        Ok(_) => emit_log(&app, "邮件回复生成完成。", "result", true),
+        Err(e) if e == "CANCELLED" => emit_log(&app, "已取消生成。", "info", true),
+        Err(e) => emit_log(&app, &format!("失败：{}", e), "error", true),
+    }
+    result
+}
+
+async fn generate_mail_reply_inner(
+    body: String,
+    instruction: String,
+    language: String,
+    model: Option<String>,
+    app: AppHandle,
+) -> Result<MailReplyResult, String> {
+    let prompt = build_mail_reply_prompt(body.trim(), instruction.trim(), &language);
+
+    let claude_path = find_claude()
+        .ok_or("Claude CLI not found. Please install it: npm install -g @anthropic-ai/claude-code")?;
+
+    let mut args = vec![
+        "--print".to_string(),
+        "--verbose".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--permission-mode".to_string(),
+        "bypassPermissions".to_string(),
+    ];
+    if let Some(m) = model.as_ref().filter(|s| !s.is_empty()) {
+        args.push("--model".to_string());
+        args.push(m.clone());
+    }
+
+    emit_log(&app, "正在生成邮件回复草稿…", "info", false);
+
+    let mut cmd = Command::new(&claude_path);
+    cmd.args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(token) = load_claude_token() {
+        cmd.env("CLAUDE_CODE_SESSION_ACCESS_TOKEN", &token);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn claude: {}", e))?;
+    *app.state::<ReplyState>().child_pid.lock().unwrap() = child.id();
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(prompt.as_bytes()).await;
+        drop(stdin);
+    }
+
+    let stdout = child.stdout.take().ok_or("No stdout")?;
+    let stderr = child.stderr.take().ok_or("No stderr")?;
+
+    let result_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let assistant_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let usage_cell: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let result_for_task = result_text.clone();
+    let assistant_for_task = assistant_text.clone();
+    let usage_for_task = usage_cell.clone();
+
+    let app_out = app.clone();
+    let stdout_task = tokio::spawn(async move {
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match event_type {
+                    "assistant" => {
+                        if let Some(content) = val
+                            .get("message")
+                            .and_then(|m| m.get("content"))
+                            .and_then(|c| c.as_array())
+                        {
+                            for block in content {
+                                if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                                    if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                        let mut lock = assistant_for_task.lock().unwrap();
+                                        emit_log(&app_out, t, "text", false);
+                                        lock.push_str(t);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "result" => {
+                        if let Some(r) = val.get("result").and_then(|v| v.as_str()) {
+                            *result_for_task.lock().unwrap() = r.to_string();
+                        }
+                        if let Some(usage) = val.get("usage").filter(|u| u.is_object()) {
+                            let mut u = usage.clone();
+                            if let (Some(obj), Some(cost)) =
+                                (u.as_object_mut(), val.get("total_cost_usd"))
+                            {
+                                obj.insert("total_cost_usd".to_string(), cost.clone());
+                            }
+                            *usage_for_task.lock().unwrap() = Some(u);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    let app_err = app.clone();
+    let stderr_task = tokio::spawn(async move {
+        let reader = BufReader::new(stderr);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if !line.trim().is_empty() {
+                emit_log(&app_err, &line, "error", false);
+            }
+        }
+    });
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("Claude process error: {}", e))?;
+    stdout_task.await.ok();
+    stderr_task.await.ok();
+    *app.state::<ReplyState>().child_pid.lock().unwrap() = None;
+
+    if !*app.state::<ReplyState>().running.lock().unwrap() {
+        return Err("CANCELLED".into());
+    }
+    if !status.success() {
+        return Err(format!("Claude exited with code {}", status.code().unwrap_or(-1)));
+    }
+
+    let raw = {
+        let r = result_text.lock().unwrap().clone();
+        if r.trim().is_empty() {
+            assistant_text.lock().unwrap().clone()
+        } else {
+            r
+        }
+    };
+    let json_str = extract_json_object(&raw)
+        .ok_or_else(|| format!("模型输出里找不到 JSON 对象：{}", raw.chars().take(300).collect::<String>()))?;
+    let obj: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| format!("回复不是合法 JSON：{}", e))?;
+
+    let language_out = obj.get("language").and_then(|v| v.as_str()).unwrap_or(&language).to_string();
+    let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let text_zh = obj.get("text_zh").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let char_count = obj.get("char_count").and_then(|v| v.as_i64()).unwrap_or(text.chars().count() as i64);
+    let usage = usage_cell.lock().unwrap().take();
+
+    Ok(MailReplyResult { language: language_out, text, text_zh, char_count, usage })
 }
