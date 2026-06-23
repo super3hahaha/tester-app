@@ -79,6 +79,7 @@ pub fn run() {
             templates::update_template,
             templates::delete_template,
             templates::import_templates_xlsx,
+            templates::export_templates_xlsx,
             templates::set_template_translation,
             translate::translate_templates,
             translate::stop_translate,

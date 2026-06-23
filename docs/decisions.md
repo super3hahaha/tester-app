@@ -104,7 +104,7 @@
 - **拒绝的方案**：(a) 忍 7 天重授权 — 每账号每周人工点一次，易忘、过期即停同步；(b) 发 Production — 受限 scope 验证 + CASA 太重；(c) 两套 OAuth client（inshot 走 Internal、外部走 External）— 双倍配置和代码复杂度，不值。
 - **已定范围（2026-06-17）**：第一阶段**只读同步**（脚本写表 / app 读表 / 回复外跳浏览器手动发，点 Gmail 深链 `#all/<threadId>`）；表**每账号各一张**；**发送回写留第二阶段**（app 写回复+「已确认」列 → 脚本扫已勾选行用 `GmailApp.reply` 代发，**不需要 `gmail.send` scope、不需要 Production**，逐封人工确认=勾选列）。
 - **代价**：失实时性（定时同步，可降到每 15 分）；每账号一次性装脚本+授权；正文受单元格 5 万字符限制（HTML 转纯文本、截断）；消费级账号脚本发信配额 ~100/天（只读阶段不涉及）。
-- **影响旧代码**：`gmail.rs`（OAuth 账号管理 + `list_messages`/`get_message`）+ `GmailPage.vue` 的 OAuth 直连**退役**；第二步起 app 改读表，待决定删除还是注释保留。详见 [gmail-handoff.md](gmail-handoff.md)。
+- **影响旧代码**：`gmail.rs`（OAuth 账号管理 + `list_messages`/`get_message`）已删除；app 改为读 Sheet，`GmailPage.vue` 完整实现（读表 + 卡片 UI + 详情弹窗 + 已读隐藏 + AI 回复草稿 + 模板回复 + chrome profile 跳转）。
 
 ## 模板多语言预翻译（translations 字段 + template-translate skill）
 
@@ -117,4 +117,3 @@
 - **源语言不进 translations**：源 `en`/`zh-CN`，translations 只存其它语言；`is_source_lang` 判定 `zh-rCN↔zh-CN` 同源，避免把中文源再翻成中文。
 - **stale 机制**：改了源文 `text` 没重译 → `src_hash != hash(text)` → UI 标「源已改」。`update_template` 不主动动 `src_hash`，靠它自然变 stale；`list_templates` 返回 `TemplateView`（flatten + `stale`）。
 - **xlsx 导入清空译文**：覆盖导入=全新源，`translations` 清空，提示重新补全。
-- 详见 [handoff-template-i18n.md](handoff-template-i18n.md)。

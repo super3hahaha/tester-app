@@ -3115,6 +3115,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust_xlsxwriter"
+version = "0.80.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "442eafa04d985ae671e027481e07a5b70fdb1b2cb5e46d9e074b67ca98e01a0a"
+dependencies = [
+ "zip 2.4.2",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4104,6 +4113,7 @@ dependencies = [
  "open",
  "rand",
  "reqwest 0.12.28",
+ "rust_xlsxwriter",
  "serde",
  "serde_json",
  "sha2",

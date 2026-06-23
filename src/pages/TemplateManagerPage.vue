@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { loadFavIds, saveFavIds } from "../utils/templateFavorites";
 
@@ -376,6 +376,43 @@ async function retranslateOne(t: Template) {
   }
 }
 
+const exporting = ref(false);
+
+async function exportXlsx() {
+  if (!selectedProduct.value || exporting.value) return;
+  error.value = "";
+  // 收集模板中实际有的语言，按 ALL_CODES 顺序排列
+  const langSet = new Set<string>();
+  for (const t of templates.value) {
+    for (const k of Object.keys(t.translations || {})) langSet.add(k);
+  }
+  const otherLangs = ALL_CODES.filter((c) => langSet.has(c));
+  // 兜底：把 langSet 里不在 ALL_CODES 的也加上
+  for (const c of langSet) {
+    if (!otherLangs.includes(c)) otherLangs.push(c);
+  }
+
+  try {
+    const savePath = await save({
+      defaultPath: `${selectedProduct.value}-templates.xlsx`,
+      filters: [{ name: "Excel", extensions: ["xlsx"] }],
+    });
+    if (!savePath) return;
+    exporting.value = true;
+    const count = await invoke<number>("export_templates_xlsx", {
+      product: selectedProduct.value,
+      path: savePath,
+      otherLangs,
+      namespace: NS.value,
+    });
+    flash(`已导出 ${count} 条模板 → ${savePath.split(/[\\/]/).pop()}`);
+  } catch (e: any) {
+    error.value = String(e);
+  } finally {
+    exporting.value = false;
+  }
+}
+
 async function pickXlsx() {
   error.value = "";
   try {
@@ -610,6 +647,11 @@ watch(
 
       <button class="translate-btn" :disabled="translating" @click="openTranslateModal">
         🌐 补全多语言
+      </button>
+
+      <!-- xlsx 导出 -->
+      <button class="export-btn" :disabled="exporting || importing || translating" @click="exportXlsx">
+        {{ exporting ? "导出中…" : "📤 导出 xlsx" }}
       </button>
 
       <!-- xlsx 导入 -->
@@ -1001,6 +1043,7 @@ watch(
   flex: 1;
 }
 .translate-btn,
+.export-btn,
 .import-btn,
 .import-confirm-btn,
 .import-cancel-btn {
@@ -1019,6 +1062,17 @@ watch(
   background: #eef0fc;
 }
 .translate-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.export-btn {
+  border-color: #38a169;
+  color: #276749;
+}
+.export-btn:hover {
+  background: #f0fff4;
+}
+.export-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

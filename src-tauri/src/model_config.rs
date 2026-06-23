@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// 默认 CLI 引擎。直出类功能（单条回复 / 评论分析 / 邮件回复 / 模板翻译）按此值
+/// 路由到 Claude CLI 或 Codex CLI；skill 依赖类（测试用例生成、批量模板匹配回复）
+/// 永远走 Claude，与此无关。
+fn default_cli_engine() -> String {
+    "claude".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub reply: String,
@@ -8,6 +15,12 @@ pub struct ModelConfig {
     pub translate: String,
     #[serde(default)]
     pub github_token: String,
+    /// 直出类功能用哪个 CLI 引擎："claude" | "codex"。
+    #[serde(default = "default_cli_engine")]
+    pub cli_engine: String,
+    /// engine=codex 时给 codex exec 传的模型（如 gpt-5 / o3）；空串=用 Codex 自身默认。
+    #[serde(default)]
+    pub codex_model: String,
 }
 
 impl Default for ModelConfig {
@@ -17,6 +30,8 @@ impl Default for ModelConfig {
             analysis: "claude-sonnet-4-6".to_string(),
             translate: "claude-haiku-4-5".to_string(),
             github_token: String::new(),
+            cli_engine: default_cli_engine(),
+            codex_model: String::new(),
         }
     }
 }

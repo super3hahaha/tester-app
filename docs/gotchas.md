@@ -65,6 +65,12 @@ Tauri 的 webview（WKWebView / WebView2）对同步对话框 `window.confirm()`
 
 `translate_templates` 按 `CHUNK=1`（一条模板 × 多语言一次调用）轻量直出分批（不走 skill，见 decisions.md）。**每批 `apply_translations` 立刻落盘**——用户中途点停止（`stop_translate` 杀进程）/ 某批失败时，已完成的批次才不丢。取消返回「已完成部分已保存」，不是整批作废。
 
+## Apps Script 同步 Gmail：emoji 标签必须用 `getUserLabelByName`，不能用 search query
+
+`GmailApp.search('label:⭐mp3cutter-50字+-')` 对含 emoji / 特殊字符的标签**匹配不到**（Google 内部 label id 不是显示名）。
+必须用 `GmailApp.getUserLabelByName('⭐mp3cutter-50字+-')` 拿到 Label 对象再 `.getThreads()`。
+`gmail-sync.gs` 已按此实现（`LABEL` 常量填显示名，`getUserLabelByName` 取对象），新账号部署时 `LABEL` 改成该账号的标签显示名即可。
+
 ## LLM 控不住字数：350 字符必须后端硬校验 + 压缩兜底
 
 模板翻译每条要 ≤ 350 字符（gp 回复硬限制），但**光靠 prompt 约束 LLM 字数不可靠**——haiku 实测把俄语模板翻成 371（俄/德/法/西比英文长 20-30%，直译就超）。`translate.rs` 三层兜底（单条重译 / 批量补全都走 `translate_one_batch`，故都生效）：

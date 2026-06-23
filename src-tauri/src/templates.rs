@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use calamine::{open_workbook_auto, Data, Reader};
+use rust_xlsxwriter::{Format, Workbook};
 use serde::{Deserialize, Serialize};
 
 fn default_lang() -> String {
@@ -594,4 +595,56 @@ pub fn import_templates_xlsx(product: String, path: String, namespace: Option<St
     f.products.insert(product, ProductTemplates { templates: imported });
     write_templates_and_index_ns(ns, &mut f)?;
     Ok(ImportResult { count, sheet: sheet_name, warning })
+}
+
+/// 导出某产品所有模板为 xlsx：A 列类别、B 列英文原文、C 列起按 other_langs 顺序填译文（无则空白）。
+/// path 是目标文件完整路径（由前端通过 save dialog 获取）。
+#[tauri::command]
+pub fn export_templates_xlsx(
+    product: String,
+    path: String,
+    other_langs: Vec<String>,
+    namespace: Option<String>,
+) -> Result<usize, String> {
+    let ns = namespace.as_deref().unwrap_or("gp");
+    let f = read_templates_ns(ns)?;
+    let templates = f
+        .products
+        .get(&product)
+        .map(|p| p.templates.as_slice())
+        .unwrap_or_default();
+
+    let mut wb = Workbook::new();
+    let sheet = wb.add_worksheet();
+    sheet.set_name(&product).ok();
+
+    // 表头
+    let bold = Format::new().set_bold();
+    sheet.write_with_format(0, 0, "类别", &bold).map_err(|e| e.to_string())?;
+    sheet.write_with_format(0, 1, "英文模板", &bold).map_err(|e| e.to_string())?;
+    for (i, lang) in other_langs.iter().enumerate() {
+        sheet.write_with_format(0, (2 + i) as u16, lang.as_str(), &bold).map_err(|e| e.to_string())?;
+    }
+
+    let mut last_category = String::new();
+    for (row_idx, t) in templates.iter().enumerate() {
+        let row = (row_idx + 1) as u32;
+        // A 列：类别变了才写，否则留空（与导入口径保持一致）
+        if t.category != last_category {
+            sheet.write(row, 0, t.category.as_str()).map_err(|e| e.to_string())?;
+            last_category = t.category.clone();
+        }
+        // B 列：英文原文
+        sheet.write(row, 1, t.text.as_str()).map_err(|e| e.to_string())?;
+        // C 列起：各语言译文
+        for (i, lang) in other_langs.iter().enumerate() {
+            let text = t.translations.get(lang).map(|s| s.as_str()).unwrap_or("");
+            if !text.is_empty() {
+                sheet.write(row, (2 + i) as u16, text).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    wb.save(&path).map_err(|e| format!("保存 xlsx 失败：{}", e))?;
+    Ok(templates.len())
 }
