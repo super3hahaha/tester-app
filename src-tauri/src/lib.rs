@@ -12,6 +12,7 @@ mod sheets;
 mod skill_sync;
 mod templates;
 mod translate;
+mod updater;
 
 use analysis::AnalysisState;
 use auth::AuthState;
@@ -95,6 +96,9 @@ pub fn run() {
             model_config::save_model_config,
             chrome::list_chrome_profiles,
             chrome::open_url_in_chrome_profile,
+            updater::check_update,
+            updater::download_update,
+            updater::apply_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

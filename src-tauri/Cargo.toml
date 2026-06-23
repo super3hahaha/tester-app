@@ -1,6 +1,6 @@
 [package]
 name = "tester-app"
-version = "0.1.0"
+version = "1.0.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -25,7 +25,7 @@ calamine = "0.26"
 rust_xlsxwriter = "0.80"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 tokio = { version = "1", features = ["net", "io-util", "process"] }
 sha2 = "0.10"
 base64 = "0.22"
@@ -35,4 +35,5 @@ open = "5"
 url = "2"
 urlencoding = "2"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+futures-util = "0.3"
 

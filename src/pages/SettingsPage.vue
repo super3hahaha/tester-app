@@ -1,12 +1,84 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 const cacheSize = ref("");
 const loading = ref(false);
 const clearing = ref(false);
 const message = ref("");
+
+interface UpdateInfo {
+  version: string;
+  asset_name: string;
+  asset_url: string;
+  asset_size: number;
+  body: string;
+}
+
+type UpdateState = "idle" | "checking" | "latest" | "available" | "downloading" | "done" | "error";
+const updateState = ref<UpdateState>("idle");
+const updateInfo = ref<UpdateInfo | null>(null);
+const updateError = ref("");
+const downloadProgress = ref({ downloaded: 0, total: 0 });
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  const val = bytes / Math.pow(1024, i);
+  return `${val.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+const downloadPercent = computed(() => {
+  const { downloaded, total } = downloadProgress.value;
+  if (!total) return 0;
+  return Math.round((downloaded / total) * 100);
+});
+
+async function checkUpdate() {
+  updateState.value = "checking";
+  updateError.value = "";
+  updateInfo.value = null;
+  try {
+    const info = await invoke<UpdateInfo | null>("check_update");
+    if (info) {
+      updateInfo.value = info;
+      updateState.value = "available";
+    } else {
+      updateState.value = "latest";
+      setTimeout(() => { updateState.value = "idle"; }, 3000);
+    }
+  } catch (e: any) {
+    updateError.value = String(e);
+    updateState.value = "error";
+  }
+}
+
+async function startDownload() {
+  if (!updateInfo.value) return;
+  updateState.value = "downloading";
+  downloadProgress.value = { downloaded: 0, total: updateInfo.value.asset_size };
+
+  const unlisten = await listen<{ downloaded: number; total: number }>("update-progress", (e) => {
+    downloadProgress.value = e.payload;
+  });
+
+  try {
+    const savePath = await invoke<string>("download_update", {
+      url: updateInfo.value.asset_url,
+      assetName: updateInfo.value.asset_name,
+    });
+    unlisten();
+    updateState.value = "done";
+    await invoke("apply_update", { savePath });
+  } catch (e: any) {
+    unlisten();
+    updateError.value = String(e);
+    updateState.value = "error";
+  }
+}
 
 const MODEL_OPTIONS = [
   { label: "Sonnet 4.6（推荐）", value: "claude-sonnet-4-6" },
@@ -184,13 +256,6 @@ async function copyText(text: string) {
   }
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  const val = bytes / Math.pow(1024, i);
-  return `${val.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
-}
 </script>
 
 <template>
@@ -394,6 +459,59 @@ function formatBytes(bytes: number): string {
       <div v-if="skillMessage" class="message" :class="{ error: skillMessage.includes('失败') }">
         {{ skillMessage }}
       </div>
+    </div>
+
+    <div class="section version-section">
+      <div class="section-title">版本</div>
+      <div class="version-row">
+        <div class="version-left">
+          <span class="version-label">当前版本</span>
+          <span class="version-value">v1.0.0</span>
+        </div>
+        <div class="version-right">
+          <!-- idle / latest -->
+          <button
+            v-if="updateState === 'idle' || updateState === 'latest'"
+            class="check-update-btn"
+            @click="checkUpdate"
+          >
+            检测更新
+          </button>
+          <span v-if="updateState === 'latest'" class="update-latest">已是最新版本</span>
+
+          <!-- checking -->
+          <span v-if="updateState === 'checking'" class="update-checking">检查中...</span>
+
+          <!-- available -->
+          <template v-if="updateState === 'available' && updateInfo">
+            <span class="update-new-badge">v{{ updateInfo.version }} 可更新</span>
+            <button class="download-btn" @click="startDownload">下载并安装</button>
+          </template>
+
+          <!-- downloading -->
+          <template v-if="updateState === 'downloading'">
+            <div class="download-progress">
+              <div class="progress-bar">
+                <div class="progress-fill" :style="{ width: downloadPercent + '%' }"></div>
+              </div>
+              <span class="progress-text">
+                {{ downloadPercent }}%
+                <template v-if="downloadProgress.total">
+                  （{{ formatBytes(downloadProgress.downloaded) }} / {{ formatBytes(downloadProgress.total) }}）
+                </template>
+              </span>
+            </div>
+          </template>
+
+          <!-- done -->
+          <span v-if="updateState === 'done'" class="update-done">正在重启安装...</span>
+
+          <!-- error -->
+          <span v-if="updateState === 'error'" class="update-error" :title="updateError">更新失败</span>
+          <button v-if="updateState === 'error'" class="check-update-btn" @click="checkUpdate">重试</button>
+        </div>
+      </div>
+      <div v-if="updateState === 'error' && updateError" class="update-error-msg">{{ updateError }}</div>
     </div>
 
     <div class="section">
@@ -869,5 +987,121 @@ h3 {
 .sync-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Version section */
+.version-section {
+  max-width: 560px;
+}
+.version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.version-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.version-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.version-label {
+  font-size: 13px;
+  color: #4a5568;
+}
+.version-value {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 2px 10px;
+  background: #ebf4ff;
+  color: #4c51bf;
+  border-radius: 6px;
+}
+.check-update-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #555;
+  cursor: pointer;
+}
+.check-update-btn:hover {
+  background: #f5f5f5;
+}
+.update-latest {
+  font-size: 12px;
+  color: #48bb78;
+}
+.update-checking {
+  font-size: 12px;
+  color: #888;
+}
+.update-new-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  background: #feebc8;
+  color: #c05621;
+  border-radius: 4px;
+}
+.download-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #667eea;
+  border-radius: 6px;
+  background: #667eea;
+  color: white;
+  cursor: pointer;
+}
+.download-btn:hover {
+  background: #5a67d8;
+}
+.download-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 160px;
+}
+.progress-bar {
+  flex: 1;
+  height: 6px;
+  background: #e2e8f0;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: #667eea;
+  border-radius: 3px;
+  transition: width 0.2s;
+}
+.progress-text {
+  font-size: 11px;
+  color: #555;
+  white-space: nowrap;
+}
+.update-done {
+  font-size: 12px;
+  color: #667eea;
+}
+.update-error {
+  font-size: 12px;
+  color: #e53e3e;
+}
+.update-error-msg {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #c53030;
+  word-break: break-all;
 }
 </style>
