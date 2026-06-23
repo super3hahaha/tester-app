@@ -51,3 +51,9 @@ Google Play 评论回复工具，基于 Claude CLI 本地驱动。
 2. 已登录：运行 `claude`，按提示完成登录
 
 安装状态可在 app 的 Settings 页面查看。
+
+---
+
+## 使用说明
+
+安装完成后，请查阅 [docs/USER_GUIDE.md](docs/USER_GUIDE.md) 了解各功能的详细使用方法。

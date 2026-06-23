@@ -81,6 +81,7 @@ tester-app/
     ├── PROJECT_STRUCTURE.md     # 本文件
     ├── decisions.md             # 架构决策记录（非显然选择的原因）
     ├── gotchas.md               # 踩过的坑（平台怪癖、外部约束、易复发 bug）
+    ├── USER_GUIDE.md            # 使用说明（各功能详细指南）
     └── gmail-sync.gs            # Apps Script 脚本：定时把 Gmail 标签下未读同步到 Google Sheet（部署到各 Gmail 账号）
 ```
 
