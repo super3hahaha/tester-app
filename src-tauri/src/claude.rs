@@ -404,9 +404,8 @@ async fn run_claude_and_stream(
                         }
                     }
                     "result" => {
-                        if let Some(result) = val.get("result").and_then(|v| v.as_str()) {
-                            emit_log(&app_out, result, "result", false);
-                        }
+                        // result 事件的 `result` 字段是最终 assistant 文本的副本，
+                        // 该文本已在 assistant 事件流式输出过，这里不再重复发送。
                         let cost = val
                             .get("cost_usd")
                             .and_then(|v| v.as_f64())

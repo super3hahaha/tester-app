@@ -2,6 +2,9 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+// 模块级单例，防止组件重建时产生多个监听
+let _claudeLogUnlisten: UnlistenFn | null = null;
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 interface SheetSelection {
@@ -173,7 +176,8 @@ const showIdle = computed(
 let unlisten: UnlistenFn | null = null;
 
 onMounted(async () => {
-  unlisten = await listen<{ text: string; kind: string; tool?: string; duration_ms?: number; done: boolean }>(
+  _claudeLogUnlisten?.();
+  _claudeLogUnlisten = await listen<{ text: string; kind: string; tool?: string; duration_ms?: number; done: boolean }>(
     "claude-log",
     (event) => {
       const { text, kind, tool, duration_ms, done: isDone } = event.payload;
@@ -196,13 +200,15 @@ onMounted(async () => {
       });
     }
   );
+  unlisten = _claudeLogUnlisten;
 
   checkSession();
 });
 
 onUnmounted(() => {
-  unlisten?.();
   stopIdleWatch();
+  // 不在 unmount 时取消监听——组件销毁后后台任务仍可能在跑，
+  // 重建时 onMounted 会先清掉旧监听再注册新的
 });
 
 async function checkSession() {
