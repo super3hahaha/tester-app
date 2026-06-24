@@ -176,6 +176,7 @@ tester-app/
 | `@tauri-apps/api` | 核心 | Tauri 前后端通信桥接（invoke 命令、事件监听） |
 | `@tauri-apps/plugin-opener` | 插件 | 在系统浏览器中打开 URL |
 | `@tauri-apps/plugin-dialog` | 插件 | 系统文件选择器（模板管理页选 xlsx 导入） |
+| `marked` | 核心 | Markdown 文本解析与渲染（用于更新弹窗的 release notes 显示） |
 | `typescript` | 开发 | 静态类型检查 |
 | `vite` | 开发 | 前端构建与开发服务器 |
 | `@vitejs/plugin-vue` | 开发 | Vite 的 Vue SFC 编译插件 |
