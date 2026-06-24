@@ -393,88 +393,57 @@ async function handleStop() {
 
 <template>
   <div class="generate-page">
-    <h3>Generate Test Cases</h3>
-    <p class="subtitle">
-      Review selections and generate test cases using Claude
-    </p>
-
-    <!-- Selections summary -->
-    <div class="selections">
+    <!-- Top bar: selections + action in one row -->
+    <div class="top-bar">
       <div class="sel-card" :class="{ empty: !sheetSelection }">
-        <div class="sel-header">
-          <span class="sel-icon">📊</span>
-          <span class="sel-title">Google Sheet</span>
-        </div>
-        <div v-if="sheetSelection" class="sel-detail">
-          <div class="sel-name">{{ sheetSelection.spreadsheetName }}</div>
-          <div class="sel-meta">
-            Tab: {{ sheetSelection.tabName }} ·
-            {{ sheetSelection.data.rows.length }} rows ·
-            {{ sheetSelection.data.headers.length }} columns
-          </div>
-        </div>
-        <div v-else class="sel-empty">
-          No sheet selected (optional) — pick one in the Google Sheets tab to update existing cases
-        </div>
+        <span class="sel-title">Google Sheet</span>
+        <span v-if="sheetSelection" class="sel-meta">
+          {{ sheetSelection.spreadsheetName }} · {{ sheetSelection.tabName }} · {{ sheetSelection.data.rows.length }} rows · {{ sheetSelection.data.headers.length }} columns
+        </span>
+        <span v-else class="sel-empty">No sheet selected (optional)</span>
       </div>
 
       <div class="sel-card" :class="{ empty: slidesSelection.length === 0 }">
-        <div class="sel-header">
-          <span class="sel-icon">📑</span>
-          <span class="sel-title">Google Slides</span>
-        </div>
-        <div v-if="slidesSelection.length > 0" class="sel-detail">
-          <div
-            v-for="s in slidesSelection"
-            :key="s.id"
-            class="sel-slide-item"
-          >
-            {{ s.name }}
-            <span class="sel-pages">pages {{ s.pages.join(", ") }}</span>
-          </div>
-        </div>
-        <div v-else class="sel-empty">
-          No slides selected — go to Google Slides tab and select pages
-        </div>
+        <span class="sel-title">Google Slides</span>
+        <span v-if="slidesSelection.length > 0" class="sel-meta">
+          <span v-for="s in slidesSelection" :key="s.id">{{ s.name }} · pages {{ s.pages.join(", ") }}</span>
+        </span>
+        <span v-else class="sel-empty">No slides selected</span>
       </div>
 
-      <!-- Extra info input (only before a session starts; further input goes in the log input) -->
-      <div v-if="!generating && !hasSession" class="extra-info-area">
-        <textarea
-          v-model="extraInfo"
-          class="extra-info-input"
-          placeholder="Additional info (optional) — extra context, constraints, or notes to send with the requirements"
-          rows="3"
-        ></textarea>
+      <div class="action-group">
+        <div class="model-picker">
+          <label>Model</label>
+          <select v-model="selectedModel" :disabled="generating">
+            <option v-for="m in MODELS" :key="m.id" :value="m.id">{{ m.label }}</option>
+          </select>
+        </div>
+        <button
+          class="generate-btn"
+          :disabled="!canGenerate || generating"
+          @click="handleGenerate"
+        >
+          {{ generating ? progress : "Generate Test Cases" }}
+        </button>
+        <button
+          v-if="generating"
+          class="stop-btn"
+          :disabled="stopping"
+          @click="handleStop"
+        >
+          {{ stopping ? "Stopping..." : "■ Stop" }}
+        </button>
       </div>
     </div>
 
-    <!-- Generate button -->
-    <div class="action-area">
-      <div class="model-picker">
-        <label>Model</label>
-        <select v-model="selectedModel" :disabled="generating">
-          <option v-for="m in MODELS" :key="m.id" :value="m.id">{{ m.label }}</option>
-        </select>
-      </div>
-      <button
-        class="generate-btn"
-        :disabled="!canGenerate || generating"
-        @click="handleGenerate"
-      >
-        {{ generating ? progress : "Generate Test Cases" }}
-      </button>
-      <button
-        v-if="generating"
-        class="stop-btn"
-        :disabled="stopping"
-        @click="handleStop"
-      >
-        {{ stopping ? "Stopping..." : "■ Stop" }}
-      </button>
-      <span v-if="!canGenerate && !generating" class="action-hint">
-        Select at least one Slides to continue (Sheet is optional)
-      </span>
+    <!-- Extra info (only before session starts) -->
+    <div v-if="!generating && !hasSession" class="extra-info-area">
+      <textarea
+        v-model="extraInfo"
+        class="extra-info-input"
+        placeholder="Additional info (optional) — extra context, constraints, or notes"
+        rows="2"
+      ></textarea>
     </div>
 
     <!-- Error -->
@@ -553,89 +522,64 @@ async function handleStop() {
 <style scoped>
 .generate-page {
   height: 100%;
-  overflow-y: auto;
-  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 h3 {
   font-size: 16px;
   margin-bottom: 4px;
 }
-.subtitle {
-  font-size: 13px;
-  color: #888;
-  margin-bottom: 20px;
-}
-.selections {
+.top-bar {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-bottom: 24px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 .sel-card {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   border: 1px solid #e0e0e0;
-  border-radius: 10px;
-  padding: 16px;
+  border-radius: 8px;
+  padding: 8px 12px;
   background: white;
+  min-width: 0;
 }
 .sel-card.empty {
   border-style: dashed;
   border-color: #ccc;
   background: #fafafa;
 }
-.sel-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.sel-icon {
-  font-size: 18px;
-}
 .sel-title {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-}
-.sel-detail {
-  padding-left: 26px;
-}
-.sel-name {
-  font-size: 14px;
-  font-weight: 500;
-  color: #333;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .sel-meta {
   font-size: 12px;
   color: #888;
-  margin-top: 2px;
-}
-.sel-slide-item {
-  font-size: 13px;
-  color: #333;
-  padding: 2px 0;
-}
-.sel-slide-item::before {
-  content: "✓ ";
-  color: #667eea;
-}
-.sel-pages {
-  font-size: 11px;
-  color: #888;
-  margin-left: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .sel-empty {
-  font-size: 13px;
+  font-size: 12px;
   color: #bbb;
-  padding-left: 26px;
 }
-.action-area {
+.action-group {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
+  gap: 8px;
+  flex-shrink: 0;
 }
 .generate-btn {
-  padding: 12px 28px;
-  font-size: 14px;
+  padding: 8px 20px;
+  font-size: 13px;
   font-weight: 600;
   color: white;
   background: linear-gradient(135deg, #667eea, #764ba2);
@@ -724,9 +668,13 @@ h3 {
   border-radius: 6px;
 }
 .log-panel {
+  flex: 1;
+  min-height: 0;
   border: 1px solid #e0e0e0;
   border-radius: 8px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .log-header {
   display: flex;
@@ -754,7 +702,8 @@ h3 {
   line-height: 1.7;
   background: #ffffff;
   color: #2d3748;
-  max-height: 400px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   margin: 0;
 }
