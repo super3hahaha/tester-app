@@ -34,7 +34,7 @@ tester-app/
 │       ├── BatchReplyConfigPage.vue # 批量回复配置（嵌在 ConfigPage 的 Batch Tab）：每个 app 一张卡片，独立勾选启用 + 日期预设 + 星级；显式「保存」按钮写 localStorage
 │       ├── BatchReplyPage.vue   # 批量回复执行：读保存的多 app 配置 → 并行拉评论 → 按 app 分组折叠 → AI 生成回复 → 逐条/一键提交
 │       ├── TemplateManagerPage.vue # 模板管理：按产品 tab 增删改模板 + xlsx 导入/导出 + 多语言预翻译 + 每条 ★收藏（挂 Review 工作区）
-│       ├── KnowledgeConfigPage.vue # 知识配置：按产品 tab 编辑「应用知识块」(.md)，左编辑右实时预览 + 插入骨架 + 保存；供评论分析注入 {app_knowledge}（挂 Review 工作区，与模板管理同级）
+│       ├── KnowledgeConfigPage.vue # 知识配置：按产品 tab 编辑「应用知识块」(.md)，单栏全宽编辑器 + 插入骨架 + 保存（过滤掉「通用」产品）；供评论分析注入 {app_knowledge}（挂 Review 工作区，与模板管理同级）
 │       ├── GmailPage.vue        # Gmail 邮件：读 Apps Script 同步的 Sheet，卡片列表 + 详情弹窗 + 已读隐藏 + 按 Chrome profile 打开邮件；可关联邮件回复模板产品（email namespace）
 │       ├── AppScriptPage.vue    # App Script 配置：管理待维护的 Apps Script 项目列表（每项含备注/Chrome profile/跳转链接），点「打开 ↗」用指定 profile 打开（默认 https://script.google.com/home?hl=zh-cn）
 │       └── SettingsPage.vue     # 设置页：缓存管理（查看/清理缓存）+ 模型配置（回复/分析/翻译各自选 Sonnet/Haiku）+ GitHub Token（供 skill 热更新访问私有 release）

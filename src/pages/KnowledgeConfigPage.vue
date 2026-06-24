@@ -50,7 +50,8 @@ async function loadProducts() {
   loading.value = true;
   error.value = "";
   try {
-    products.value = await invoke<KnowledgeInfo[]>("list_knowledge");
+    const all = await invoke<KnowledgeInfo[]>("list_knowledge");
+    products.value = all.filter((p) => p.product !== "通用");
     if (
       products.value.length &&
       !products.value.some((p) => p.product === selectedProduct.value)
@@ -148,7 +149,7 @@ watch(
       <span v-else class="muted">（package_map 里暂无关联应用）</span>
     </div>
 
-    <!-- 编辑 + 预览 -->
+    <!-- 编辑器 -->
     <div v-if="selectedProduct" class="editor-wrap">
       <div class="pane">
         <div class="pane-head">
@@ -161,13 +162,6 @@ watch(
           spellcheck="false"
           placeholder="点「插入骨架」从模板开始，或直接写这个应用的定位、常见问题与排查引导…"
         ></textarea>
-      </div>
-      <div class="pane">
-        <div class="pane-head"><span>预览</span></div>
-        <div class="preview">
-          <template v-if="editContent.trim()">{{ editContent }}</template>
-          <span v-else class="muted">（空）将注入分析提示词的内容会原样显示在这里。</span>
-        </div>
       </div>
     </div>
 
@@ -266,9 +260,7 @@ watch(
   color: #a0aec0;
 }
 .editor-wrap {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  display: block;
 }
 .pane {
   border: 1px solid #e2e8f0;
@@ -277,9 +269,9 @@ watch(
   display: flex;
   flex-direction: column;
   /* 固定高度：内容多时在内部滚动，不再把保存按钮往下顶 */
-  height: 60vh;
-  min-height: 360px;
-  max-height: 560px;
+  height: 72vh;
+  min-height: 480px;
+  max-height: 720px;
 }
 .pane-head {
   display: flex;
@@ -311,21 +303,6 @@ watch(
   line-height: 1.6;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #2d3748;
-}
-.preview {
-  flex: 1;
-  min-height: 0;
-  padding: 12px;
-  font-size: 13px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: #2d3748;
-  overflow: auto;
-  background: #fffef9;
-}
-.preview .muted {
-  color: #a0aec0;
 }
 .actions {
   display: flex;
