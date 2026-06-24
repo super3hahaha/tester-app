@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
+import { marked } from "marked";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -560,7 +561,7 @@ async function copyText(text: string) {
           <button class="modal-close" @click="showUpdateModal = false">✕</button>
         </div>
         <div class="modal-body">
-          <pre v-if="updateInfo.body" class="release-notes">{{ updateInfo.body }}</pre>
+          <div v-if="updateInfo.body" class="release-notes" v-html="marked(updateInfo.body)"></div>
           <p v-else class="release-empty">暂无更新说明</p>
         </div>
         <div class="modal-footer">
@@ -1208,10 +1209,35 @@ h3 {
   font-size: 13px;
   line-height: 1.7;
   color: #444;
-  white-space: pre-wrap;
-  word-break: break-word;
-  margin: 0;
-  font-family: inherit;
+}
+.release-notes :deep(h2) {
+  font-size: 15px;
+  font-weight: 700;
+  margin: 0 0 8px;
+  color: #1a202c;
+}
+.release-notes :deep(h3) {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 12px 0 4px;
+  color: #2d3748;
+}
+.release-notes :deep(ul) {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+.release-notes :deep(li) {
+  margin: 2px 0;
+}
+.release-notes :deep(p) {
+  margin: 6px 0;
+}
+.release-notes :deep(code) {
+  font-family: ui-monospace, monospace;
+  background: #f3f4f6;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 12px;
 }
 .release-empty {
   font-size: 13px;
