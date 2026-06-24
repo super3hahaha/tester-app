@@ -265,9 +265,12 @@ async function copyText(text: string) {
 
 <template>
   <div class="settings-page">
-    <h3>Settings</h3>
+    <div class="page-header">
+      <h3>Settings</h3>
+    </div>
 
-    <div class="top-row">
+    <div class="settings-wrap">
+    <div class="two-col">
     <!-- Claude CLI -->
     <div class="section">
       <div class="section-title">Claude CLI</div>
@@ -376,8 +379,9 @@ async function copyText(text: string) {
         <span v-if="modelMessage" class="model-msg">{{ modelMessage }}</span>
       </div>
     </div>
-    </div><!-- end top-row -->
+    </div><!-- end two-col top -->
 
+    <div class="two-col">
     <!-- Skill 更新 -->
     <div class="section">
       <div class="section-title">Skill 更新</div>
@@ -467,7 +471,31 @@ async function copyText(text: string) {
       </div>
     </div>
 
-    <div class="section version-section">
+    <!-- 右侧：Cache + 版本 垂直堆叠 -->
+    <div class="right-stack">
+    <div class="section">
+      <div class="section-title">Cache Management</div>
+      <div class="section-desc">Cached slide thumbnails are stored locally to speed up loading.</div>
+
+      <div class="cache-row">
+        <div class="cache-info">
+          <span class="cache-label">Cache size</span>
+          <span class="cache-value">{{ loading ? "Calculating..." : cacheSize }}</span>
+        </div>
+        <div class="cache-actions">
+          <button class="refresh-btn" @click="refreshCacheSize" :disabled="loading">Refresh</button>
+          <button class="clear-btn" @click="clearCache" :disabled="clearing">
+            {{ clearing ? "Clearing..." : "Clear Cache" }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="message" class="message" :class="{ error: message.startsWith('Failed') }">
+        {{ message }}
+      </div>
+    </div>
+
+    <div class="section">
       <div class="section-title">版本</div>
       <div class="version-row">
         <div class="version-left">
@@ -519,28 +547,10 @@ async function copyText(text: string) {
       </div>
       <div v-if="updateState === 'error' && updateError" class="update-error-msg">{{ updateError }}</div>
     </div>
+    </div><!-- end right-stack -->
+    </div><!-- end two-col bottom -->
 
-    <div class="section">
-      <div class="section-title">Cache Management</div>
-      <div class="section-desc">Cached slide thumbnails are stored locally to speed up loading.</div>
-
-      <div class="cache-row">
-        <div class="cache-info">
-          <span class="cache-label">Cache size</span>
-          <span class="cache-value">{{ loading ? "Calculating..." : cacheSize }}</span>
-        </div>
-        <div class="cache-actions">
-          <button class="refresh-btn" @click="refreshCacheSize" :disabled="loading">Refresh</button>
-          <button class="clear-btn" @click="clearCache" :disabled="clearing">
-            {{ clearing ? "Clearing..." : "Clear Cache" }}
-          </button>
-        </div>
-      </div>
-
-      <div v-if="message" class="message" :class="{ error: message.startsWith('Failed') }">
-        {{ message }}
-      </div>
-    </div>
+    </div><!-- end settings-wrap -->
 
     <!-- 更新弹窗 -->
     <div v-if="showUpdateModal && updateInfo" class="modal-mask" @click.self="showUpdateModal = false">
@@ -566,29 +576,41 @@ async function copyText(text: string) {
 .settings-page {
   height: 100%;
   overflow-y: auto;
-  padding: 24px;
+  padding: 24px 28px;
+  background: #f5f6f8;
 }
-h3 {
-  font-size: 16px;
+.page-header {
   margin-bottom: 20px;
 }
-.top-row {
+h3 {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1a202c;
+  margin: 0;
+  letter-spacing: -0.1px;
+}
+.settings-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.two-col {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  margin-bottom: 0;
-  align-items: start;
+  gap: 14px;
+  align-items: stretch;
 }
-.top-row .section {
-  max-width: none;
+.right-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 .section {
   background: white;
-  border: 1px solid #e5e5e5;
-  border-radius: 10px;
-  padding: 20px;
-  max-width: 560px;
-  margin-bottom: 16px;
+  border: 1px solid #eaecef;
+  border-radius: 12px;
+  padding: 20px 22px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 .model-row {
   display: flex;
@@ -802,14 +824,17 @@ h3 {
   color: #48bb78;
 }
 .section-title {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a202c;
   margin-bottom: 4px;
+  letter-spacing: -0.1px;
 }
 .section-desc {
   font-size: 12px;
-  color: #888;
+  color: #9aa3b0;
   margin-bottom: 16px;
+  line-height: 1.5;
 }
 .cache-row {
   display: flex;
@@ -1017,10 +1042,6 @@ h3 {
   cursor: not-allowed;
 }
 
-/* Version section */
-.version-section {
-  max-width: 560px;
-}
 .version-row {
   display: flex;
   align-items: center;
