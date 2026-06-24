@@ -86,6 +86,8 @@ const extraInfo = ref("");
 const sending = ref(false);
 const logPanel = ref<HTMLElement | null>(null);
 const stopping = ref(false);
+const cancelRequested = ref(false);
+const claudeStarted = ref(false);
 
 interface ModelOption {
   id: string;
@@ -270,6 +272,8 @@ async function handleGenerate() {
   if (props.slidesSelection.length === 0) return;
 
   generating.value = true;
+  cancelRequested.value = false;
+  claudeStarted.value = false;
   error.value = "";
   done.value = false;
   hasSession.value = false;
@@ -294,17 +298,19 @@ async function handleGenerate() {
         range: props.sheetSelection.tabName,
       });
       pushLog(`  -> ${csvPath}`);
+      if (cancelRequested.value) throw new Error("__cancelled__");
     } else {
       pushLog("[1/3] No Sheet selected — generating from requirements only", "info");
     }
 
     const pptxPaths: string[] = [];
     for (let i = 0; i < props.slidesSelection.length; i++) {
+      if (cancelRequested.value) throw new Error("__cancelled__");
       const slide = props.slidesSelection[i];
       progress.value = `Exporting PPTX ${i + 1}/${props.slidesSelection.length}...`;
-      pushLog(`[2/3] Exporting "${slide.name}" as PPTX`, "info");
+      pushLog(`[2/3] Exporting "${slide.name}" as PDF`, "info");
 
-      const pptxPath = await invoke<string>("export_slides_pptx", {
+      const pptxPath = await invoke<string>("export_slides_pdf", {
         presentationId: slide.id,
         name: slide.name,
       });
@@ -312,6 +318,8 @@ async function handleGenerate() {
       pushLog(`  -> ${pptxPath}`);
     }
 
+    if (cancelRequested.value) throw new Error("__cancelled__");
+    claudeStarted.value = true;
     progress.value = "Generating test cases with Claude...";
     pushLog("[3/3] Launching Claude CLI with /test-case-generator skill", "info");
     if (csvPath) pushLog(`  CSV: ${csvPath}`);
@@ -340,9 +348,16 @@ async function handleGenerate() {
       extraInfo: extra || null,
     });
   } catch (e: any) {
-    error.value = String(e);
+    if (String(e).includes("__cancelled__")) {
+      pushLog("Stopped.", "info");
+    } else {
+      error.value = String(e);
+    }
     progress.value = "";
     generating.value = false;
+    stopping.value = false;
+    cancelRequested.value = false;
+    claudeStarted.value = false;
   }
 }
 
@@ -380,14 +395,17 @@ function handleInputKeydown(e: KeyboardEvent) {
 async function handleStop() {
   if (!generating.value || stopping.value) return;
   stopping.value = true;
-  try {
-    await invoke("stop_claude");
-    pushLog("Stop requested — terminating Claude process...", "info");
-  } catch (e: any) {
-    error.value = String(e);
-  } finally {
-    stopping.value = false;
+  cancelRequested.value = true;
+  if (claudeStarted.value) {
+    try {
+      await invoke("stop_claude");
+      pushLog("Stop requested — terminating Claude process...", "info");
+    } catch (e: any) {
+      error.value = String(e);
+      stopping.value = false;
+    }
   }
+  // if not yet at Claude stage, cancelRequested flag will abort the export loop
 }
 </script>
 
@@ -625,7 +643,7 @@ h3 {
   cursor: not-allowed;
 }
 .stop-btn {
-  padding: 10px 18px;
+  padding: 8px 18px;
   font-size: 13px;
   font-weight: 600;
   color: white;

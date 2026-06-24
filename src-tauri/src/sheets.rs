@@ -313,6 +313,48 @@ pub async fn export_slides_pptx(
     Ok(path.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+pub async fn export_slides_pdf(
+    presentation_id: String,
+    name: String,
+    state: State<'_, AuthState>,
+) -> Result<String, String> {
+    let token = get_token(&state).await?;
+
+    let url = format!(
+        "https://www.googleapis.com/drive/v3/files/{}/export?mimeType=application/pdf",
+        presentation_id
+    );
+
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("Drive export failed: {}", err_chain(&e)))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Drive export {}: {}", status, body));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Download failed: {}", err_chain(&e)))?;
+
+    let dir = data_dir().join("exports");
+    std::fs::create_dir_all(&dir).ok();
+    let safe_name = name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    let filename = format!("{}.pdf", safe_name);
+    let path = dir.join(&filename);
+    std::fs::write(&path, &bytes)
+        .map_err(|e| format!("Write PDF failed: {}", err_chain(&e)))?;
+
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[derive(Serialize)]
 pub struct SlidePageInfo {
     pub page_object_id: String,

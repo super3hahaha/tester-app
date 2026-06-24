@@ -99,7 +99,7 @@ tester-app/
 ├── prompt-config.json           # 提示词模板：gen/analysis/mail 三个完整 prompt 模板（含占位符），Prompt 配置页编辑（prompt_config.rs）
 ├── exports/                     # 导出文件
 │   ├── sheet_*.csv              # Google Sheets CSV 导出
-│   ├── *.pptx                   # Google Slides PPTX 导出
+│   ├── *.pdf                    # Google Slides PDF 导出
 │   ├── compare_{ai|human}_*.html # 对比页用：单 Tab 的 Sheet HTML 导出（waffle 格式）
 │   └── diff_report_*.html       # 对比页用：diff_testcases.py 生成的报告
 ├── manifests/                   # 生成-上传 manifest：每个上传到 Drive 的结果对应一份
@@ -155,7 +155,7 @@ tester-app/
 | 模块 | 文件 | 职责 |
 |---|---|---|
 | 认证 | `auth.rs` | Google OAuth 2.0 PKCE 流程：本地 TCP 回调服务器、令牌交换、自动刷新、持久化至文件 |
-| Google API | `sheets.rs` | Drive 文件列表、Sheets 读取与 CSV 导出、xlsx 上传（路径或字节、自动转 Google 表格、归入 `tester-app` 文件夹）、Slides 幻灯片获取与 PPTX 导出、缩略图异步缓存 |
+| Google API | `sheets.rs` | Drive 文件列表、Sheets 读取与 CSV 导出、xlsx 上传（路径或字节、自动转 Google 表格、归入 `tester-app` 文件夹）、Slides 幻灯片获取与 PDF 导出、缩略图异步缓存 |
 | Claude 集成 | `claude.rs` | 定位 Claude CLI 路径、子进程管理、stream-json 输出解析、会话 ID 续接、实时事件推送 |
 | 对比流程 | `compare.rs` | 单 Tab Sheet 导出 HTML（`docs.google.com/.../export?format=html&gid=`）、内嵌脚本写盘后直接执行 `python diff_testcases.py`、在 Chrome 打开报告（`compare-log` 事件流，独立于 `claude-log`） |
 | 单条 AI 回复 | `reply.rs` | `generate_single_reply` command：给**一条**评论 + 用户一句「回复方向」+ 语言，在 Rust 里把评论上下文 + 方向 + review-reply skill 的硬性标准(≤350 字符/回复语言/不编造/保留 emoji 专名/引号规范) 拼成 prompt → 跑 `claude --print --output-format stream-json --permission-mode bypassPermissions`(无 skill、无文件往返) → 从终结 `result` 事件取最终文本 → `extract_json_array` 容错抠出 JSON 数组(防 markdown 代码块/前后散文) → 解析成 **3 条风格各异**的候选 `{style,language,text,text_zh,char_count}` 返回。**与「🔍 分析」一致：按 product（退回 package_name 解析）读该产品知识块注入 `{app_knowledge}`**；硬性标准段落来自 `prompt_config::load().gen_rules`（可在设置页编辑）。复用 `ReplyState`(与批量共用 running 锁 + `stop_reply` 可中断) 和 `reply-log` 事件流 |
@@ -221,7 +221,7 @@ tester-app/
 生成测试用例
   └─ GeneratePage:
        ├─ 导出 Sheet CSV  → export_sheet_csv()  → ~/.tester-app/exports/sheet_*.csv
-       ├─ 导出 Slides PPTX → export_slides_pptx() → ~/.tester-app/exports/*.pptx
+       ├─ 导出 Slides PDF  → export_slides_pdf()  → ~/.tester-app/exports/*.pdf
        └─ 调用 Claude CLI  → run_claude_task(csv, pptxs, pages)
             └─ claude --print --verbose --output-format stream-json --file <csv> --file <pptx> '/test-case-generator ...'
                  └─ 流式 JSON → claude-log 事件 → 前端终端日志

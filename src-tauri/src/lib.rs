@@ -42,6 +42,7 @@ pub fn run() {
             sheets::read_sheet,
             sheets::export_sheet_csv,
             sheets::export_slides_pptx,
+            sheets::export_slides_pdf,
             sheets::get_presentation_slides,
             sheets::get_cache_size,
             sheets::clear_cache,
