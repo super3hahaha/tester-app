@@ -184,58 +184,24 @@ fn build_analysis_prompt(
         app_knowledge.to_string()
     };
 
-    format!(
-        r#"你是 {product}（{package_name}）的开发者，正在以官方身份处理一条 Google Play 用户评论。
-请先【分析】这条评论暴露的用户问题，再给出一条可直接发布的【推荐回复】。
-不要使用任何工具，直接输出结果。
-【应用背景与常见问题】
-{knowledge}
-【评论信息】
-- 星级：{star}★
-- 用户原文（优先据此理解语义）：{original}
-- 中文译文（仅供理解，不要据此判断回复语言）：{zh}
-- 评论语言：{rev_lang}
-- 应用版本：{version}
-- 设备 / 安卓版本：{device} / {os}
-【分析要求】（analysis / issues / info_gaps 一律用中文）
-1. 判断这条评论属于哪类：bug 报告 / 功能缺失 / 使用困惑 / 付费与订阅 / 好评 / 差评无具体信息 / 其它。
-2. 结合【应用背景与常见问题】，推断用户最可能遇到的真实问题（可不止一个，按可能性排序）。
-3. 指出信息缺口：要定位清楚还缺什么（但回复里不要向用户索取机型/系统/版本——后台可见）。
-4. 给出建议处理方向（针对性排查引导 / 请用户补充复现信息 / 简单致谢等）。
-【推荐回复 · 硬性标准】
-1. 长度：Google Play 公开回复，正文 ≤ 350 字符（含空格/标点/emoji），超了必须改短。
-2. 回复语言：{lang_rule}
-3. 不编造、不乱承诺：邮箱、版本号、价格、未发布功能、修复时间等不确定的事实绝不杜撰。
-4. 不向用户索取机型 / Android 版本 / 应用版本（后台可见）；确需信息时只问「具体问题表现 / 复现步骤 / 错误提示」。
-5. 语气温暖真诚、对症回应；自然时可邀请五星好评或进一步联系（应用内反馈 / 邮件），不堆套话。
-6. 退款诉求：不直接谈退款流程，先引导排查、尝试解决问题。
-7. emoji 原样保留；专有名词（应用名、Android、Google Play）不翻译。
-8. 引号：英文用 '...'，中文用「」，正文尽量不用 ASCII 直引号。
-【输出格式】
-只输出一个 JSON 对象，不要任何额外文字、不要 markdown 代码块：
-{{
-  "category": "评论分类（中文）",
-  "issues": ["推断的用户问题1（中文）", "问题2"],
-  "info_gaps": ["定位还缺的关键信息（中文，若无写空数组）"],
-  "analysis": "一句话总体判断与处理方向（中文）",
-  "reply": {{
-    "language": "回复实际语言 ISO 码",
-    "text": "推荐回复原文（≤350 字符，评论语言）",
-    "text_zh": "回复的中文翻译",
-    "char_count": 原文字符数
-  }}
-}}"#,
-        product = product,
-        package_name = package_name,
-        knowledge = knowledge,
-        star = star,
-        original = original,
-        zh = zh,
-        rev_lang = rev_lang,
-        version = version,
-        device = device,
-        os = os,
-        lang_rule = lang_rule,
+    // 完整模板从 app 设置读（含占位符），用 render 替换；缺失/损坏回退默认（逐字等于原写死文本）。
+    let template = crate::prompt_config::load().analysis;
+    let star_s = star.to_string();
+    crate::prompt_config::render(
+        &template,
+        &[
+            ("product", product),
+            ("package_name", package_name),
+            ("knowledge", &knowledge),
+            ("star", &star_s),
+            ("original", original),
+            ("zh", zh),
+            ("rev_lang", rev_lang),
+            ("version", version),
+            ("device", device),
+            ("os", &os),
+            ("lang_rule", &lang_rule),
+        ],
     )
 }
 

@@ -6,6 +6,7 @@ mod compare;
 mod feedback;
 mod manifest;
 mod model_config;
+mod prompt_config;
 mod reply;
 mod reviews;
 mod sheets;
@@ -94,6 +95,9 @@ pub fn run() {
             analysis::stop_analysis,
             model_config::get_model_config,
             model_config::save_model_config,
+            prompt_config::get_prompt_config,
+            prompt_config::get_default_prompt_config,
+            prompt_config::save_prompt_config,
             chrome::list_chrome_profiles,
             chrome::open_url_in_chrome_profile,
             updater::check_update,

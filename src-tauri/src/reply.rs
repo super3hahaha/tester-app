@@ -158,6 +158,7 @@ fn build_gen_prompt(
     review: &serde_json::Value,
     product: &str,
     package_name: &str,
+    app_knowledge: &str,
     instruction: &str,
     language: &str,
 ) -> String {
@@ -179,6 +180,12 @@ fn build_gen_prompt(
         format!("本次所有候选统一用 `{}` 这个语言回复。", language)
     };
 
+    let knowledge = if app_knowledge.trim().is_empty() {
+        "（暂无该应用的知识块，请仅据评论本身判断。）".to_string()
+    } else {
+        app_knowledge.to_string()
+    };
+
     // 回复方向可留空：用户拿不准怎么回时，让模型自己据评论判断最合适的回应方向。
     let instruction_block = if instruction.trim().is_empty() {
         "（用户未指定方向。这是一条 Google Play 上应用的公开评论，回复须同样严格遵守上面的【硬性标准】。\
@@ -192,52 +199,25 @@ fn build_gen_prompt(
         instruction
     };
 
-    format!(
-        r#"你是 Google Play 应用的开发者，正在以官方身份回复一条用户评论。
-根据下面的【评论信息】和【回复方向】，生成回复，并严格遵守【硬性标准】。
-不要使用任何工具，直接给出结果。
-
-【评论信息】
-- 应用：{product}（{package_name}）
-- 星级：{star}★
-- 用户原文（优先据此理解语义）：{original}
-- 中文译文（仅供你理解，不要据此判断语言）：{zh}
-- 评论语言：{rev_lang}
-- 应用版本：{version}
-- 设备 / 安卓版本：{device} / {os}
-
-【回复方向】
-{instruction}
-
-【硬性标准】
-1. 长度：这是 Google Play 公开回复，每条 ≤ 350 字符（含空格/标点/emoji），超了必须改短。
-2. 回复语言：{lang_rule}
-3. 不编造、不乱承诺：邮箱、版本号、团队名、价格、未发布功能等不确定的事实绝不杜撰；也不要做无法兑现/无法确认的承诺（如"下个版本一定修复""X 号前上线"）。
-4. 不向用户索取机型、Android 版本、应用版本——这些后台都看得到；确需更多信息时只问「具体问题表现 / 复现步骤 / 错误提示」。
-5. 语气：温暖友好、真诚感谢反馈、对症回应；在自然的前提下可邀请用户给五星好评或进一步联系（应用内反馈 / 邮件），但不要生硬索评、不堆空话套话。
-6. 退款诉求：不直接谈退款流程，把焦点引导到排查上——先询问具体的 bug 表现/细节，尝试帮用户解决问题。
-7. 保留：emoji 原样保留；专有名词（应用名、Android、Google Play）不翻译。
-8. 引号：正文里尽量不用 ASCII 直引号；要引用 UI 选项名时英文用 '...'，中文用「」。
-9. 生成 3 条候选，风格/角度要有明显差异（例如：诚恳道歉式 / 务实引导式 / 简短友好式），
-   不要只是改几个词。每条都各自满足 1-8 全部约束。
-
-【输出格式】
-只输出一个 JSON 数组，3 个元素，不要任何额外文字、不要 markdown 代码块：
-[
-  {{ "style": "风格名", "language": "实际语言 ISO 码", "text": "回复正文", "text_zh": "中文预览", "char_count": 正文字符数 }},
-  ...共 3 条
-]"#,
-        product = product,
-        package_name = package_name,
-        star = star,
-        original = original,
-        zh = zh,
-        rev_lang = rev_lang,
-        version = version,
-        device = device,
-        os = os,
-        instruction = instruction_block,
-        lang_rule = lang_rule,
+    // 完整模板从 app 设置读（含占位符），用 render 替换；缺失/损坏回退默认（逐字等于原写死文本）。
+    let template = crate::prompt_config::load().gen;
+    let star_s = star.to_string();
+    crate::prompt_config::render(
+        &template,
+        &[
+            ("knowledge", &knowledge),
+            ("product", product),
+            ("package_name", package_name),
+            ("star", &star_s),
+            ("original", original),
+            ("zh", zh),
+            ("rev_lang", rev_lang),
+            ("version", version),
+            ("device", device),
+            ("os", &os),
+            ("instruction", instruction_block),
+            ("lang_rule", &lang_rule),
+        ],
     )
 }
 
@@ -360,8 +340,17 @@ async fn generate_single_reply_inner(
     model: Option<String>,
     app: AppHandle,
 ) -> Result<GenReplyResult, String> {
+    // 读该产品知识块注入提示词，与「🔍 分析」完全一致：**按 package_name 解析模板产品**。
+    // 注意不能用前端传来的 `product`——那是 app 显示名（如 "File Manager"），不是模板产品名
+    // （如 "XFolder"），知识块文件按产品名存（xfolder.md），用显示名会读空。
+    let knowledge = match crate::templates::product_for_package(package_name.clone()) {
+        Ok(Some(prod)) => crate::analysis::read_knowledge(prod).unwrap_or_default(),
+        _ => String::new(),
+    };
+
     // 回复方向允许为空——空时 build_gen_prompt 会让模型据评论自行判断方向。
-    let prompt = build_gen_prompt(&review, &product, &package_name, instruction.trim(), &language);
+    let prompt =
+        build_gen_prompt(&review, &product, &package_name, &knowledge, instruction.trim(), &language);
 
     let claude_path = find_claude()
         .ok_or("Claude CLI not found. Please install it: npm install -g @anthropic-ai/claude-code")?;
@@ -767,31 +756,15 @@ fn build_mail_reply_prompt(body: &str, instruction: &str, lang: &str) -> String 
         instruction
     };
 
-    format!(
-        r#"你是一个应用开发团队的支持人员，正在草拟一封邮件回复。
-根据下面的【邮件信息】和【回复方向】生成回复草稿，严格遵守【硬性标准】。
-不要使用任何工具，直接给出结果。
-
-【邮件信息】
-- 正文原文：{body}
-
-【回复方向】
-{instruction}
-
-【硬性标准】
-1. 回复语言：用 {lang} 语言回复。
-2. 长度适中：3–6 句话，不堆废话，也不过短失礼。
-3. 不编造、不乱承诺：不编造具体功能、时间节点；不做无法兑现的承诺。
-4. 语气：专业、友好、真诚；有问题先道歉再给下一步，好评真诚感谢。
-5. 退款诉求：不直接给退款流程，先了解具体问题，尝试帮用户解决。
-6. 格式：纯文本，不加 Markdown，可合理换段，不加"Dear Sir/Madam"等过度正式称呼。
-
-【输出格式】
-只输出一个 JSON 对象，不要任何额外文字：
-{{ "language": "实际语言 ISO 码", "text": "回复正文", "text_zh": "中文预览", "char_count": 正文字符数 }}"#,
-        body = body,
-        instruction = instruction_block,
-        lang = lang,
+    // 完整模板从 app 设置读（含占位符），用 render 替换；缺失/损坏回退默认（逐字等于原写死文本）。
+    let template = crate::prompt_config::load().mail;
+    crate::prompt_config::render(
+        &template,
+        &[
+            ("body", body),
+            ("instruction", instruction_block),
+            ("lang", lang),
+        ],
     )
 }
 

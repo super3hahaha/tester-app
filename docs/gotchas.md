@@ -78,3 +78,14 @@ Tauri 的 webview（WKWebView / WebView2）对同步对话框 `window.confirm()`
 2. 每批翻完按 `char_len`(=`chars().count()`) 校验，超 350 的发**一次压缩调用**（`build_compress_prompt`）改写到限内。
 3. 仍超的：写入但 emit `⚠ 仍超` 日志 + 前端编辑行字符数标红；单条重译完成后红 banner（无弹窗看不到日志，靠前端扫）、批量完成消息汇总「N 条仍超」。
 - 字符计数前后端要对齐：后端 `chars().count()` / 前端 `.length`，对 BMP 字符（俄/中/拉丁）一致，emoji 会差一点（少见，可接受）。
+
+## AI 生成回复的知识库注入：必须按 packageName 解析产品，不能信前端传的 product
+
+知识块（含反馈邮箱等）按**模板产品名**存：`~/.tester-app/review-analysis/{product_prefix}.md`（如 `xfolder.md`）。
+但前端 `generate_single_reply` 传的 `product` 参数是 **app 显示名**（`appLabel` / `displayName`，如 "File Manager"），不是模板产品名（"XFolder"）。
+所以后端读知识块**必须** `product_for_package(package_name)` → 产品名 → `read_knowledge(产品名)`，与 analysis.rs 一致；
+**不能**直接 `read_knowledge(前端传的 product)`——会用 "File Manager" 找不到 `xfolder.md`、返回空知识块。
+
+踩坑现象：知识库明明配了 `filemanager.feedback@gmail.com`，但 AI 回复里填成了 `xxtester2026@gmail.com`（**用户自己的账号邮箱**）。
+根因两层：①知识块读空（上面的 product 错配）→ 模型没邮箱可用；②子进程 `claude --print` 继承了 Claude Code 账号上下文（`~/.claude/CLAUDE.md` + userEmail 注入），模型就抓了账号邮箱顶上。
+修复①即可——知识块正确注入后模型用知识库里的邮箱。但要记住子进程会带账号身份信息，prompt 里凡是"不确定就别编"的字段（邮箱/版本号等）都得靠知识块显式喂。

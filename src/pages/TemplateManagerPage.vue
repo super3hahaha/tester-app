@@ -648,7 +648,6 @@ watch(
     </header>
 
     <div v-if="error" class="banner banner-error">{{ error }}</div>
-    <div v-if="notice" class="banner banner-ok">{{ notice }}</div>
 
     <!-- 产品选择 -->
     <div class="product-tabs">

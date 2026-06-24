@@ -13,6 +13,7 @@ import KnowledgeConfigPage from "./KnowledgeConfigPage.vue";
 import GmailPage from "./GmailPage.vue";
 import AppScriptPage from "./AppScriptPage.vue";
 import SettingsPage from "./SettingsPage.vue";
+import PromptConfigPage from "./PromptConfigPage.vue";
 
 interface UserInfo {
   email: string;
@@ -83,6 +84,7 @@ const navItems: NavItem[] = [
     icon: "⚙",
     children: [
       { id: "settings-general", label: "General", icon: "⚙" },
+      { id: "settings-prompt", label: "Prompt", icon: "📝" },
     ],
   },
 ];
@@ -223,6 +225,9 @@ function onSlidesSelect(files: SlidesSelection[]) {
         />
         <SettingsPage
           v-show="activeOption === 'settings-general'"
+        />
+        <PromptConfigPage
+          v-show="activeOption === 'settings-prompt'"
         />
       </div>
     </div>

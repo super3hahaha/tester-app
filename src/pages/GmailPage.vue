@@ -873,9 +873,6 @@ async function copyAndJumpAi(task: AiMailTask) {
             <span class="ts">{{ selectedMail.date }}</span>
           </div>
           <div class="detail-head-actions">
-            <button class="read-btn" @click="markRead(selectedMail)" title="标为已读，下次拉取不再显示">
-              标为已读
-            </button>
             <button
               v-if="currentSource?.templateProduct"
               class="web-btn tpl-web-btn"
@@ -888,6 +885,9 @@ async function copyAndJumpAi(task: AiMailTask) {
             </button>
             <button class="web-btn" @click="openInGmail(selectedMail)" title="在 Gmail 中打开该会话，本人回复">
               ↗ 在 Gmail 中打开
+            </button>
+            <button class="read-btn" @click="markRead(selectedMail)" title="标为已读，下次拉取不再显示">
+              标为已读
             </button>
             <button class="detail-close" @click="closeDetail">✕</button>
           </div>

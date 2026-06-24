@@ -117,3 +117,13 @@
 - **源语言不进 translations**：源 `en`/`zh-CN`，translations 只存其它语言；`is_source_lang` 判定 `zh-rCN↔zh-CN` 同源，避免把中文源再翻成中文。
 - **stale 机制**：改了源文 `text` 没重译 → `src_hash != hash(text)` → UI 标「源已改」。`update_template` 不主动动 `src_hash`，靠它自然变 stale；`list_templates` 返回 `TemplateView`（flatten + `stale`）。
 - **xlsx 导入清空译文**：覆盖导入=全新源，`translations` 清空，提示重新补全。
+
+## 可编辑提示词（prompt_config.rs + 设置页「提示词配置」）
+
+- **背景**：app 里 5 处 prompt 全写死在 Rust（reply/analysis/translate）。用户要能在设置里改 prompt，且单条「AI 生成回复」(`build_gen_prompt`) 一直漏注入知识库（只有「🔍 分析」注入了），导致知识配置里的反馈邮箱等用不上。
+- **整段完整模板可编辑（最终选定）**：最初做成「只开放纯 prose 规则段、占位符/JSON 锁死」，用户嫌不够灵活，改成**每个 prompt 存完整文本**（含 `{product}`/`{star}` 占位符 + JSON 输出格式），任意改。代价是改坏占位符/JSON 会导致解析失败——明确接受，靠设置页每字段「恢复默认」(`get_default_prompt_config`) 兜底。
+  - **不用 `format!`**（占位符运行时才知道）：`render(template, &[(k,v)])` 对每个已知 token 做 `replace("{k}", v)`。JSON 示例里的单括号 `{ "k": ... }` 不构成 `{token}`，不会被误替换——所以模板里 JSON 用**单括号**（不是 format! 的 `{{`）。
+  - `load()` 缺失/损坏/字段缺回退 `default_*()`（逐字等于原写死文本），未编辑行为完全不变。存 `~/.tester-app/prompt-config.json`，同 model_config 模式。
+- **只开放 3 个回复类**（gen/analysis/mail），翻译类 #4/#5 不开放：翻译模板含语言码/`{tpls_json}`（输出 key 必须一字不差），属解析关键，开放风险大、收益低。
+- **独立「Prompt」二级页**：放在 Settings 二级导航（`settings-prompt`，与 `settings-general` 并列），不挤在 General 页里——prompt 模板长，单独成页编辑更清爽。
+- **知识库注入对齐**：`generate_single_reply` 现在和 `generate_analysis` 一样按 product（退回 package_name 解析）读知识块注入 `{app_knowledge}`，两个功能行为统一。
