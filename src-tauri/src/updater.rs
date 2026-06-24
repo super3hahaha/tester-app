@@ -38,11 +38,16 @@ pub async fn check_update() -> Result<Option<UpdateInfo>, String> {
         GITHUB_REPO
     );
 
+    let token = crate::model_config::load().github_token;
     let client = reqwest::Client::new();
-    let resp = client
+    let mut req = client
         .get(&url)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "tester-app-updater")
+        .header("User-Agent", "tester-app-updater");
+    if !token.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", token));
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| format!("网络请求失败: {e}"))?;
