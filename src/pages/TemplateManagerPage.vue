@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -131,6 +131,40 @@ function toggleFav(id: string) {
   else next.add(id);
   favIds.value = next;
   saveFavIds(next);
+}
+
+// 搜索
+const searchQuery = ref("");
+const showSearch = ref(false);
+const searchInputRef = ref<HTMLInputElement | null>(null);
+
+const filteredTemplates = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase();
+  if (!q) return templates.value;
+  return templates.value.filter((t) => {
+    return (
+      t.id.toLowerCase().includes(q) ||
+      t.category.toLowerCase().includes(q) ||
+      t.text.toLowerCase().includes(q)
+    );
+  });
+});
+
+function openSearch() {
+  showSearch.value = true;
+  nextTick(() => searchInputRef.value?.focus());
+}
+function closeSearch() {
+  showSearch.value = false;
+  searchQuery.value = "";
+}
+function onGlobalKeydown(e: KeyboardEvent) {
+  if ((e.metaKey || e.ctrlKey) && e.key === "f") {
+    e.preventDefault();
+    openSearch();
+  } else if (e.key === "Escape" && showSearch.value) {
+    closeSearch();
+  }
 }
 
 // 内联两步确认（Tauri webview 里 window.confirm 不弹，见 gotchas.md）
@@ -372,11 +406,19 @@ async function doDelete(id: string) {
 }
 
 // 单条重译：该条目标语言覆盖重译。语言切成小组多次调用，进度按组推进、每段更快返回。
+// 当前查看的是非源语言时，只重译该语言；切回源语言（英文）时重译全部。
 async function retranslateOne(t: Template) {
   if (translating.value) return;
-  // 只刷新该条已有的语言；从没翻过则用默认集铺底。不引入未勾选的后补语种。
-  const existing = Object.keys(t.translations || {});
-  const langs = existing.length ? existing : [...DEFAULT_CODES];
+  const viewing = curLang(t);
+  let langs: string[];
+  if (viewing !== t.lang) {
+    // 当前切到了某个译文语言 → 只重译这一种
+    langs = [viewing];
+  } else {
+    // 当前是源语言视图 → 重译已有全部语言（从没翻过则用默认集铺底）
+    const existing = Object.keys(t.translations || {});
+    langs = existing.length ? existing : [...DEFAULT_CODES];
+  }
   translating.value = true;
   translateLog.value = [];
   retransId.value = t.id;
@@ -409,7 +451,9 @@ async function retranslateOne(t: Template) {
     if (over.length) {
       error.value = `${t.id}：${over.join("/")} 仍超 350 字符（已标红），请手动精简`;
     } else {
-      flash(`已重译 ${t.id}（${retransDone.value} 种语言）`);
+      flash(langs.length === 1
+        ? `已重译 ${t.id}（${langs[0]}）`
+        : `已重译 ${t.id}（${retransDone.value} 种语言）`);
     }
   } catch (e: any) {
     error.value = e === "CANCELLED" ? "已取消（已完成的组已保存）" : String(e);
@@ -595,6 +639,7 @@ let unlistenLog: UnlistenFn | null = null;
 let unlistenProgress: UnlistenFn | null = null;
 
 onMounted(async () => {
+  window.addEventListener("keydown", onGlobalKeydown);
   try {
     const saved = localStorage.getItem(LANGS_STORE_KEY);
     if (saved) {
@@ -624,6 +669,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener("keydown", onGlobalKeydown);
   if (unlistenLog) unlistenLog();
   if (unlistenProgress) unlistenProgress();
 });
@@ -769,14 +815,33 @@ watch(
       ></textarea>
     </div>
 
+    <!-- 搜索框（Cmd+F 唤起） -->
+    <div v-if="showSearch" class="search-bar">
+      <span class="search-icon">🔍</span>
+      <input
+        ref="searchInputRef"
+        v-model="searchQuery"
+        class="search-input"
+        placeholder="搜索类别、ID、正文…"
+        @keyup.enter="() => {}"
+      />
+      <span class="search-count" v-if="searchQuery.trim()">
+        {{ filteredTemplates.length }} / {{ templates.length }}
+      </span>
+      <button class="search-close" @click="closeSearch">✕</button>
+    </div>
+
     <!-- 模板列表 -->
     <div v-if="loading" class="empty-state">加载中…</div>
     <div v-else-if="selectedProduct && templates.length === 0" class="empty-state">
       该产品还没有模板，用上方「+ 新增模板」或「从 xlsx 导入」。
     </div>
+    <div v-else-if="searchQuery.trim() && filteredTemplates.length === 0" class="empty-state">
+      没有匹配「{{ searchQuery }}」的模板
+    </div>
 
     <div class="tpl-list">
-      <article v-for="t in templates" :key="t.id" class="tpl-card">
+      <article v-for="t in filteredTemplates" :key="t.id" class="tpl-card">
         <div class="tpl-head">
           <button
             class="fav-btn"
@@ -1821,4 +1886,44 @@ watch(
   color: #4a5568;
 }
 .pkg-add-btn:hover { background: #f7fafc; }
+
+/* 搜索框 */
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: white;
+  border: 1px solid #667eea;
+  border-radius: 8px;
+  margin-bottom: 10px;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.15);
+}
+.search-icon {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.search-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 13px;
+  background: transparent;
+}
+.search-count {
+  font-size: 11px;
+  color: #718096;
+  flex-shrink: 0;
+}
+.search-close {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: #a0aec0;
+  font-size: 13px;
+  padding: 0 2px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.search-close:hover { color: #4a5568; }
 </style>

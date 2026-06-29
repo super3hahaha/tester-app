@@ -324,10 +324,6 @@ pub async fn kb_ai_distill(
     is_product: bool,
     model: Option<String>,
 ) -> Result<String, String> {
-    if image_paths.is_empty() {
-        return Err("请至少提供一张对比图。".to_string());
-    }
-
     let prompt = build_distill_prompt(&image_paths, &note, &existing_md, is_product);
 
     let claude_path = crate::claude::find_claude()

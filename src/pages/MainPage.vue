@@ -470,6 +470,8 @@ function onSlidesSelect(files: SlidesSelection[]) {
   text-overflow: ellipsis;
   flex: 1;
   min-width: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: normal;
 }
 .opt-badge {
   background: #667eea;

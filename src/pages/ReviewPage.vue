@@ -792,6 +792,7 @@ async function handleSubmitReply(task: AiTask) {
     task.review.developer_reply = text;
     task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
     persistReplyToSnapshot(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
+    replyState.value = "ALL"; // 切为「全部」让回复后的卡片可见
     aiTasks.value = aiTasks.value.filter((t) => t.id !== task.id);
     if (activeTaskId.value === task.id) activeTaskId.value = null;
   } catch (e: any) {
@@ -937,6 +938,7 @@ async function submitTplReply() {
     r.developer_reply = text;
     r.developer_reply_ts = Math.floor(Date.now() / 1000);
     persistReplyToSnapshot(r._pkg, r.review_id, text, r.developer_reply_ts);
+    replyState.value = "ALL"; // 切为「全部」让回复后的卡片可见
     tplDlgReview.value = null;
   } catch (e: any) {
     tplError.value = String(e);
@@ -1130,6 +1132,7 @@ async function submitAnReply(task: AnTask) {
     task.review.developer_reply = text;
     task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
     persistReplyToSnapshot(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
+    replyState.value = "ALL"; // 切为「全部」让回复后的卡片可见
     anTasks.value = anTasks.value.filter((t) => t.id !== task.id);
     if (activeAnId.value === task.id) activeAnId.value = null;
   } catch (e: any) {
@@ -1580,26 +1583,6 @@ async function submitAnReply(task: AnTask) {
       </div>
     </div>
 
-    <!-- 缩小后的左下角悬浮条（分析任务，与 AI 回复分列两侧避免重叠） -->
-    <div v-if="minimizedAnTasks.length" class="ai-mini-stack an-mini-stack">
-      <div
-        v-for="t in minimizedAnTasks"
-        :key="t.id"
-        class="ai-mini-bar"
-        :class="{ 'is-error': t.status === 'error', 'is-done': t.status === 'done' }"
-        @click="restoreAn(t.id)"
-      >
-        <span class="ai-mini-text">
-          🔍 <span class="ai-mini-quote">{{ (t.review.text || t.review.original_text || "(无文字)").slice(0, 16) }}</span>
-          <template v-if="t.status === 'generating'">· 分析中…</template>
-          <template v-else-if="t.status === 'queued'">· 排队中</template>
-          <template v-else-if="t.status === 'error'">· 失败</template>
-          <template v-else-if="t.data">· 已就绪</template>
-          <template v-else>· 待分析</template>
-        </span>
-        <button class="ai-mini-open" @click.stop="restoreAn(t.id)">展开</button>
-      </div>
-    </div>
 
     <!-- 模板回复弹窗 -->
     <div v-if="tplDlgReview" class="ai-overlay" @click.self="closeTplDialog">
@@ -1674,8 +1657,8 @@ async function submitAnReply(task: AnTask) {
       </div>
     </div>
 
-    <!-- 缩小后的右下角悬浮条：竖直堆叠，每个任务一条 -->
-    <div v-if="minimizedTasks.length" class="ai-mini-stack">
+    <!-- 缩小后的右下角悬浮条：AI 回复 + 分析任务统一堆叠 -->
+    <div v-if="minimizedTasks.length || minimizedAnTasks.length" class="ai-mini-stack">
       <div
         v-for="t in minimizedTasks"
         :key="t.id"
@@ -1692,6 +1675,23 @@ async function submitAnReply(task: AnTask) {
           <template v-else>· 待生成</template>
         </span>
         <button class="ai-mini-open" @click.stop="restoreTask(t.id)">展开</button>
+      </div>
+      <div
+        v-for="t in minimizedAnTasks"
+        :key="t.id"
+        class="ai-mini-bar"
+        :class="{ 'is-error': t.status === 'error', 'is-done': t.status === 'done' }"
+        @click="restoreAn(t.id)"
+      >
+        <span class="ai-mini-text">
+          🔍 <span class="ai-mini-quote">{{ (t.review.text || t.review.original_text || "(无文字)").slice(0, 16) }}</span>
+          <template v-if="t.status === 'generating'">· 分析中…</template>
+          <template v-else-if="t.status === 'queued'">· 排队中</template>
+          <template v-else-if="t.status === 'error'">· 失败</template>
+          <template v-else-if="t.data">· 已就绪</template>
+          <template v-else>· 待分析</template>
+        </span>
+        <button class="ai-mini-open" @click.stop="restoreAn(t.id)">展开</button>
       </div>
     </div>
   </div>
@@ -2222,11 +2222,6 @@ async function submitAnReply(task: AnTask) {
 }
 
 /* 分析任务的悬浮条堆到左下角，避开 AI 回复（右下角） */
-.an-mini-stack {
-  right: auto;
-  left: 20px;
-  align-items: flex-start;
-}
 .web-btn {
   padding: 4px 12px;
   font-size: 12px;

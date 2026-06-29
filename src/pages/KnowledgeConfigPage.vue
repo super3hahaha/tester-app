@@ -39,6 +39,17 @@ const selectedInfo = computed(
   () => products.value.find((p) => p.product === selectedProduct.value) || null
 );
 
+function productSlug(name: string): string {
+  if (name === "通用") return "common";
+  const s = name.split("").filter(c => /[a-zA-Z0-9]/.test(c)).join("").toLowerCase();
+  return s || "tpl";
+}
+const filePath = computed(() =>
+  selectedProduct.value
+    ? `~/.tester-app/review-analysis/${productSlug(selectedProduct.value)}.md`
+    : ""
+);
+
 function flash(msg: string) {
   notice.value = msg;
   setTimeout(() => {
@@ -147,6 +158,7 @@ watch(
     <div v-if="selectedInfo" class="meta">
       <span v-if="selectedInfo.apps.length">关联应用：{{ selectedInfo.apps.join("、") }}</span>
       <span v-else class="muted">（package_map 里暂无关联应用）</span>
+      <span class="file-path" :title="filePath">存储：<code>{{ filePath }}</code></span>
     </div>
 
     <!-- 编辑器 -->
@@ -258,6 +270,17 @@ watch(
 }
 .meta .muted {
   color: #a0aec0;
+}
+.file-path {
+  color: #a0aec0;
+  margin-left: 12px;
+}
+.file-path code {
+  background: #edf2f7;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #4a5568;
 }
 .editor-wrap {
   display: block;

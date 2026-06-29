@@ -164,6 +164,7 @@ function cancelConfirm() {
 
 // ── AI 起草/合并 (v2) ─────────────────────────────────────────────────────────
 const showDistillModal = ref(false);
+const distillMinimized = ref(false);
 const distillImages = ref<string[]>([]);   // 磁盘路径
 const distillNote = ref("");
 const distilling = ref(false);
@@ -180,6 +181,7 @@ function openDistillModal() {
 function closeDistillModal() {
   if (distilling.value) return;
   showDistillModal.value = false;
+  distillMinimized.value = false;
 }
 
 async function pickDistillImages() {
@@ -244,12 +246,15 @@ async function runDistill() {
       imagePaths: [...distillImages.value],
       note: distillNote.value,
       existingMd: editContent.value,
+      isProduct: props.viewId !== "common",
       model: null,
     });
     editContent.value = draft;   // 填回编辑器当草稿，dirty 自动变红，不自动保存
     showDistillModal.value = false;
+    distillMinimized.value = false;
   } catch (e) {
     distillError.value = String(e);
+    distillMinimized.value = false;
   } finally {
     distilling.value = false;
   }
@@ -555,6 +560,7 @@ async function deleteCurrentProduct() {
       <div class="pane">
         <div class="pane-head">
           <span>{{ activeDoc.name }}</span>
+          <code class="doc-path">~/.tester-app/knowledge/docs/{{ activeDoc.id }}.md</code>
           <span class="char-count">{{ editContent.length }} 字</span>
         </div>
         <textarea
@@ -656,17 +662,25 @@ async function deleteCurrentProduct() {
     </div>
 
     <!-- AI 起草/合并弹窗 -->
-    <div v-if="showDistillModal" class="modal-overlay" @click.self="closeDistillModal">
+    <div v-if="showDistillModal && !distillMinimized" class="modal-overlay" @click.self="closeDistillModal">
       <div class="modal distill-modal">
         <div class="modal-header">
           <span>🤖 AI 起草 / 合并偏好</span>
-          <button class="modal-close" @click="closeDistillModal">✕</button>
+          <div class="modal-header-btns">
+            <button
+              v-if="distilling"
+              class="modal-min"
+              title="缩小（后台继续生成）"
+              @click="distillMinimized = true"
+            >—</button>
+            <button class="modal-close" @click="closeDistillModal">✕</button>
+          </div>
         </div>
         <div class="modal-body">
           <p class="modal-hint">
             两种用法：①上传「AI 生成 vs 人工修改」对比截图、说明谁是谁，AI 对比差异提炼偏好；
             ②直接在说明里描述偏好（可不传图）。结果会
-            {{ editContent.trim() ? "合并进当前内容（新增行标 🆕）" : "全新起草" }}。
+            {{ editContent.trim() ? "合并进当前内容" : "全新起草" }}。
           </p>
 
           <!-- 图片区 -->
@@ -713,6 +727,21 @@ async function deleteCurrentProduct() {
         </div>
       </div>
     </div>
+
+    <!-- distill 缩小后的右下浮条 -->
+    <div
+      v-if="showDistillModal && distillMinimized"
+      class="mini-bar"
+      @click="distillMinimized = false"
+    >
+      <div class="mini-top">
+        <span class="mini-title">🤖 AI 起草 / 合并偏好</span>
+        <span class="mini-status">生成中…</span>
+      </div>
+      <div class="mini-actions">
+        <button class="mini-expand" @click.stop="distillMinimized = false">展开</button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -740,6 +769,8 @@ async function deleteCurrentProduct() {
   font-size: 15px;
   font-weight: 600;
   color: #2d3748;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: normal;
 }
 
 .product-rename-input {
@@ -896,6 +927,17 @@ async function deleteCurrentProduct() {
 }
 
 .char-count { font-weight: 400; color: #a0aec0; }
+.doc-path {
+  flex: 1;
+  font-size: 11px;
+  color: #a0aec0;
+  background: transparent;
+  margin-left: 10px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .editor {
   flex: 1;
@@ -1063,6 +1105,67 @@ async function deleteCurrentProduct() {
 
 /* AI 起草弹窗 */
 .distill-modal { width: 460px; }
+
+.modal-header-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.modal-min {
+  border: none;
+  background: none;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  color: #a0aec0;
+}
+.modal-min:hover { color: #4a5568; }
+
+.mini-bar {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: 260px;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+  padding: 10px 12px;
+  z-index: 200;
+  cursor: pointer;
+}
+.mini-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.mini-title {
+  color: #2d3748;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mini-status {
+  color: #667eea;
+  flex-shrink: 0;
+  margin-left: 8px;
+  font-size: 11px;
+}
+.mini-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.mini-expand {
+  padding: 2px 10px;
+  font-size: 11px;
+  border-radius: 5px;
+  cursor: pointer;
+  border: 1px solid #cbd5e0;
+  background: white;
+}
 
 .distill-drop {
   border: 1.5px dashed #cbd5e0;
