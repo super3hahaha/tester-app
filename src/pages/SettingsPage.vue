@@ -92,6 +92,7 @@ interface ModelConfig {
   reply: string;
   analysis: string;
   translate: string;
+  testcase: string;
   github_token: string;
 }
 
@@ -99,6 +100,7 @@ const modelConfig = ref<ModelConfig>({
   reply: "claude-sonnet-4-6",
   analysis: "claude-sonnet-4-6",
   translate: "claude-haiku-4-5",
+  testcase: "claude-sonnet-4-6",
   github_token: "",
 });
 const modelSaving = ref(false);
@@ -369,6 +371,12 @@ async function copyText(text: string) {
       <div class="model-row">
         <span class="model-label">模板翻译</span>
         <select v-model="modelConfig.translate" class="model-select">
+          <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+      </div>
+      <div class="model-row">
+        <span class="model-label">用例生成</span>
+        <select v-model="modelConfig.testcase" class="model-select">
           <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
         </select>
       </div>

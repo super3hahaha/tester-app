@@ -35,6 +35,7 @@ tester-app/
 │       ├── BatchReplyPage.vue   # 批量回复执行：读保存的多 app 配置 → 并行拉评论 → 按 app 分组折叠 → AI 生成回复 → 逐条/一键提交
 │       ├── TemplateManagerPage.vue # 模板管理：按产品 tab 增删改模板 + xlsx 导入/导出 + 多语言预翻译 + 每条 ★收藏（挂 Review 工作区）
 │       ├── KnowledgeConfigPage.vue # 知识配置：按产品 tab 编辑「应用知识块」(.md)，单栏全宽编辑器 + 插入骨架 + 保存（过滤掉「通用」产品）；供评论分析注入 {app_knowledge}（挂 Review 工作区，与模板管理同级）
+│       ├── KnowledgeBasePage.vue   # 用例知识库：自由资料库 + 资料↔产品多对多关联；一级「知识库」工作区 + 动态二级产品列表 + 「通用」虚拟视图；每个资料 tab 带「管理关联」弹窗（多选产品）；编辑器 + 插入骨架；「🤖 AI 起草/合并」(v2)：传对比图(选文件/粘贴)+说明→kb_ai_distill 提炼偏好填回编辑器；供 GeneratePage 偏好勾选
 │       ├── GmailPage.vue        # Gmail 邮件：读 Apps Script 同步的 Sheet，卡片列表 + 详情弹窗 + 已读隐藏 + 按 Chrome profile 打开邮件；可关联邮件回复模板产品（email namespace）
 │       ├── AppScriptPage.vue    # App Script 配置：管理待维护的 Apps Script 项目列表（每项含备注/Chrome profile/跳转链接），点「打开 ↗」用指定 profile 打开（默认 https://script.google.com/home?hl=zh-cn）
 │       └── SettingsPage.vue     # 设置页：缓存管理（查看/清理缓存）+ 模型配置（回复/分析/翻译各自选 Sonnet/Haiku）+ GitHub Token（供 skill 热更新访问私有 release）
@@ -59,6 +60,7 @@ tester-app/
 │   │   ├── reply.rs             # 批量回复生成：写 pending JSON → 跑 claude /review-reply（--add-dir 模板目录 + prompt 传路径）→ 读回 candidates.json（reply-log 事件流）
 │   │   ├── skill_sync.rs        # Skill 热更新：从 GitHub 拉取 zipball 同步到 ~/.claude/skills/，启动时静默 + Settings 手动
 │   │   ├── templates.rs         # 模板管理：~/.tester-app/templates/ 的增删改 + xlsx 导入/导出（export_templates_xlsx：A 类别/B 英文/C 起各语言）；模板含 lang（en/zh-CN 双源）+ translations（预存各语言译文）；写全文同时重建瘦身 index；skill 从此目录读
+│   │   ├── knowledge_base.rs    # 用例知识库：产品/资料 CRUD + 多对多关联 + Generate 消费（kb_resolve_doc_paths）；存 ~/.tester-app/knowledge/index.json + docs/<docId>.md。v2：kb_save_temp_image(粘贴截图落盘) + kb_ai_distill(--print 读对比图提炼偏好，参考 reply.rs)
 │   │   ├── analysis.rs          # 评论分析：①「知识配置」每产品一份知识块 .md 的 list/read/write（存 ~/.tester-app/review-analysis/{slug}.md，文件名复用 templates 的 product_prefix）；②「🔍 分析」generate_analysis/stop_analysis（独立 AnalysisState + analysis-log 通道）：按 package→产品读知识块注入 {app_knowledge}，跑 claude --print 直出 JSON 对象（分类/问题/信息缺口/总体判断 + 一条推荐回复），与 reply.rs 同构但解析对象、状态独立
 │   │   ├── model_config.rs      # 模型配置持久化（~/.tester-app/model-config.json）：get_model_config / save_model_config；字段 reply/analysis/translate（Claude 模型 ID）+ github_token（供 skill_sync 访问私有 release）+ cli_engine（"claude"|"codex"）+ codex_model（engine=codex 时传给 codex exec 的模型）
 │   │   ├── prompt_config.rs     # 提示词模板持久化（~/.tester-app/prompt-config.json）：get/save_prompt_config + get_default_prompt_config（供「恢复默认」）+ render()；字段 gen/analysis/mail 各存完整 prompt 模板（含 {product}/{star} 等占位符），用户可整段编辑。reply.rs/analysis.rs 在拼 prompt 时 load() 取模板 + render 替换占位符
@@ -96,7 +98,7 @@ tester-app/
 ├── auth-user.json               # 用户信息（email、name、picture）
 ├── telegram.json                # （可选）反馈上传配置：{ bot_token, chat_id }；compile-time env var 未设时的运行时兜底
 ├── model-config.json            # 模型配置：reply/analysis/translate 模型 ID + github_token + cli_engine/codex_model（model_config.rs）
-├── prompt-config.json           # 提示词模板：gen/analysis/mail 三个完整 prompt 模板（含占位符），Prompt 配置页编辑（prompt_config.rs）
+├── prompt-config.json           # 提示词模板：gen/analysis/mail/kb_distill 四个完整 prompt 模板（含占位符），Prompt 配置页编辑（prompt_config.rs）
 ├── exports/                     # 导出文件
 │   ├── sheet_*.csv              # Google Sheets CSV 导出
 │   ├── *.pdf                    # Google Slides PDF 导出（中间产物，extract_prd.py 从此读取）
@@ -149,7 +151,7 @@ tester-app/
 | Gmail 页 | `GmailPage.vue` | 读 Apps Script 同步出的 Google Sheet（手动粘贴表链接，存 localStorage `gmail-sources-v1`，每张表可配 Chrome profile + 关联邮件模板产品）：复用 `read_sheet`/`get_sheet_tabs` 读 `Mail` tab、按表头名取列；列表每封固定 3 行（发件人+日期 / 主题 / 机翻中文），「详情」弹大卡（机翻上 / 原文下），「↗」按配的 Chrome profile 打开邮件深链（`open_url_in_chrome_profile`），「已读」本地隐藏（localStorage `gmail-read-ids-v1`，「↩ 撤销上一封」LIFO）。绕开 Gmail OAuth Testing 7 天过期，全程见 `gmail-handoff.md` |
 | App Script 页 | `AppScriptPage.vue` | 维护待管理的 Apps Script 项目列表（每项备注/Chrome profile/跳转链接，存 localStorage `appscript-projects-v1`）；点「打开 ↗」用指定 Chrome profile（或系统默认浏览器）打开链接（默认 Apps Script 首页），复用 `list_chrome_profiles` / `open_url_in_chrome_profile` |
 | 设置页 | `SettingsPage.vue` | 挂在 Settings 二级导航 `settings-general`。缓存管理（查看大小/清理）+ 模型配置（回复/分析/翻译各自选 Sonnet 或 Haiku，调 `get_model_config` / `save_model_config` 持久化）+ GitHub Token 输入（供 skill 热更新拉私有 release）+ 版本检测更新 |
-| Prompt 配置页 | `PromptConfigPage.vue` | 挂在 Settings 二级导航 `settings-prompt`（独立页）。gen/analysis/mail 三个**完整 prompt 模板** textarea，含 `{占位符}` 可整段编辑，每块列出可用占位符 + 「已修改」标记 + 「恢复默认」按钮；调 `get_prompt_config` / `get_default_prompt_config` / `save_prompt_config`。改坏占位符/JSON 会致解析失败，靠恢复默认兜底 |
+| Prompt 配置页 | `PromptConfigPage.vue` | 挂在 Settings 二级导航 `settings-prompt`（独立页）。gen/analysis/mail/kb_distill 四个**完整 prompt 模板** textarea，含 `{占位符}` 可整段编辑，每块列出可用占位符 + 「已修改」标记 + 「恢复默认」按钮；调 `get_prompt_config` / `get_default_prompt_config` / `save_prompt_config`。改坏占位符/JSON 会致解析失败，靠恢复默认兜底 |
 
 ## 后端模块
 

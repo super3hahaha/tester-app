@@ -495,6 +495,7 @@ pub async fn run_claude_task(
     pptx_paths: Vec<String>,
     model: Option<String>,
     extra_info: Option<String>,
+    preference_paths: Option<Vec<String>>,
     app: AppHandle,
     state: State<'_, ClaudeState>,
 ) -> Result<(), String> {
@@ -514,6 +515,7 @@ pub async fn run_claude_task(
     }
 
     let csv_path = csv_path.filter(|s| !s.is_empty());
+    let preference_paths = preference_paths.unwrap_or_default();
 
     let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Some(csv) = csv_path.as_ref() {
@@ -522,6 +524,11 @@ pub async fn run_claude_task(
         }
     }
     for p in &pptx_paths {
+        if let Some(parent) = std::path::Path::new(p).parent() {
+            dirs.insert(parent.to_string_lossy().to_string());
+        }
+    }
+    for p in &preference_paths {
         if let Some(parent) = std::path::Path::new(p).parent() {
             dirs.insert(parent.to_string_lossy().to_string());
         }
@@ -539,6 +546,12 @@ pub async fn run_claude_task(
     }
     for p in &pptx_paths {
         prompt.push_str(&format!("Image (new requirements): {}\n", p));
+    }
+    if !preference_paths.is_empty() {
+        prompt.push_str("\nPreference files (apply these conventions):\n");
+        for p in &preference_paths {
+            prompt.push_str(&format!("- {}\n", p));
+        }
     }
     if let Some(extra) = extra_info.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         prompt.push_str("\nAdditional info from user:\n");

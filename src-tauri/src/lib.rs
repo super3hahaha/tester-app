@@ -4,6 +4,7 @@ mod chrome;
 mod claude;
 mod compare;
 mod feedback;
+mod knowledge_base;
 mod manifest;
 mod model_config;
 mod prompt_config;
@@ -104,6 +105,21 @@ pub fn run() {
             updater::check_update,
             updater::download_update,
             updater::apply_update,
+            knowledge_base::kb_list_products,
+            knowledge_base::kb_create_product,
+            knowledge_base::kb_rename_product,
+            knowledge_base::kb_delete_product,
+            knowledge_base::kb_reorder_products,
+            knowledge_base::kb_list_docs,
+            knowledge_base::kb_read_doc,
+            knowledge_base::kb_save_doc,
+            knowledge_base::kb_create_doc,
+            knowledge_base::kb_rename_doc,
+            knowledge_base::kb_delete_doc,
+            knowledge_base::kb_set_doc_products,
+            knowledge_base::kb_resolve_doc_paths,
+            knowledge_base::kb_save_temp_image,
+            knowledge_base::kb_ai_distill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

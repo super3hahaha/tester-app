@@ -9,6 +9,7 @@ interface PromptConfig {
   gen: string;
   analysis: string;
   mail: string;
+  kb_distill: string;
 }
 
 // 每个模板的元信息：标签、说明、可用占位符（提示用户别删坏）。
@@ -31,9 +32,15 @@ const FIELDS: { key: keyof PromptConfig; label: string; desc: string; vars: stri
     desc: "Gmail 页生成邮件回复草稿时用的 prompt（JSON 对象）。",
     vars: ["body", "instruction", "lang"],
   },
+  {
+    key: "kb_distill",
+    label: "知识库「AI 起草/合并」",
+    desc: "知识库编辑器点「🤖 AI 起草/合并」时用的 prompt：对比图差异 or 直写描述 → 提炼偏好、合并标 🆕。",
+    vars: ["note", "existing_md"],
+  },
 ];
 
-const config = ref<PromptConfig>({ gen: "", analysis: "", mail: "" });
+const config = ref<PromptConfig>({ gen: "", analysis: "", mail: "", kb_distill: "" });
 const defaults = ref<PromptConfig | null>(null);
 const saving = ref(false);
 const message = ref("");

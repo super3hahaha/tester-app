@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, computed, nextTick } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import SheetsPage from "./SheetsPage.vue";
 import SlidesPage from "./SlidesPage.vue";
@@ -10,6 +10,7 @@ import ConfigPage from "./ConfigPage.vue";
 import BatchReplyPage from "./BatchReplyPage.vue";
 import TemplateManagerPage from "./TemplateManagerPage.vue";
 import KnowledgeConfigPage from "./KnowledgeConfigPage.vue";
+import KnowledgeBasePage from "./KnowledgeBasePage.vue";
 import GmailPage from "./GmailPage.vue";
 import AppScriptPage from "./AppScriptPage.vue";
 import SettingsPage from "./SettingsPage.vue";
@@ -31,6 +32,11 @@ interface SheetSelection {
   data: { headers: string[]; rows: string[][]; spreadsheet_url: string };
 }
 
+interface KbProduct {
+  id: string;
+  name: string;
+}
+
 interface SubItem {
   id: string;
   label: string;
@@ -42,6 +48,17 @@ interface NavItem {
   label: string;
   icon: string;
   children: SubItem[];
+  dynamic?: boolean;
+}
+
+const kbProducts = ref<KbProduct[]>([]);
+const creatingProduct = ref(false);
+const newProductName = ref("");
+
+async function reloadKbProducts() {
+  try {
+    kbProducts.value = await invoke<KbProduct[]>("kb_list_products");
+  } catch {}
 }
 
 const navItems: NavItem[] = [
@@ -79,6 +96,13 @@ const navItems: NavItem[] = [
     ],
   },
   {
+    id: "knowledge",
+    label: "知识库",
+    icon: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M4 19.5A2.5 2.5 0 016.5 17H20" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M9 7h6M9 11h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+    dynamic: true,
+    children: [],
+  },
+  {
     id: "settings",
     label: "Settings",
     icon: `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z" stroke="currentColor" stroke-width="1.5"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" stroke="currentColor" stroke-width="1.5"/></svg>`,
@@ -105,12 +129,45 @@ async function handleLogout() {
   emit("logout");
 }
 
-function selectWorkspace(ws: NavItem) {
+async function selectWorkspace(ws: NavItem) {
   activeWorkspace.value = ws.id;
-  if (ws.children.length > 0) {
+  if (ws.id === "knowledge") {
+    await reloadKbProducts();
+    activeOption.value = "kb-view:common";
+  } else if (ws.children.length > 0) {
     activeOption.value = ws.children[0].id;
   }
 }
+
+function startCreateProduct() {
+  creatingProduct.value = true;
+  newProductName.value = "";
+  nextTick(() => {
+    (document.getElementById("new-product-input") as HTMLInputElement)?.focus();
+  });
+}
+
+async function finishCreateProduct() {
+  const name = newProductName.value.trim();
+  creatingProduct.value = false;
+  if (!name) return;
+  try {
+    await invoke("kb_create_product", { name });
+    const prods = await invoke<KbProduct[]>("kb_list_products");
+    kbProducts.value = prods;
+    const last = prods[prods.length - 1];
+    if (last) activeOption.value = `kb-view:${last.id}`;
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+const kbViewId = computed(() => {
+  if (activeOption.value.startsWith("kb-view:")) {
+    return activeOption.value.slice("kb-view:".length);
+  }
+  return "";
+});
 
 function onSheetSelect(sel: SheetSelection) {
   sheetSelection.value = sel;
@@ -157,7 +214,7 @@ function onSlidesSelect(files: SlidesSelection[]) {
 
       <!-- Level 2: Options sidebar -->
       <nav
-        v-if="navItems.find((w) => w.id === activeWorkspace)?.children.length"
+        v-if="activeWorkspace !== 'knowledge' && navItems.find((w) => w.id === activeWorkspace)?.children.length"
         class="options-bar"
       >
         <div
@@ -171,6 +228,45 @@ function onSlidesSelect(files: SlidesSelection[]) {
           <span class="opt-label">{{ opt.label }}</span>
           <span v-if="opt.id === 'sheets' && sheetSelection" class="opt-badge">1</span>
           <span v-if="opt.id === 'slides' && slidesSelection.length > 0" class="opt-badge">{{ slidesSelection.length }}</span>
+        </div>
+      </nav>
+
+      <!-- 知识库二级侧栏（动态） -->
+      <nav v-if="activeWorkspace === 'knowledge'" class="options-bar">
+        <div
+          class="opt-item"
+          :class="{ active: activeOption === 'kb-view:common' }"
+          @click="activeOption = 'kb-view:common'"
+        >
+          <span class="opt-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 8h5M8 5.5v5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span>
+          <span class="opt-label">通用</span>
+        </div>
+        <div
+          v-for="p in kbProducts"
+          :key="p.id"
+          class="opt-item"
+          :class="{ active: activeOption === `kb-view:${p.id}` }"
+          @click="activeOption = `kb-view:${p.id}`"
+        >
+          <span class="opt-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 2h7l3 3v9H3V2z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M10 2v3h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg></span>
+          <span class="opt-label">{{ p.name }}</span>
+        </div>
+        <template v-if="creatingProduct">
+          <div class="opt-item opt-creating">
+            <input
+              id="new-product-input"
+              v-model="newProductName"
+              class="product-create-input"
+              placeholder="产品名称"
+              @keydown.enter="finishCreateProduct"
+              @keydown.escape="creatingProduct = false"
+              @blur="finishCreateProduct"
+            />
+          </div>
+        </template>
+        <div v-else class="opt-item opt-add" @click="startCreateProduct">
+          <span class="opt-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>
+          <span class="opt-label">新建产品</span>
         </div>
       </nav>
 
@@ -189,6 +285,7 @@ function onSlidesSelect(files: SlidesSelection[]) {
           v-show="activeOption === 'generate'"
           :sheetSelection="sheetSelection"
           :slidesSelection="slidesSelection"
+          :activeOption="activeOption"
         />
         <ComparePage
           v-show="activeOption === 'compare'"
@@ -228,6 +325,12 @@ function onSlidesSelect(files: SlidesSelection[]) {
         />
         <PromptConfigPage
           v-show="activeOption === 'settings-prompt'"
+        />
+        <KnowledgeBasePage
+          v-show="activeOption.startsWith('kb-view:')"
+          :view-id="kbViewId"
+          :active-option="activeOption"
+          @products-changed="reloadKbProducts"
         />
       </div>
     </div>
@@ -382,6 +485,35 @@ function onSlidesSelect(files: SlidesSelection[]) {
   padding: 0 4px;
   flex-shrink: 0;
 }
+
+.opt-add {
+  border-top: 1px solid rgba(255,255,255,0.06);
+  margin-top: 4px;
+  padding-top: 12px;
+  color: #777;
+}
+.opt-add:hover { color: #bbb; }
+
+.opt-creating {
+  border-top: 1px solid rgba(255,255,255,0.06);
+  margin-top: 4px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.product-create-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.3);
+  border-radius: 5px;
+  color: white;
+  font-size: 12px;
+  padding: 4px 8px;
+  outline: none;
+}
+.product-create-input::placeholder { color: rgba(255,255,255,0.4); }
+.product-create-input:focus { border-color: #667eea; }
 
 .page-content {
   flex: 1;

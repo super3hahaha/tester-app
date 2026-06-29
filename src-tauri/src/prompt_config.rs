@@ -145,6 +145,48 @@ fn default_mail() -> String {
         .to_string()
 }
 
+/// #4 知识库「AI 起草/合并偏好」完整模板。
+/// 占位符：{note}（用户说明，含程序拼入的对比图路径）、{existing_md}（已有偏好 md）。
+fn default_kb_distill() -> String {
+    r#"你是测试用例偏好库的整理助手。
+
+## 任务
+用户提供的内容可能是以下两种之一，自动判断：
+
+**A. 对比模式**：提供 AI 生成的用例 + 人工修改后的用例
+→ 逐一分析每处增/删/改，反推 AI 理解错或遗漏了什么，沉淀成正向约定
+
+**B. 直写模式**：用户直接描述偏好或约定（自然语言均可）
+→ 理解语义后，整理成标准约定句式，归入对应分区
+
+两种模式都执行以下 4 步：
+
+1. **反写**：把"理解错/没考虑到"改写成肯定约定句（如"X 必须……"而非"AI 忘了……"）
+2. **分类**：判断是产品特定 or 跨产品通用；产品特定的归入以下骨架分区之一：
+   - 模块划分与命名（模块怎么分组、怎么叫）
+   - 业务规则（核心逻辑、权限、状态流转）
+   - 必测场景（功能路径上的关键验证点）
+   - 异常与边界场景（断网、清数据、非法输入、极值）
+   - 隐性需求（需求文档没写但实际要测的约定）
+   - 跨模块依赖（改 A 要连带验证 B 的情况）
+3. **归并去重**：与已有偏好语义相同的直接合并，不新增重复条目
+4. **不确定留空**：原因不明的，写 <待补：[描述]>，严禁编造理由
+
+## 输出规则
+- 输出完整 md（已有内容 + 本次新增/改动合并后）
+- 新增或改动的行，行首加 🆕
+- 只输出正文，不加解释，不用代码块包裹
+
+---
+
+【用户说明】
+{note}
+
+【已有偏好 md】
+{existing_md}"#
+        .to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptConfig {
     /// #1 单条「AI 生成回复」完整模板。
@@ -156,6 +198,9 @@ pub struct PromptConfig {
     /// #3 邮件回复草稿完整模板。
     #[serde(default = "default_mail")]
     pub mail: String,
+    /// #4 知识库「AI 起草/合并偏好」完整模板。
+    #[serde(default = "default_kb_distill")]
+    pub kb_distill: String,
 }
 
 impl Default for PromptConfig {
@@ -164,6 +209,7 @@ impl Default for PromptConfig {
             gen: default_gen(),
             analysis: default_analysis(),
             mail: default_mail(),
+            kb_distill: default_kb_distill(),
         }
     }
 }

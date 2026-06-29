@@ -127,3 +127,14 @@
 - **只开放 3 个回复类**（gen/analysis/mail），翻译类 #4/#5 不开放：翻译模板含语言码/`{tpls_json}`（输出 key 必须一字不差），属解析关键，开放风险大、收益低。
 - **独立「Prompt」二级页**：放在 Settings 二级导航（`settings-prompt`，与 `settings-general` 并列），不挤在 General 页里——prompt 模板长，单独成页编辑更清爽。
 - **知识库注入对齐**：`generate_single_reply` 现在和 `generate_analysis` 一样按 product（退回 package_name 解析）读知识块注入 `{app_knowledge}`，两个功能行为统一。
+
+## 用例知识库：自由资料库 + 资料↔产品多对多关联
+
+- **选择**：知识库 = 自由资料库（产品/资料自建）+ 每份资料可关联多个产品（多对多，通过每份 md 上的「管理关联」弹窗管理）。一级「知识库」工作区 + 动态二级产品菜单（含「通用」虚拟项）+ 页内动态 tab。
+- **本期只做用例消费**：资料库管理 + Generate 勾选偏好传 skill；评论/邮件维现状。
+- **偏好走显式传路径**：skill 不再按产品名自动读 `references/`，只认 prompt 里 `Preference files:` 段显式传入的绝对路径；`claude.rs` 的 `run_claude_task` 加 `preference_paths: Vec<String>` 参数，父目录自动加进 `--add-dir`。
+- **存储**：`~/.tester-app/knowledge/index.json`（products + docs 含 productIds/scenes）+ `docs/<docId>.md` 扁平存（多对多，不绑产品目录）。
+- **「通用」= productIds 为空的资料**：虚拟视图，不入 products 表，不可删。
+- **删产品级联解除关联（不删资料）**：`kb_delete_product` 从所有 docs[].productIds 摘除该 id，绝不删资料文件（多对多下删产品连资料一起删会误伤还关联其它产品的资料）。
+- **v2 反馈→偏好半自动起草**：编辑器底部「🤖 AI 起草/合并」按钮 → 弹窗两种用法：①传「AI 版 vs 人工版」对比图（选文件或 Ctrl/⌘+V 粘贴截图，粘贴走 `kb_save_temp_image` base64 落盘到 `knowledge/distill-tmp/`）+ 说明谁是谁，AI 对比差异提炼；②**直写模式**——不传图、直接在说明里描述偏好。后端 `kb_ai_distill` 走 `claude --print stream-json`（参考 `reply.rs::generate_single_reply`，**收集最终文本**而非流式发事件；图片靠路径 + `--add-dir` 让 claude 自己读，不解析表格），按 4 件事（反写/分类按 6 骨架分区/归并/不确定留 `<待补>` 禁编造）整理 → 合并进当前 md、新增行标 🆕。产出**填回编辑器当草稿，不自动保存**。
+- **distill prompt 走配置、可在设置页改**：prompt 不硬编码，作为 `PromptConfig.kb_distill` 存 `prompt-config.json`，在 `PromptConfigPage.vue` 的 `FIELDS` 里多一个 tab 可整段编辑（占位符 `{note}` `{existing_md}`，render 替换）。对比图路径由后端 `build_distill_note` 拼进 `{note}`。6 个骨架分区（模块划分/业务规则/必测场景/异常边界/隐性需求/跨模块依赖）由模型自行判断产品特定 vs 通用，**不再需要 `is_product` 参数**（已从命令签名移除）。

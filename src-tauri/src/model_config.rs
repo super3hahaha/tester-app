@@ -8,11 +8,19 @@ fn default_cli_engine() -> String {
     "claude".to_string()
 }
 
+/// 测试用例生成默认模型。老配置文件无此字段时回退 Sonnet。
+fn default_testcase_model() -> String {
+    "claude-sonnet-4-6".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub reply: String,
     pub analysis: String,
     pub translate: String,
+    /// 测试用例生成（/test-case-generator skill）用哪个模型。
+    #[serde(default = "default_testcase_model")]
+    pub testcase: String,
     #[serde(default)]
     pub github_token: String,
     /// 直出类功能用哪个 CLI 引擎："claude" | "codex"。
@@ -29,6 +37,7 @@ impl Default for ModelConfig {
             reply: "claude-sonnet-4-6".to_string(),
             analysis: "claude-sonnet-4-6".to_string(),
             translate: "claude-haiku-4-5".to_string(),
+            testcase: default_testcase_model(),
             github_token: String::new(),
             cli_engine: default_cli_engine(),
             codex_model: String::new(),

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from "vue";
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -20,9 +20,21 @@ interface SlidesSelection {
   pages: number[];
 }
 
+interface KbProduct {
+  id: string;
+  name: string;
+}
+
+interface KbDoc {
+  id: string;
+  name: string;
+  productIds: string[];
+}
+
 const props = defineProps<{
   sheetSelection: SheetSelection | null;
   slidesSelection: SlidesSelection[];
+  activeOption?: string;
 }>();
 
 interface LogEvent {
@@ -92,16 +104,8 @@ const stopping = ref(false);
 const cancelRequested = ref(false);
 const claudeStarted = ref(false);
 
-interface ModelOption {
-  id: string;
-  label: string;
-}
-const MODELS: ModelOption[] = [
-  { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
-  { id: "claude-opus-4-7", label: "Opus 4.7" },
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
-];
-const selectedModel = ref<string>(MODELS[0].id);
+// 用例生成模型来自设置页「模型配置 · 用例生成」，默认 Sonnet。
+const selectedModel = ref<string>("claude-sonnet-4-6");
 
 interface ExportInfo {
   path: string;
@@ -342,11 +346,19 @@ async function handleGenerate() {
     const extra = extraInfo.value.trim();
     extraInfo.value = "";
 
+    let preferencePaths: string[] = [];
+    if (selectedDocIds.value.length > 0) {
+      preferencePaths = await invoke<string[]>("kb_resolve_doc_paths", {
+        ids: [...selectedDocIds.value],
+      });
+    }
+
     await invoke("run_claude_task", {
       csvPath,
       pptxPaths: imgPaths,
       model: selectedModel.value,
       extraInfo: extra || null,
+      preferencePaths,
     });
   } catch (e: any) {
     if (String(e).includes("__cancelled__")) {
@@ -408,6 +420,95 @@ async function handleStop() {
   }
   // if not yet at Claude stage, cancelRequested flag will abort the export loop
 }
+
+// ── 偏好文件区 ────────────────────────────────────────────────────────────────
+
+const kbProducts = ref<KbProduct[]>([]);
+const kbDocs = ref<KbDoc[]>([]);
+const selectedDocIds = ref<string[]>([]);
+const showKbModal = ref(false);
+
+async function loadKbData() {
+  try {
+    const [prods, docs] = await Promise.all([
+      invoke<KbProduct[]>("kb_list_products"),
+      invoke<KbDoc[]>("kb_list_docs"),
+    ]);
+    kbProducts.value = prods;
+    kbDocs.value = docs;
+    // 清理已被删除的资料的勾选
+    const liveIds = new Set(docs.map((d) => d.id));
+    selectedDocIds.value = selectedDocIds.value.filter((id) => liveIds.has(id));
+  } catch {}
+}
+
+interface KbGroup {
+  key: string;
+  label: string;
+  docs: KbDoc[];
+}
+
+// 按产品分组：通用组 + 各产品组（一份资料关联多产品时在多组出现）
+const kbGroups = computed<KbGroup[]>(() => {
+  const groups: KbGroup[] = [];
+  const commonDocs = kbDocs.value.filter((d) => d.productIds.length === 0);
+  if (commonDocs.length > 0) groups.push({ key: "common", label: "通用", docs: commonDocs });
+  for (const p of kbProducts.value) {
+    const docs = kbDocs.value.filter((d) => d.productIds.includes(p.id));
+    if (docs.length > 0) groups.push({ key: p.id, label: p.name, docs });
+  }
+  return groups;
+});
+
+const hasKbDocs = computed(() => kbDocs.value.length > 0);
+
+// 已勾选资料（去重，按 docId）——用于概览 chip
+const selectedDocs = computed(() =>
+  kbDocs.value.filter((d) => selectedDocIds.value.includes(d.id))
+);
+
+function removeDoc(id: string) {
+  selectedDocIds.value = selectedDocIds.value.filter((x) => x !== id);
+}
+
+// 组全选状态（按 docId 判断；同一资料在多组联动）
+function groupAllChecked(group: KbGroup): boolean {
+  return group.docs.length > 0 && group.docs.every((d) => selectedDocIds.value.includes(d.id));
+}
+function groupSomeChecked(group: KbGroup): boolean {
+  return group.docs.some((d) => selectedDocIds.value.includes(d.id));
+}
+function toggleGroup(group: KbGroup) {
+  if (groupAllChecked(group)) {
+    const remove = new Set(group.docs.map((d) => d.id));
+    selectedDocIds.value = selectedDocIds.value.filter((id) => !remove.has(id));
+  } else {
+    const add = group.docs.map((d) => d.id).filter((id) => !selectedDocIds.value.includes(id));
+    selectedDocIds.value = [...selectedDocIds.value, ...add];
+  }
+}
+
+async function loadGenModel() {
+  try {
+    const cfg = await invoke<{ testcase?: string }>("get_model_config");
+    if (cfg?.testcase) selectedModel.value = cfg.testcase;
+  } catch {}
+}
+
+onMounted(() => {
+  loadKbData();
+  loadGenModel();
+});
+
+watch(
+  () => props.activeOption,
+  (v) => {
+    if (v === "generate") {
+      loadKbData();
+      loadGenModel();
+    }
+  }
+);
 </script>
 
 <template>
@@ -431,12 +532,17 @@ async function handleStop() {
       </div>
 
       <div class="action-group">
-        <div class="model-picker">
-          <label>Model</label>
-          <select v-model="selectedModel" :disabled="generating">
-            <option v-for="m in MODELS" :key="m.id" :value="m.id">{{ m.label }}</option>
-          </select>
-        </div>
+        <button
+          v-if="hasKbDocs"
+          class="kb-btn"
+          :class="{ 'has-sel': selectedDocIds.length > 0 }"
+          :disabled="generating"
+          @click="showKbModal = true"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M3 2h7l3 3v9H3V2z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M10 2v3h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 7h6M5 10h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+          知识库
+          <span v-if="selectedDocIds.length > 0" class="kb-badge">{{ selectedDocIds.length }}</span>
+        </button>
         <button
           class="generate-btn"
           :disabled="!canGenerate || generating"
@@ -452,6 +558,63 @@ async function handleStop() {
         >
           {{ stopping ? "Stopping..." : "■ Stop" }}
         </button>
+      </div>
+    </div>
+
+    <!-- 已选偏好概览 (only before session starts) -->
+    <div v-if="!generating && !hasSession && selectedDocIds.length > 0" class="pref-summary">
+      <span class="pref-summary-label">知识库偏好：</span>
+      <span
+        v-for="doc in selectedDocs"
+        :key="doc.id"
+        class="pref-chip"
+      >
+        {{ doc.name }}
+        <button class="pref-chip-x" @click="removeDoc(doc.id)">✕</button>
+      </span>
+    </div>
+
+    <!-- 知识库选择弹窗 -->
+    <div v-if="showKbModal" class="modal-overlay" @click.self="showKbModal = false">
+      <div class="kb-modal">
+        <div class="kb-modal-header">
+          <span>选择知识库偏好</span>
+          <button class="kb-modal-close" @click="showKbModal = false">✕</button>
+        </div>
+        <div class="kb-modal-body">
+          <p class="kb-modal-hint">勾选要作为约定传给 Claude 的资料。勾选产品 = 全选其下资料；同一份资料关联多个产品时状态联动。</p>
+          <div v-if="kbGroups.length === 0" class="kb-modal-empty">知识库暂无资料。先到「知识库」页新建。</div>
+          <div v-for="group in kbGroups" :key="group.key" class="kb-group">
+            <label class="kb-group-head">
+              <input
+                type="checkbox"
+                :checked="groupAllChecked(group)"
+                :indeterminate="groupSomeChecked(group) && !groupAllChecked(group)"
+                @change="toggleGroup(group)"
+              />
+              <span class="kb-group-name">{{ group.label }}</span>
+              <span class="kb-group-count">{{ group.docs.length }}</span>
+            </label>
+            <label
+              v-for="doc in group.docs"
+              :key="`${group.key}-${doc.id}`"
+              class="kb-doc"
+            >
+              <input
+                type="checkbox"
+                :value="doc.id"
+                v-model="selectedDocIds"
+              />
+              {{ doc.name }}
+            </label>
+          </div>
+        </div>
+        <div class="kb-modal-footer">
+          <button class="kb-modal-clear" @click="selectedDocIds = []">清空</button>
+          <div class="spacer"></div>
+          <span class="kb-modal-sel">已选 {{ selectedDocIds.length }} 份</span>
+          <button class="kb-modal-done" @click="showKbModal = false">完成</button>
+        </div>
       </div>
     </div>
 
@@ -618,31 +781,202 @@ h3 {
   font-size: 12px;
   color: #bbb;
 }
-.model-picker {
-  display: flex;
+.kb-btn {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-.model-picker label {
-  font-size: 12px;
-  color: #666;
-}
-.model-picker select {
-  padding: 6px 10px;
+  padding: 8px 14px;
   font-size: 13px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
+  font-weight: 500;
+  color: #4a5568;
   background: white;
+  border: 1px solid #d4d4d8;
+  border-radius: 8px;
   cursor: pointer;
-  outline: none;
+  transition: all 0.15s;
 }
-.model-picker select:focus {
+.kb-btn:hover:not(:disabled) {
   border-color: #667eea;
+  color: #667eea;
 }
-.model-picker select:disabled {
+.kb-btn.has-sel {
+  border-color: #667eea;
+  color: #667eea;
+  background: #ebf4ff;
+}
+.kb-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
+.kb-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: white;
+  background: #667eea;
+  border-radius: 9px;
+}
+
+.pref-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fafafa;
+}
+.pref-summary-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #718096;
+}
+.pref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 10px;
+  font-size: 12px;
+  color: #4a5568;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+}
+.pref-chip-x {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #a0aec0;
+  font-size: 11px;
+  padding: 0 2px;
+  line-height: 1;
+}
+.pref-chip-x:hover { color: #e53e3e; }
+
+/* 知识库选择弹窗 */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.kb-modal {
+  background: white;
+  border-radius: 12px;
+  width: 420px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+}
+.kb-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 10px;
+  font-weight: 600;
+  font-size: 14px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.kb-modal-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  color: #718096;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.kb-modal-close:hover { background: #edf2f7; }
+.kb-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+}
+.kb-modal-hint {
+  font-size: 12px;
+  color: #718096;
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+.kb-modal-empty {
+  font-size: 13px;
+  color: #a0aec0;
+  text-align: center;
+  padding: 20px 0;
+}
+.kb-group {
+  margin-bottom: 12px;
+}
+.kb-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #2d3748;
+  cursor: pointer;
+}
+.kb-group-name { flex: 1; }
+.kb-group-count {
+  font-size: 11px;
+  font-weight: 400;
+  color: #a0aec0;
+}
+.kb-doc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0 4px 24px;
+  font-size: 13px;
+  color: #4a5568;
+  cursor: pointer;
+}
+.kb-group-head input,
+.kb-doc input { cursor: pointer; }
+.kb-modal-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px 14px;
+  border-top: 1px solid #e2e8f0;
+}
+.kb-modal-footer .spacer { flex: 1; }
+.kb-modal-clear {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: #718096;
+}
+.kb-modal-clear:hover { color: #e53e3e; }
+.kb-modal-sel {
+  font-size: 12px;
+  color: #a0aec0;
+}
+.kb-modal-done {
+  padding: 7px 18px;
+  background: #667eea;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+}
+.kb-modal-done:hover { background: #5a67d8; }
+
 .stop-btn {
   padding: 8px 18px;
   font-size: 13px;
