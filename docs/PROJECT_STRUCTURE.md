@@ -99,7 +99,8 @@ tester-app/
 ├── prompt-config.json           # 提示词模板：gen/analysis/mail 三个完整 prompt 模板（含占位符），Prompt 配置页编辑（prompt_config.rs）
 ├── exports/                     # 导出文件
 │   ├── sheet_*.csv              # Google Sheets CSV 导出
-│   ├── *.pdf                    # Google Slides PDF 导出
+│   ├── *.pdf                    # Google Slides PDF 导出（中间产物，extract_prd.py 从此读取）
+│   ├── {name}_images/           # extract_prd.py 按选定页提取的 PNG 图片（传给 Claude）
 │   ├── compare_{ai|human}_*.html # 对比页用：单 Tab 的 Sheet HTML 导出（waffle 格式）
 │   └── diff_report_*.html       # 对比页用：diff_testcases.py 生成的报告
 ├── manifests/                   # 生成-上传 manifest：每个上传到 Drive 的结果对应一份
@@ -137,7 +138,7 @@ tester-app/
 | 主布局 | `MainPage.vue` | 三级导航容器（工作区栏 → 选项栏 → 内容区），管理页面间数据传递 |
 | Sheets 页 | `SheetsPage.vue` | 双栏布局：左侧文件列表 + URL 粘贴 + 上传 xlsx（自动转 Google 表格并刷新列表），右侧数据预览与 Tab 切换 |
 | Slides 页 | `SlidesPage.vue` | 三栏布局：文件列表 + 大图预览 + 缩略图条，支持多页勾选 |
-| 生成页 | `GeneratePage.vue` | 展示选择摘要 → 一键导出并调用 Claude → 终端风格日志 → 多轮对话输入 |
+| 生成页 | `GeneratePage.vue` | 展示选择摘要 → 一键导出（CSV + 调用 `export_slides_pdf` 将选定 Slides 页提取为 PNG 图片）并调用 Claude → 终端风格日志 → 多轮对话输入 |
 | 对比页 | `ComparePage.vue` | 双栏选择（AI 原始 vs 人工修改）→ 导出 HTML → 调 Claude skill 生成 diff → "在 Chrome 中打开"按钮 |
 | 评论页 | `ReviewPage.vue` | Play Console 评论（原单应用页保留）。两种拉取：①「拉取评论」调 `list_play_reviews` 拉选中单个 app，按页面星级/回复状态/日期本地筛选；②「📦 批量拉取」从 `play-console-multi-config-v1` 读启用 app → 并行 `list_play_reviews` → 各 app 按其 Config 配置（星级/状态/日期）筛选后合并成**一个扁平列表**（按时间倒序，每条带应用标签 `_app`/`_pkg`，批量模式下页面筛选不适用）。每张评论卡片带「🔍 分析」+「🤖 AI 回复」+「📋 模板回复」+「添加模板」，提交/收录用该条评论来源 app 的包名（`_pkg`）；「🔍 分析」点开即弹窗并自动分析（注入该 app 知识块），输出分类/问题/信息缺口/判断 + 一条可微调直发的推荐回复，多任务可缩小（悬浮条堆左下角，与 AI 回复右下角分列）、生成串行；「在网页打开」深链仅对当前选中 app 有效，其它退回应用列表页 | → 弹窗输入「回复方向」(一句指令) + 选回复语言(默认跟随评论语言) → 调 `generate_single_reply` 现场生成 **3 条不同风格**候选 → 点选/手动微调(实时 350 字符计数) → confirm 后调 `reply_to_review` 提交并本地回填为「已回复」。**与批量回复不同**：这里是 freeform 现生成(走 `claude --print` 直出 JSON 数组)，不走模板匹配。另有「📋 模板回复」按钮 → 弹窗按「通用 / 该 app 专用」两组列出**收藏的模板**（按钮=模板 category 名）→ 点一条按评论语言（`reviewer_language` 归一成 app 码）匹配预存译文自动填入 → 可微调（350 计数）→ 提交（`reply_to_review`）；无对应语言译文则回退英文源文并提示。每条候选可点「➕ 添加模板」把好回复收录进该应用对应产品的模板库（任意语言都可收：英文存英文模板，其它语言用候选中文预览 text_zh 存中文模板；收录时内联填类别 → `product_for_package` 解析产品 → `add_template` 带 lang） |
 | 配置页（容器） | `ConfigPage.vue` | 纯配置页：顶部 Tab 切换「Play Console 拉取配置」/「Batch Reply 配置」，分别嵌 `PlayConsoleConfigPage` / `BatchReplyConfigPage`（v-show 常驻挂载，各管自己的 localStorage）。挂在 Review 工作区的 `review-config` 入口 |
@@ -155,7 +156,7 @@ tester-app/
 | 模块 | 文件 | 职责 |
 |---|---|---|
 | 认证 | `auth.rs` | Google OAuth 2.0 PKCE 流程：本地 TCP 回调服务器、令牌交换、自动刷新、持久化至文件 |
-| Google API | `sheets.rs` | Drive 文件列表、Sheets 读取与 CSV 导出、xlsx 上传（路径或字节、自动转 Google 表格、归入 `tester-app` 文件夹）、Slides 幻灯片获取与 PDF 导出、缩略图异步缓存 |
+| Google API | `sheets.rs` | Drive 文件列表、Sheets 读取与 CSV 导出、xlsx 上传（路径或字节、自动转 Google 表格、归入 `tester-app` 文件夹）、Slides 幻灯片获取与 PDF 导出（`export_slides_pdf(presentationId, name, pages)` 接收页码列表，下载整份 PDF 后调用 `extract_prd.py` 提取选定页为 PNG，返回 `Vec<String>` PNG 路径列表）、缩略图异步缓存 |
 | Claude 集成 | `claude.rs` | 定位 Claude CLI 路径、子进程管理、stream-json 输出解析、会话 ID 续接、实时事件推送 |
 | 对比流程 | `compare.rs` | 单 Tab Sheet 导出 HTML（`docs.google.com/.../export?format=html&gid=`）、内嵌脚本写盘后直接执行 `python diff_testcases.py`、在 Chrome 打开报告（`compare-log` 事件流，独立于 `claude-log`） |
 | 单条 AI 回复 | `reply.rs` | `generate_single_reply` command：给**一条**评论 + 用户一句「回复方向」+ 语言，在 Rust 里把评论上下文 + 方向 + review-reply skill 的硬性标准(≤350 字符/回复语言/不编造/保留 emoji 专名/引号规范) 拼成 prompt → 跑 `claude --print --output-format stream-json --permission-mode bypassPermissions`(无 skill、无文件往返) → 从终结 `result` 事件取最终文本 → `extract_json_array` 容错抠出 JSON 数组(防 markdown 代码块/前后散文) → 解析成 **3 条风格各异**的候选 `{style,language,text,text_zh,char_count}` 返回。**与「🔍 分析」一致：按 product（退回 package_name 解析）读该产品知识块注入 `{app_knowledge}`**；硬性标准段落来自 `prompt_config::load().gen_rules`（可在设置页编辑）。复用 `ReplyState`(与批量共用 running 锁 + `stop_reply` 可中断) 和 `reply-log` 事件流 |
@@ -221,9 +222,13 @@ tester-app/
 生成测试用例
   └─ GeneratePage:
        ├─ 导出 Sheet CSV  → export_sheet_csv()  → ~/.tester-app/exports/sheet_*.csv
-       ├─ 导出 Slides PDF  → export_slides_pdf()  → ~/.tester-app/exports/*.pdf
-       └─ 调用 Claude CLI  → run_claude_task(csv, pptxs, pages)
-            └─ claude --print --verbose --output-format stream-json --file <csv> --file <pptx> '/test-case-generator ...'
+       ├─ 导出 Slides PDF + 提取 PNG
+       │    export_slides_pdf(presentationId, name, pages)
+       │      → ~/.tester-app/exports/{name}.pdf（中间产物）
+       │      → extract_prd.py --input <pdf> --outdir <{name}_images> --slides <pages>
+       │      → ~/.tester-app/exports/{name}_images/*.png（返回 PNG 路径列表）
+       └─ 调用 Claude CLI  → run_claude_task(csv, imgPaths)
+            └─ claude --print --verbose --output-format stream-json --file <csv> --file <img1> ... '/test-case-generator ...'
                  └─ 流式 JSON → claude-log 事件 → 前端终端日志
 
 多轮对话
@@ -243,9 +248,9 @@ compare（ComparePage）
 
 生成 manifest 链路
   GeneratePage:
-    handleGenerate() 时把 csvPath / pptxPaths / slidePages / model 存入 lastGenContext
+    handleGenerate() 时把 csvPath / pptxPaths（现在存 PNG 路径列表，非 PPTX）/ slidePages（空数组，页码已在导出阶段消费）/ model 存入 lastGenContext
     handleUploadToDrive() 上传 xlsx 拿到 drive_id + web_url 后，调
-      write_generate_manifest({ drive_id, web_url, source_csv_path, pptx_paths, slide_pages, model, skill_version })
+      write_generate_manifest({ drive_id, web_url, source_csv_path, pptx_paths（PNG 路径）, slide_pages（空）, model, skill_version })
         → ~/.tester-app/manifests/{drive_id}.json
 
 反馈链路（ComparePage 报告生成后）
