@@ -309,19 +309,20 @@ async function handleGenerate() {
       pushLog("[1/3] No Sheet selected — generating from requirements only", "info");
     }
 
-    const pptxPaths: string[] = [];
+    const imgPaths: string[] = [];
     for (let i = 0; i < props.slidesSelection.length; i++) {
       if (cancelRequested.value) throw new Error("__cancelled__");
       const slide = props.slidesSelection[i];
-      progress.value = `Exporting PPTX ${i + 1}/${props.slidesSelection.length}...`;
-      pushLog(`[2/3] Exporting "${slide.name}" as PDF`, "info");
+      progress.value = `Exporting slides ${i + 1}/${props.slidesSelection.length}...`;
+      pushLog(`[2/3] Exporting "${slide.name}" pages ${slide.pages.join(",")} as images`, "info");
 
-      const pptxPath = await invoke<string>("export_slides_pdf", {
+      const paths = await invoke<string[]>("export_slides_pdf", {
         presentationId: slide.id,
         name: slide.name,
+        pages: slide.pages,
       });
-      pptxPaths.push(pptxPath);
-      pushLog(`  -> ${pptxPath}`);
+      imgPaths.push(...paths);
+      paths.forEach((p) => pushLog(`  -> ${p}`));
     }
 
     if (cancelRequested.value) throw new Error("__cancelled__");
@@ -329,17 +330,12 @@ async function handleGenerate() {
     progress.value = "Generating test cases with Claude...";
     pushLog("[3/3] Launching Claude CLI with /test-case-generator skill", "info");
     if (csvPath) pushLog(`  CSV: ${csvPath}`);
-    pushLog(`  PPTX: ${pptxPaths.join(", ")}`);
-
-    const pageSelections = props.slidesSelection.map((s) => ({
-      name: s.name,
-      pages: s.pages,
-    }));
+    pushLog(`  Images: ${imgPaths.length} page(s)`);
 
     lastGenContext.value = {
       csvPath,
-      pptxPaths,
-      slidePages: pageSelections,
+      pptxPaths: imgPaths,
+      slidePages: [],
       model: selectedModel.value,
     };
 
@@ -348,8 +344,7 @@ async function handleGenerate() {
 
     await invoke("run_claude_task", {
       csvPath,
-      pptxPaths,
-      pageSelections,
+      pptxPaths: imgPaths,
       model: selectedModel.value,
       extraInfo: extra || null,
     });

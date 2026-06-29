@@ -488,17 +488,11 @@ async fn run_claude_and_stream(
     }
 }
 
-#[derive(Deserialize)]
-pub struct PageSelection {
-    pub name: String,
-    pub pages: Vec<usize>,
-}
 
 #[tauri::command]
 pub async fn run_claude_task(
     csv_path: Option<String>,
     pptx_paths: Vec<String>,
-    page_selections: Vec<PageSelection>,
     model: Option<String>,
     extra_info: Option<String>,
     app: AppHandle,
@@ -544,11 +538,7 @@ pub async fn run_claude_task(
         prompt.push_str("No existing CSV — treat as brand-new requirements.\n");
     }
     for p in &pptx_paths {
-        prompt.push_str(&format!("PPTX (new requirements): {}\n", p));
-    }
-    for sel in &page_selections {
-        let pages_str: Vec<String> = sel.pages.iter().map(|p| p.to_string()).collect();
-        prompt.push_str(&format!("{}: pages {}\n", sel.name, pages_str.join(", ")));
+        prompt.push_str(&format!("Image (new requirements): {}\n", p));
     }
     if let Some(extra) = extra_info.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         prompt.push_str("\nAdditional info from user:\n");

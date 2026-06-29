@@ -317,8 +317,9 @@ pub async fn export_slides_pptx(
 pub async fn export_slides_pdf(
     presentation_id: String,
     name: String,
+    pages: Vec<usize>,
     state: State<'_, AuthState>,
-) -> Result<String, String> {
+) -> Result<Vec<String>, String> {
     let token = get_token(&state).await?;
 
     let url = format!(
@@ -344,15 +345,56 @@ pub async fn export_slides_pdf(
         .await
         .map_err(|e| format!("Download failed: {}", err_chain(&e)))?;
 
-    let dir = data_dir().join("exports");
-    std::fs::create_dir_all(&dir).ok();
+    let exports_dir = data_dir().join("exports");
+    std::fs::create_dir_all(&exports_dir).ok();
     let safe_name = name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-    let filename = format!("{}.pdf", safe_name);
-    let path = dir.join(&filename);
-    std::fs::write(&path, &bytes)
+    let pdf_path = exports_dir.join(format!("{}.pdf", safe_name));
+    std::fs::write(&pdf_path, &bytes)
         .map_err(|e| format!("Write PDF failed: {}", err_chain(&e)))?;
 
-    Ok(path.to_string_lossy().to_string())
+    // 用 extract_prd.py 把选定页导出为 PNG
+    let slides_arg = if pages.is_empty() {
+        None
+    } else {
+        Some(pages.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","))
+    };
+
+    let script = dirs::home_dir()
+        .ok_or("Cannot find home dir")?
+        .join(".claude/skills/test-case-generator/scripts/extract_prd.py");
+
+    let img_dir = exports_dir.join(format!("{}_images", safe_name));
+    if img_dir.exists() {
+        std::fs::remove_dir_all(&img_dir).ok();
+    }
+    std::fs::create_dir_all(&img_dir).ok();
+
+    let mut cmd = std::process::Command::new("python3");
+    cmd.arg(&script)
+        .arg("--input")
+        .arg(&pdf_path)
+        .arg("--outdir")
+        .arg(&img_dir);
+    if let Some(ref slides) = slides_arg {
+        cmd.arg("--slides").arg(slides);
+    }
+
+    let output = cmd.output().map_err(|e| format!("extract_prd.py failed: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("extract_prd.py error: {}", stderr));
+    }
+
+    // 收集导出的 PNG，按文件名排序
+    let mut img_paths: Vec<String> = std::fs::read_dir(&img_dir)
+        .map_err(|e| format!("Read img dir failed: {}", e))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map(|x| x == "png").unwrap_or(false))
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect();
+    img_paths.sort();
+
+    Ok(img_paths)
 }
 
 #[derive(Serialize)]
