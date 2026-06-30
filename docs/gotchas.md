@@ -89,3 +89,11 @@ Tauri 的 webview（WKWebView / WebView2）对同步对话框 `window.confirm()`
 踩坑现象：知识库明明配了 `filemanager.feedback@gmail.com`，但 AI 回复里填成了 `xxtester2026@gmail.com`（**用户自己的账号邮箱**）。
 根因两层：①知识块读空（上面的 product 错配）→ 模型没邮箱可用；②子进程 `claude --print` 继承了 Claude Code 账号上下文（`~/.claude/CLAUDE.md` + userEmail 注入），模型就抓了账号邮箱顶上。
 修复①即可——知识块正确注入后模型用知识库里的邮箱。但要记住子进程会带账号身份信息，prompt 里凡是"不确定就别编"的字段（邮箱/版本号等）都得靠知识块显式喂。
+
+## 多账号：迁移用 email-key、登录用 sub-key 会撞同一账号 → 必须启动去重
+
+多账号存储 key 用 Google `sub`（OpenID 唯一 ID），但**首启迁移旧单账号时拿不到 sub**（旧 `auth-user.json` 没存 sub，迁移是同步逻辑不便调 userinfo API），只能回退 email 当 key。
+于是同一个 Google 账号可能在 `accounts/` 下有两份：`accounts/<sub>/`（正常登录）+ `accounts/<email>/`（迁移残留），下拉里显示**重复账号**。
+`start_login` 的按-email 去重只在「运行中重新登录该账号」时触发，迁移残留若用户从不重登就永久共存。
+修复：`AuthState::new()` 在 `load_accounts_from_disk` 后调 `dedup_accounts()`——同 email 优先保留带 sub 的、删掉无 sub 的 email-key 残留，并把指向被删 key 的 `active` 重映射到 sub-key 后落盘。这样迁移撞车启动即自愈。
+教训：两套 key 来源（迁移 vs 登录）天然不统一，**任何"按内容算 key"的存储都要在加载层做一次按业务唯一键的去重**，不能只在写入路径去重。

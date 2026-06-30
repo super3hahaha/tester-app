@@ -94,8 +94,12 @@ tester-app/
 
 ```
 ~/.tester-app/
-├── auth-tokens.json             # OAuth access_token / refresh_token / 过期时间
-├── auth-user.json               # 用户信息（email、name、picture）
+├── accounts/                    # 多账号：每个已登录 Google 账号一个子目录（auth.rs）
+│   └── <account-key>/           # key=Google sub（OpenID 唯一 ID）优先，迁移的旧账号回退 email
+│       ├── auth-tokens.json     # 该账号 OAuth access_token / refresh_token / 过期时间
+│       └── auth-user.json       # 该账号用户信息（sub、email、name、picture）
+├── active-account.json          # 当前活跃账号指针：{ "active": "<account-key>" }
+│                                # 旧版单账号的 ~/.tester-app/auth-tokens.json+auth-user.json 首启时自动迁入 accounts/ 并删除
 ├── telegram.json                # （可选）反馈上传配置：{ bot_token, chat_id }；compile-time env var 未设时的运行时兜底
 ├── model-config.json            # 模型配置：reply/analysis/translate 模型 ID + github_token + cli_engine/codex_model（model_config.rs）
 ├── prompt-config.json           # 提示词模板：gen/analysis/mail/kb_distill 四个完整 prompt 模板（含占位符），Prompt 配置页编辑（prompt_config.rs）
@@ -157,7 +161,7 @@ tester-app/
 
 | 模块 | 文件 | 职责 |
 |---|---|---|
-| 认证 | `auth.rs` | Google OAuth 2.0 PKCE 流程：本地 TCP 回调服务器、令牌交换、自动刷新、持久化至文件 |
+| 认证 | `auth.rs` | Google OAuth 2.0 PKCE 流程：本地 TCP 回调服务器、令牌交换、自动刷新。**多账号**：`AuthState` 持 `accounts: HashMap<key, Account>` + `active` 指针（key=Google `sub` 优先、回退 email）；各账号独立存盘于 `accounts/<key>/`，`active-account.json` 记指针。命令：`check_auth`（返回 active 用户）/ `start_login`（追加账号并设 active，按 email 去重旧条目）/ `logout(account_id?)`（登出指定/当前账号，返回新 active 用户）/ `list_accounts`（列全部账号带 active 标记）/ `switch_account(account_id)`（仅换内存指针+落盘，不重走 OAuth）。`get_valid_access_token` 取 active 账号 token，签名不变 → 业务模块无感。首启自动迁移旧单账号明文文件 |
 | Google API | `sheets.rs` | Drive 文件列表、Sheets 读取与 CSV 导出、xlsx 上传（路径或字节、自动转 Google 表格、归入 `tester-app` 文件夹）、Slides 幻灯片获取与 PDF 导出（`export_slides_pdf(presentationId, name, pages)` 接收页码列表，下载整份 PDF 后调用 `extract_prd.py` 提取选定页为 PNG，返回 `Vec<String>` PNG 路径列表）、缩略图异步缓存 |
 | Claude 集成 | `claude.rs` | 定位 Claude CLI 路径、子进程管理、stream-json 输出解析、会话 ID 续接、实时事件推送 |
 | 对比流程 | `compare.rs` | 单 Tab Sheet 导出 HTML（`docs.google.com/.../export?format=html&gid=`）、内嵌脚本写盘后直接执行 `python diff_testcases.py`、在 Chrome 打开报告（`compare-log` 事件流，独立于 `claude-log`） |

@@ -38,6 +38,8 @@ pub fn run() {
             auth::check_auth,
             auth::start_login,
             auth::logout,
+            auth::list_accounts,
+            auth::switch_account,
             sheets::list_drive_files,
             sheets::get_sheet_tabs,
             sheets::read_sheet,

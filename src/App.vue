@@ -37,7 +37,12 @@ onMounted(async () => {
 
 <template>
   <div v-if="checking" class="loading">Loading...</div>
-  <MainPage v-else-if="user" :user="user" @logout="user = null" />
+  <MainPage
+    v-else-if="user"
+    :user="user"
+    @logout="user = null"
+    @update-user="(u: UserInfo) => (user = u)"
+  />
   <LoginPage v-else @login="(u: UserInfo) => (user = u)" />
 </template>
 

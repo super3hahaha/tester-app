@@ -23,7 +23,24 @@ interface UserInfo {
 }
 
 defineProps<{ user: UserInfo }>();
-const emit = defineEmits<{ (e: "logout"): void }>();
+const emit = defineEmits<{
+  (e: "logout"): void;
+  (e: "update-user", user: UserInfo): void;
+}>();
+
+interface AccountInfo {
+  id: string;
+  email: string;
+  name: string;
+  picture?: string;
+  active: boolean;
+}
+
+// 多账号：列表 + 下拉开关 + 切换计数（账号世界页面靠它强制重挂以清内存）
+const accounts = ref<AccountInfo[]>([]);
+const menuOpen = ref(false);
+const accountEpoch = ref(0);
+const switching = ref(false);
 
 interface SheetSelection {
   spreadsheetId: string;
@@ -124,9 +141,78 @@ const activeOption = ref("review-play");
 const sheetSelection = ref<SheetSelection | null>(null);
 const slidesSelection = ref<SlidesSelection[]>([]);
 
-async function handleLogout() {
-  await invoke("logout");
-  emit("logout");
+async function loadAccounts() {
+  try {
+    accounts.value = await invoke<AccountInfo[]>("list_accounts");
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function toggleAccountMenu() {
+  menuOpen.value = !menuOpen.value;
+  if (menuOpen.value) await loadAccounts();
+}
+
+// 切账号后：回首页 + 清「账号世界」内存（4 页重挂 + 清 sheet/slides 选择）。
+// 全局页（知识库/模板/Settings/Config 等）不受影响。
+function applyAccountChange() {
+  activeWorkspace.value = "review";
+  activeOption.value = "review-play";
+  sheetSelection.value = null;
+  slidesSelection.value = [];
+  accountEpoch.value++;
+}
+
+async function switchAccount(id: string) {
+  menuOpen.value = false;
+  if (switching.value) return;
+  if (accounts.value.find((a) => a.id === id)?.active) return;
+  switching.value = true;
+  try {
+    const u = await invoke<UserInfo>("switch_account", { accountId: id });
+    emit("update-user", u);
+    applyAccountChange();
+  } catch (e) {
+    console.error(e);
+  } finally {
+    switching.value = false;
+  }
+}
+
+async function addAccount() {
+  menuOpen.value = false;
+  if (switching.value) return;
+  switching.value = true;
+  try {
+    // 复用登录流程：成功后新账号自动成为 active
+    const u = await invoke<UserInfo>("start_login");
+    emit("update-user", u);
+    applyAccountChange();
+    await loadAccounts();
+  } catch (e) {
+    console.error(e);
+  } finally {
+    switching.value = false;
+  }
+}
+
+async function logoutAccount(id: string) {
+  const wasActive = accounts.value.find((a) => a.id === id)?.active ?? false;
+  try {
+    const next = await invoke<UserInfo | null>("logout", { accountId: id });
+    if (!next) {
+      emit("logout"); // 没有账号了，回登录页
+      return;
+    }
+    if (wasActive) {
+      emit("update-user", next);
+      applyAccountChange();
+    }
+    await loadAccounts();
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 async function selectWorkspace(ws: NavItem) {
@@ -187,14 +273,52 @@ function onSlidesSelect(files: SlidesSelection[]) {
     <header class="topbar">
       <span class="app-title">Tester App</span>
       <div class="user-section">
-        <img
-          v-if="user.picture"
-          :src="user.picture"
-          class="avatar"
-          referrerpolicy="no-referrer"
-        />
-        <span class="user-email">{{ user.email }}</span>
-        <button class="logout-btn" @click="handleLogout">Logout</button>
+        <button class="account-trigger" @click="toggleAccountMenu">
+          <img
+            v-if="user.picture"
+            :src="user.picture"
+            class="avatar"
+            referrerpolicy="no-referrer"
+          />
+          <span class="user-email">{{ user.email }}</span>
+          <svg class="chevron" :class="{ open: menuOpen }" width="12" height="12" viewBox="0 0 16 16" fill="none">
+            <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <div v-if="menuOpen" class="account-overlay" @click="menuOpen = false"></div>
+        <div v-if="menuOpen" class="account-menu">
+          <div
+            v-for="a in accounts"
+            :key="a.id"
+            class="account-item"
+            :class="{ active: a.active }"
+            @click="switchAccount(a.id)"
+          >
+            <img
+              v-if="a.picture"
+              :src="a.picture"
+              class="avatar-sm"
+              referrerpolicy="no-referrer"
+            />
+            <div v-else class="avatar-sm avatar-fallback">{{ (a.name || a.email).charAt(0).toUpperCase() }}</div>
+            <div class="account-meta">
+              <span class="account-name">{{ a.name || a.email }}</span>
+              <span class="account-email">{{ a.email }}</span>
+            </div>
+            <span v-if="a.active" class="account-check" title="当前账号">✓</span>
+            <button
+              class="account-logout"
+              title="登出此账号"
+              @click.stop="logoutAccount(a.id)"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M6 2H3.5C2.7 2 2 2.7 2 3.5v9c0 .8.7 1.5 1.5 1.5H6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M10 11l3-3-3-3M13 8H6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+          <div class="account-add" @click="addAccount">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <span>添加账号</span>
+          </div>
+        </div>
       </div>
     </header>
     <div class="body">
@@ -273,11 +397,13 @@ function onSlidesSelect(files: SlidesSelection[]) {
       <!-- Content -->
       <div class="page-content">
         <SheetsPage
+          :key="`acct-sheets-${accountEpoch}`"
           v-show="activeOption === 'sheets'"
           @select="onSheetSelect"
           @clear="onSheetClear"
         />
         <SlidesPage
+          :key="`acct-slides-${accountEpoch}`"
           v-show="activeOption === 'slides'"
           @select="onSlidesSelect"
         />
@@ -291,6 +417,7 @@ function onSlidesSelect(files: SlidesSelection[]) {
           v-show="activeOption === 'compare'"
         />
         <ReviewPage
+          :key="`acct-review-${accountEpoch}`"
           v-show="activeOption === 'review-play'"
         />
         <ConfigPage
@@ -309,6 +436,7 @@ function onSlidesSelect(files: SlidesSelection[]) {
           :active-option="activeOption"
         />
         <GmailPage
+          :key="`acct-gmail-${accountEpoch}`"
           v-show="activeOption === 'gmail-inbox'"
         />
         <AppScriptPage
@@ -356,9 +484,9 @@ function onSlidesSelect(files: SlidesSelection[]) {
   font-size: 16px;
 }
 .user-section {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
 }
 .avatar {
   width: 28px;
@@ -369,17 +497,130 @@ function onSlidesSelect(files: SlidesSelection[]) {
   font-size: 13px;
   color: #666;
 }
-.logout-btn {
-  padding: 5px 12px;
-  font-size: 12px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  background: white;
+.account-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
   cursor: pointer;
-  color: #666;
 }
-.logout-btn:hover {
+.account-trigger:hover {
   background: #f5f5f5;
+  border-color: #e5e5e5;
+}
+.chevron {
+  color: #999;
+  transition: transform 0.15s;
+}
+.chevron.open {
+  transform: rotate(180deg);
+}
+.account-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.account-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  min-width: 260px;
+  background: white;
+  border: 1px solid #e5e5e5;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
+  padding: 6px;
+}
+.account-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.account-item:hover {
+  background: #f5f6f8;
+}
+.account-item.active {
+  background: #eef3ff;
+}
+.avatar-sm {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.avatar-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #6b7cff;
+  color: white;
+  font-size: 13px;
+  font-weight: 600;
+}
+.account-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.account-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: #222;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.account-email {
+  font-size: 11px;
+  color: #999;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.account-check {
+  color: #3b6fff;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.account-logout {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #aaa;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.account-logout:hover {
+  background: #ffecec;
+  color: #e5484d;
+}
+.account-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  margin-top: 4px;
+  border-top: 1px solid #f0f0f0;
+  color: #3b6fff;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 8px;
+}
+.account-add:hover {
+  background: #f5f6f8;
 }
 .body {
   flex: 1;
