@@ -4,7 +4,9 @@ import { marked } from "marked";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getVersion } from "@tauri-apps/api/app";
 
+const appVersion = ref("");
 const cacheSize = ref("");
 const loading = ref(false);
 const clearing = ref(false);
@@ -155,6 +157,7 @@ onMounted(() => {
   refreshClaude();
   refreshSkillStatuses();
   loadModelConfig();
+  getVersion().then((v) => (appVersion.value = v)).catch(() => {});
 });
 
 async function loadModelConfig() {
@@ -509,7 +512,7 @@ async function copyText(text: string) {
       <div class="version-row">
         <div class="version-left">
           <span class="version-label">当前版本</span>
-          <span class="version-value">v1.0.2</span>
+          <span class="version-value">v{{ appVersion }}</span>
         </div>
         <div class="version-right">
           <!-- idle / latest -->
