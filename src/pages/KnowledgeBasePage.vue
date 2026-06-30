@@ -499,8 +499,12 @@ async function deleteCurrentProduct() {
         </template>
         <template v-else>
           <h3 class="product-title">{{ currentProduct?.name || viewId }}</h3>
-          <button class="icon-btn" title="重命名产品" @click="startRenameProduct">✏️</button>
-          <button class="icon-btn danger" title="删除产品" @click="deleteCurrentProduct">🗑</button>
+          <button class="icon-btn" title="重命名产品" @click="startRenameProduct">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
+          <button class="icon-btn danger" title="删除产品" @click="deleteCurrentProduct">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+          </button>
         </template>
       </div>
     </div>
@@ -534,9 +538,15 @@ async function deleteCurrentProduct() {
         <template v-else>
           <span class="tab-name">{{ doc.name }}</span>
           <span class="tab-actions" @click.stop>
-            <button class="tab-btn" title="重命名" @click="startRenameDoc(doc)">✏</button>
-            <button class="tab-btn" title="管理关联" @click="openAssocModal(doc)">🔗</button>
-            <button class="tab-btn danger" title="删除" @click="deleteDoc(doc)">✕</button>
+            <button class="tab-btn" title="重命名" @click="startRenameDoc(doc)">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            </button>
+            <button class="tab-btn" title="管理关联" @click="openAssocModal(doc)">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+            </button>
+            <button class="tab-btn danger" title="删除" @click="deleteDoc(doc)">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
           </span>
         </template>
       </div>
@@ -573,7 +583,7 @@ async function deleteCurrentProduct() {
       <div class="editor-actions">
         <button class="btn-ghost" @click="insertSkeleton('general')">插入通用骨架</button>
         <button class="btn-ghost" @click="insertSkeleton('product')">插入产品骨架</button>
-        <button class="btn-ghost" @click="openDistillModal">🤖 AI 起草/合并</button>
+        <button class="btn-ghost" @click="openDistillModal">AI 起草/合并</button>
         <div class="spacer"></div>
         <span v-if="dirty" class="dirty-hint">● 未保存</span>
         <button class="btn-primary" :disabled="saving || !dirty" @click="save">
