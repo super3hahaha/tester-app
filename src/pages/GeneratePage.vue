@@ -177,8 +177,6 @@ const showIdle = computed(
   () => generating.value && idleActive.value && idleSeconds.value >= IDLE_THRESHOLD
 );
 
-let unlisten: UnlistenFn | null = null;
-
 onMounted(async () => {
   _claudeLogUnlisten?.();
   _claudeLogUnlisten = await listen<{ text: string; kind: string; tool?: string; duration_ms?: number; done: boolean }>(
@@ -204,7 +202,6 @@ onMounted(async () => {
       });
     }
   );
-  unlisten = _claudeLogUnlisten;
 
   checkSession();
 });

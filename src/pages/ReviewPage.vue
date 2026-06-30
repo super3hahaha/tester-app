@@ -806,7 +806,7 @@ async function handleSubmitReply(task: AiTask) {
     task.review.developer_reply = text;
     task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
     persistReplyToSnapshot(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
-    replyState.value = "ALL"; // 切为「全部」让回复后的卡片可见
+    replyState.value = "ANY"; // 切为「全部」让回复后的卡片可见
     aiTasks.value = aiTasks.value.filter((t) => t.id !== task.id);
     if (activeTaskId.value === task.id) activeTaskId.value = null;
   } catch (e: any) {
@@ -952,7 +952,7 @@ async function submitTplReply() {
     r.developer_reply = text;
     r.developer_reply_ts = Math.floor(Date.now() / 1000);
     persistReplyToSnapshot(r._pkg, r.review_id, text, r.developer_reply_ts);
-    replyState.value = "ALL"; // 切为「全部」让回复后的卡片可见
+    replyState.value = "ANY"; // 切为「全部」让回复后的卡片可见
     tplDlgReview.value = null;
   } catch (e: any) {
     tplError.value = String(e);
@@ -1146,7 +1146,7 @@ async function submitAnReply(task: AnTask) {
     task.review.developer_reply = text;
     task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
     persistReplyToSnapshot(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
-    replyState.value = "ALL"; // 切为「全部」让回复后的卡片可见
+    replyState.value = "ANY"; // 切为「全部」让回复后的卡片可见
     anTasks.value = anTasks.value.filter((t) => t.id !== task.id);
     if (activeAnId.value === task.id) activeAnId.value = null;
   } catch (e: any) {
