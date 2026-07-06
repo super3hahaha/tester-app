@@ -71,6 +71,7 @@ const readIds = ref<string[]>([]); // 已读隐藏的 messageId（全局）
 const rawCount = ref(0); // 当前表过滤前的邮件数（算「已隐藏」用）
 const loading = ref(false);
 const errorMsg = ref("");
+const permissionDenied = ref(false); // 当前账号无权读这张表（多为切账号后读旧表）
 const fetchedAt = ref<number | null>(null);
 const sheetUrl = ref("");
 
@@ -266,6 +267,7 @@ async function loadMails() {
   if (!selectedId.value) return;
   loading.value = true;
   errorMsg.value = "";
+  permissionDenied.value = false;
   mails.value = [];
   try {
     // 优先读 Mail tab；万一表里 tab 名不同，退回第一个 tab
@@ -314,7 +316,13 @@ async function loadMails() {
     mails.value = all.filter((m) => !readSet.has(m.messageId));
     fetchedAt.value = Date.now();
   } catch (e: any) {
-    errorMsg.value = String(e);
+    const msg = String(e);
+    // 切账号后读旧表最常见：当前登录账号对这张表没权限 → 给友好空状态，不甩原始 JSON
+    if (/\b403\b|PERMISSION_DENIED/i.test(msg)) {
+      permissionDenied.value = true;
+    } else {
+      errorMsg.value = msg;
+    }
   } finally {
     loading.value = false;
   }
@@ -693,7 +701,7 @@ async function copyAndJumpAi(task: AiMailTask) {
 
     <div v-if="errorMsg" class="banner banner-error">{{ errorMsg }}</div>
 
-    <div v-if="fetchedAt && !loading" class="summary-row">
+    <div v-if="fetchedAt && !loading && !permissionDenied" class="summary-row">
       <span class="summary-text">
         {{ currentLabel }} · 显示 {{ mails.length }} 封<span v-if="hiddenCount > 0"> · 已隐藏 {{ hiddenCount }}</span>
       </span>
@@ -701,6 +709,11 @@ async function copyAndJumpAi(task: AiMailTask) {
     </div>
 
     <div v-if="loading" class="empty-state">读取中…</div>
+
+    <div v-else-if="permissionDenied" class="empty-state">
+      当前登录的 Google 账号无权读取这张表。<br />
+      它可能属于另一个账号——请在设置里切换到有权限的账号，或用对应账号重新添加这张邮件表。
+    </div>
 
     <div v-else-if="mails.length > 0" class="mail-list">
       <article v-for="m in mails" :key="m.messageId || m.link" class="mail-item">
