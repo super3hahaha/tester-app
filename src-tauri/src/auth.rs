@@ -42,6 +42,12 @@ pub struct UserInfo {
     pub email: String,
     pub name: String,
     pub picture: Option<String>,
+    /// 账号稳定唯一标识（= account_key，sub 优先回退 email）。前端把它当 opaque id，
+    /// 用作「按账号隔离本地存储」的维度；由后端在 account 进入 AuthState 时统一填充
+    /// （load/登录处），前端不自行推算，换 provider 只改后端 account_key 一处。
+    /// 落盘会带此字段但无害：读回时 account_key 重算、id 重填。
+    #[serde(default)]
+    pub id: String,
 }
 
 /// 暴露给前端的账号条目（含稳定 id 与 active 标记）。
@@ -218,8 +224,10 @@ fn load_accounts_from_disk() -> HashMap<String, Account> {
         let user = std::fs::read_to_string(p.join("auth-user.json"))
             .ok()
             .and_then(|s| serde_json::from_str::<UserInfo>(&s).ok());
-        if let (Some(tokens), Some(user)) = (tokens, user) {
-            map.insert(account_key(&user), Account { tokens, user });
+        if let (Some(tokens), Some(mut user)) = (tokens, user) {
+            let key = account_key(&user);
+            user.id = key.clone(); // 下发给前端的 opaque 隔离维度
+            map.insert(key, Account { tokens, user });
         }
     }
     map
@@ -447,7 +455,7 @@ pub async fn start_login(state: State<'_, AuthState>) -> Result<UserInfo, String
         expires_at: now_ts() + token_resp.expires_in,
     };
 
-    let user_info: UserInfo = client
+    let mut user_info: UserInfo = client
         .get("https://www.googleapis.com/oauth2/v3/userinfo")
         .bearer_auth(&tokens.access_token)
         .send()
@@ -458,6 +466,7 @@ pub async fn start_login(state: State<'_, AuthState>) -> Result<UserInfo, String
         .map_err(|e| format!("Userinfo parse failed: {}", e))?;
 
     let key = account_key(&user_info);
+    user_info.id = key.clone(); // 下发给前端的 opaque 隔离维度
     let account = Account {
         tokens,
         user: user_info.clone(),

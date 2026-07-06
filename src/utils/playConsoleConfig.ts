@@ -5,6 +5,7 @@
 // 与 batchReplyDates 共享日期预设逻辑：存预设、拉取时按当天解析为绝对范围。
 
 import { type DatePreset, toIso, daysAgo } from "./batchReplyDates";
+import { scopedKey } from "./accountScopedKey";
 
 export type ReplyState = "ANY" | "ABSENT" | "REPLIED" | "UPDATED";
 
@@ -78,7 +79,7 @@ export function normalizePlayConfig(raw: any): PlayAppConfig {
 }
 
 export function loadPlayConfig(): PlayMultiConfig | null {
-  const raw = localStorage.getItem(PLAY_STORAGE_KEY);
+  const raw = localStorage.getItem(scopedKey(PLAY_STORAGE_KEY));
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as PlayMultiConfig;

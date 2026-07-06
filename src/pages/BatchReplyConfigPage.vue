@@ -8,6 +8,7 @@ import {
   daysAgo,
   PRESET_LABELS,
 } from "../utils/batchReplyDates";
+import { scopedKey } from "../utils/accountScopedKey";
 
 interface PlayApp {
   package_name: string;
@@ -120,7 +121,7 @@ onMounted(() => {
   }
   savedSnapshot.value = JSON.stringify(perApp.value);
 
-  const cachedApps = localStorage.getItem(APPS_CACHE_KEY);
+  const cachedApps = localStorage.getItem(scopedKey(APPS_CACHE_KEY));
   if (cachedApps) {
     try {
       apps.value = JSON.parse(cachedApps) as PlayApp[];
@@ -145,7 +146,7 @@ async function loadApps() {
   try {
     const list = await invoke<PlayApp[]>("list_play_apps");
     apps.value = list;
-    localStorage.setItem(APPS_CACHE_KEY, JSON.stringify(list));
+    localStorage.setItem(scopedKey(APPS_CACHE_KEY), JSON.stringify(list));
     for (const a of list) {
       if (!perApp.value[a.package_name]) {
         perApp.value[a.package_name] = defaultConfig();

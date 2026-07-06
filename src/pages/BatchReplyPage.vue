@@ -8,6 +8,7 @@ import {
   computeRange,
   PRESET_LABELS,
 } from "../utils/batchReplyDates";
+import { scopedKey } from "../utils/accountScopedKey";
 
 interface PlayApp {
   package_name: string;
@@ -238,7 +239,7 @@ function loadConfig(): { config: MultiConfig | null; appsCache: PlayApp[] } {
     }
   }
   try {
-    const rawApps = localStorage.getItem(APPS_CACHE_KEY);
+    const rawApps = localStorage.getItem(scopedKey(APPS_CACHE_KEY));
     if (rawApps) appsCache = JSON.parse(rawApps) as PlayApp[];
   } catch {
     // ignore

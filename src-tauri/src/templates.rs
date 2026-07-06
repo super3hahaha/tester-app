@@ -93,11 +93,6 @@ fn ns_dir(namespace: &str) -> PathBuf {
     }
 }
 
-/// 模板数据目录（review/GP 用）`~/.tester-app/templates/`（reply.rs 也用它告诉 skill 去哪读）。
-pub fn templates_dir() -> PathBuf {
-    ns_dir("gp")
-}
-
 /// skill_sync 把 review-reply 下载到这里，首次迁移从它拷种子。
 fn skill_data_dir() -> PathBuf {
     dirs::home_dir()
@@ -195,14 +190,6 @@ fn write_templates_and_index_to(dir: &PathBuf, f: &mut TemplatesFile) -> Result<
 
 fn write_templates_and_index_ns(namespace: &str, f: &mut TemplatesFile) -> Result<(), String> {
     write_templates_and_index_to(&ns_dir(namespace), f)
-}
-
-/// 向后兼容（reply.rs 里只用 GP 模板目录）。
-fn read_templates() -> Result<TemplatesFile, String> {
-    read_templates_ns("gp")
-}
-fn write_templates_and_index(f: &mut TemplatesFile) -> Result<(), String> {
-    write_templates_and_index_ns("gp", f)
 }
 
 pub(crate) fn slug(s: &str) -> String {

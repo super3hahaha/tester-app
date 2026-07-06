@@ -18,6 +18,7 @@ import {
   defaultPlayConfig,
   normalizePlayConfig,
 } from "../utils/playConsoleConfig";
+import { scopedKey } from "../utils/accountScopedKey";
 
 interface PlayApp {
   package_name: string;
@@ -40,7 +41,7 @@ const now = ref(new Date());
 let nowTimer: number | undefined;
 
 onMounted(() => {
-  const raw = localStorage.getItem(PLAY_STORAGE_KEY);
+  const raw = localStorage.getItem(scopedKey(PLAY_STORAGE_KEY));
   if (raw) {
     try {
       const cfg = JSON.parse(raw) as PlayMultiConfig;
@@ -57,7 +58,7 @@ onMounted(() => {
   }
   savedSnapshot.value = JSON.stringify(perApp.value);
 
-  const cachedApps = localStorage.getItem(APPS_CACHE_KEY);
+  const cachedApps = localStorage.getItem(scopedKey(APPS_CACHE_KEY));
   if (cachedApps) {
     try {
       apps.value = JSON.parse(cachedApps) as PlayApp[];
@@ -82,7 +83,7 @@ async function loadApps() {
   try {
     const list = await invoke<PlayApp[]>("list_play_apps");
     apps.value = list;
-    localStorage.setItem(APPS_CACHE_KEY, JSON.stringify(list));
+    localStorage.setItem(scopedKey(APPS_CACHE_KEY), JSON.stringify(list));
     for (const a of list) {
       if (!perApp.value[a.package_name]) {
         perApp.value[a.package_name] = defaultPlayConfig();
@@ -144,7 +145,7 @@ function resetAll() {
   }
   if (resetTimer) clearTimeout(resetTimer);
   resetArmed.value = false;
-  localStorage.removeItem(PLAY_STORAGE_KEY);
+  localStorage.removeItem(scopedKey(PLAY_STORAGE_KEY));
   const fresh: Record<string, PlayAppConfig> = {};
   for (const a of apps.value) fresh[a.package_name] = defaultPlayConfig();
   perApp.value = fresh;
@@ -186,7 +187,7 @@ function handleSave() {
     }
     perApp.value = pruned;
     const payload: PlayMultiConfig = { perApp: perApp.value };
-    localStorage.setItem(PLAY_STORAGE_KEY, JSON.stringify(payload));
+    localStorage.setItem(scopedKey(PLAY_STORAGE_KEY), JSON.stringify(payload));
     savedSnapshot.value = JSON.stringify(perApp.value);
     saveFlash.value = "saved";
     setTimeout(() => {

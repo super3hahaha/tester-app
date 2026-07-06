@@ -6,6 +6,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { lastWorkdayBefore, toIso, computeRange } from "../utils/batchReplyDates";
 import { loadPlayConfig } from "../utils/playConsoleConfig";
 import { loadFavIds } from "../utils/templateFavorites";
+import { scopedKey } from "../utils/accountScopedKey";
+import { getActiveAccountId } from "../utils/activeAccount";
 
 interface PlayApp {
   package_name: string;
@@ -110,7 +112,7 @@ function onVisibilityChange() {
 
 onMounted(async () => {
   document.addEventListener("visibilitychange", onVisibilityChange);
-  const raw = localStorage.getItem(STORAGE_KEY);
+  const raw = localStorage.getItem(scopedKey(STORAGE_KEY));
   if (raw) {
     try {
       const cfg = JSON.parse(raw) as PersistedConfig;
@@ -135,7 +137,7 @@ watch(packageName, async (pkg, old) => {
   if (booting || pkg === old) return;
   mode.value = "single";
   batchSummary.value = "";
-  localStorage.setItem(LAST_VIEW_KEY, "single");
+  localStorage.setItem(scopedKey(LAST_VIEW_KEY), "single");
   const snap = await loadSnapshot(pkg.trim());
   reviews.value = snap?.reviews ?? [];
   fetchedAt.value = snap?.fetchedAt ?? null;
@@ -147,10 +149,16 @@ interface Snapshot {
   fetchedAt: number | null;
 }
 
+// 快照按账号隔离：给后端的 key 加账号前缀。reviews.rs 不认识账号，隔离靠这里拼 key 完成
+// （snapshot_path 会 sanitize，同账号每次前缀一致 → 稳定命中同一文件）。
+function snapKey(pkg: string): string {
+  return `${getActiveAccountId() || "_none"}__${pkg}`;
+}
+
 async function saveSnapshot(key: string, list: TaggedReview[], at: number | null) {
   try {
     await invoke("save_reviews_snapshot", {
-      key,
+      key: snapKey(key),
       data: { version: SNAP_VERSION, reviews: list, fetchedAt: at },
     });
   } catch (e) {
@@ -162,7 +170,7 @@ async function saveSnapshot(key: string, list: TaggedReview[], at: number | null
 async function loadSnapshot(key: string): Promise<Snapshot | null> {
   if (!key) return null;
   try {
-    const data = await invoke<any>("load_reviews_snapshot", { key });
+    const data = await invoke<any>("load_reviews_snapshot", { key: snapKey(key) });
     if (!data || !Array.isArray(data.reviews)) return null;
     return { reviews: data.reviews as TaggedReview[], fetchedAt: data.fetchedAt ?? null };
   } catch (e) {
@@ -230,7 +238,7 @@ async function restoreBatch(): Promise<boolean> {
 
 // 进页面恢复上次视图：batch → 拼装；否则恢复当前 app 的单视图快照。
 async function restoreLastView() {
-  if (localStorage.getItem(LAST_VIEW_KEY) === "batch") {
+  if (localStorage.getItem(scopedKey(LAST_VIEW_KEY)) === "batch") {
     if (await restoreBatch()) return;
   }
   const snap = await loadSnapshot(packageName.value.trim());
@@ -250,7 +258,7 @@ watch([packageName, developerId, appId, stars, replyState, apps], () => {
     replyState: replyState.value,
     apps: apps.value,
   };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+  localStorage.setItem(scopedKey(STORAGE_KEY), JSON.stringify(cfg));
 }, { deep: true });
 
 async function loadApps() {
@@ -316,7 +324,7 @@ async function handleFetch() {
     mode.value = "single";
     batchSummary.value = "";
     fetchedAt.value = Date.now();
-    localStorage.setItem(LAST_VIEW_KEY, "single");
+    localStorage.setItem(scopedKey(LAST_VIEW_KEY), "single");
     saveSnapshot(pkg, reviews.value, fetchedAt.value);
   } catch (e: any) {
     const msg = String(e);
@@ -409,7 +417,7 @@ async function handleBatchFetch() {
   batchSummary.value = `批量拉取 ${enabled.length} 个应用 · 拉到 ${matchedTotal} 条` +
     (failed > 0 ? `（${failed} 个失败）` : "") + ` · ${parts.join("、")}`;
   fetchedAt.value = Date.now();
-  localStorage.setItem(LAST_VIEW_KEY, "batch");
+  localStorage.setItem(scopedKey(LAST_VIEW_KEY), "batch");
   batchLoading.value = false;
 }
 
@@ -806,7 +814,6 @@ async function handleSubmitReply(task: AiTask) {
     task.review.developer_reply = text;
     task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
     persistReplyToSnapshot(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
-    replyState.value = "ANY"; // 切为「全部」让回复后的卡片可见
     aiTasks.value = aiTasks.value.filter((t) => t.id !== task.id);
     if (activeTaskId.value === task.id) activeTaskId.value = null;
   } catch (e: any) {
@@ -952,7 +959,6 @@ async function submitTplReply() {
     r.developer_reply = text;
     r.developer_reply_ts = Math.floor(Date.now() / 1000);
     persistReplyToSnapshot(r._pkg, r.review_id, text, r.developer_reply_ts);
-    replyState.value = "ANY"; // 切为「全部」让回复后的卡片可见
     tplDlgReview.value = null;
   } catch (e: any) {
     tplError.value = String(e);
@@ -1146,7 +1152,6 @@ async function submitAnReply(task: AnTask) {
     task.review.developer_reply = text;
     task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
     persistReplyToSnapshot(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
-    replyState.value = "ANY"; // 切为「全部」让回复后的卡片可见
     anTasks.value = anTasks.value.filter((t) => t.id !== task.id);
     if (activeAnId.value === task.id) activeAnId.value = null;
   } catch (e: any) {

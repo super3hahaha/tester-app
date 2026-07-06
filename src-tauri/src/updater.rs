@@ -135,7 +135,7 @@ pub async fn download_update(app: AppHandle, url: String, asset_name: String) ->
     let mut file = std::fs::File::create(&save_path)
         .map_err(|e| format!("创建临时文件失败: {e}"))?;
 
-    let mut stream = resp;
+    let stream = resp;
     use futures_util::StreamExt;
     let mut byte_stream = stream.bytes_stream();
 

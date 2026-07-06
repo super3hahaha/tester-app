@@ -421,6 +421,7 @@ function onSlidesSelect(files: SlidesSelection[]) {
           v-show="activeOption === 'review-play'"
         />
         <ConfigPage
+          :key="`acct-config-${accountEpoch}`"
           v-show="activeOption === 'review-config'"
         />
         <BatchReplyPage
