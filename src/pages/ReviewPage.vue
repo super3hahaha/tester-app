@@ -42,6 +42,7 @@ interface PersistedConfig {
   packageName: string;
   developerId: string;
   appId: string;
+  appIdByPkg?: Record<string, string>;
   stars: number[];
   replyState: ReplyState;
   apps: PlayApp[];
@@ -62,6 +63,11 @@ const manualPackage = ref(false);
 const packageName = ref("files.fileexplorer.filemanager");
 const developerId = ref("7240883491244732024");
 const appId = ref("4973223441657725559");
+// Console 的数字 App ID 每个应用不同（developerId 则是同一账号下共用），按包名单独记忆，
+// 深链跳转时才能不看当前下拉框选中哪个 app，直接按评论自己所属的 app 拼对链接。
+const appIdByPkg = ref<Record<string, string>>({
+  "files.fileexplorer.filemanager": "4973223441657725559",
+});
 
 const stars = ref<number[]>([1, 2, 3, 4]);
 const replyState = ref<ReplyState>("ABSENT");
@@ -119,12 +125,19 @@ onMounted(async () => {
       if (cfg.packageName) packageName.value = cfg.packageName;
       if (cfg.developerId) developerId.value = cfg.developerId;
       if (cfg.appId) appId.value = cfg.appId;
+      if (cfg.appIdByPkg && typeof cfg.appIdByPkg === "object") {
+        appIdByPkg.value = { ...appIdByPkg.value, ...cfg.appIdByPkg };
+      }
       if (Array.isArray(cfg.stars) && cfg.stars.length > 0) stars.value = cfg.stars;
       if (cfg.replyState) replyState.value = cfg.replyState;
       if (Array.isArray(cfg.apps)) apps.value = cfg.apps;
     } catch {
       // ignore corrupt cache
     }
+  }
+  // 老版本只存了单个 appId：把它补进当前包名的记忆表，避免升级后深链失效。
+  if (packageName.value && appId.value && !appIdByPkg.value[packageName.value]) {
+    appIdByPkg.value[packageName.value] = appId.value;
   }
   await loadApps();
   await restoreLastView();
@@ -138,9 +151,19 @@ watch(packageName, async (pkg, old) => {
   mode.value = "single";
   batchSummary.value = "";
   localStorage.setItem(scopedKey(LAST_VIEW_KEY), "single");
+  // App ID 是按包名记忆的，切换应用要跟着切，不能把上一个 app 的 ID 带过去。
+  appId.value = appIdByPkg.value[pkg.trim()] ?? "";
   const snap = await loadSnapshot(pkg.trim());
   reviews.value = snap?.reviews ?? [];
   fetchedAt.value = snap?.fetchedAt ?? null;
+});
+
+// 用户在设置区手填/改了 App ID → 记到当前包名名下，供其它入口（比如批量视图里
+// 其它 app 的评论）按 _pkg 直接查到，不依赖用户切到那个 app 才能生成正确深链。
+watch(appId, (val) => {
+  if (booting) return;
+  const pkg = packageName.value.trim();
+  if (pkg) appIdByPkg.value[pkg] = val;
 });
 
 // ── 评论快照持久化（per-app 文件，批量视图派生）────────────────────────────
@@ -249,11 +272,12 @@ async function restoreLastView() {
   }
 }
 
-watch([packageName, developerId, appId, stars, replyState, apps], () => {
+watch([packageName, developerId, appId, appIdByPkg, stars, replyState, apps], () => {
   const cfg: PersistedConfig = {
     packageName: packageName.value,
     developerId: developerId.value,
     appId: appId.value,
+    appIdByPkg: appIdByPkg.value,
     stars: stars.value,
     replyState: replyState.value,
     apps: apps.value,
@@ -501,12 +525,13 @@ async function handleOpenInConsole() {
 //   .../user-feedback/review-details?reviewId=<uuid>&corpus=PUBLIC_REVIEWS
 // 我们的 review_id 就是该 UUID（与 androidpublisher reviews API 一致），可直接定位。
 function reviewConsoleUrl(r: TaggedReview): string {
-  // appId 是为当前选中应用配的；批量模式下该评论可能来自别的应用，深链不适用 →
-  // 退回应用列表页，避免跳到错误应用。
-  if (!developerId.value || !appId.value || r._pkg !== packageName.value) {
+  // 按评论自己的 _pkg 查 App ID（而不是当前下拉框选中的 packageName）——批量视图里
+  // 一条评论可能来自和当前选中不同的 app，这样才能跳对详情页而不是退化成列表页。
+  const id = appIdByPkg.value[r._pkg];
+  if (!developerId.value || !id) {
     return playConsoleUrl.value;
   }
-  const base = `https://play.google.com/console/u/0/developers/${developerId.value}/app/${appId.value}/user-feedback/review-details`;
+  const base = `https://play.google.com/console/u/0/developers/${developerId.value}/app/${id}/user-feedback/review-details`;
   return `${base}?reviewId=${encodeURIComponent(r.review_id)}&corpus=PUBLIC_REVIEWS`;
 }
 
@@ -1280,6 +1305,7 @@ async function submitAnReply(task: AnTask) {
         </div>
         <p class="advanced-hint">
           API 不返回这两个数字 ID，留空则跳转到应用列表页。仅在需要看 7 天以上评论或在网页回复时用得上。
+          App ID 按当前选中的应用分别记忆——切到别的 app 时需要各自填一次，之后批量视图里点该 app 的评论也能跳对详情页。
         </p>
       </div>
     </section>
