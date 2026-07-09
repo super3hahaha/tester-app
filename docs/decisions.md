@@ -138,3 +138,11 @@
 - **删产品级联解除关联（不删资料）**：`kb_delete_product` 从所有 docs[].productIds 摘除该 id，绝不删资料文件（多对多下删产品连资料一起删会误伤还关联其它产品的资料）。
 - **v2 反馈→偏好半自动起草**：编辑器底部「🤖 AI 起草/合并」按钮 → 弹窗两种用法：①传「AI 版 vs 人工版」对比图（选文件或 Ctrl/⌘+V 粘贴截图，粘贴走 `kb_save_temp_image` base64 落盘到 `knowledge/distill-tmp/`）+ 说明谁是谁，AI 对比差异提炼；②**直写模式**——不传图、直接在说明里描述偏好。后端 `kb_ai_distill` 走 `claude --print stream-json`（参考 `reply.rs::generate_single_reply`，**收集最终文本**而非流式发事件；图片靠路径 + `--add-dir` 让 claude 自己读，不解析表格），按 4 件事（反写/分类按 6 骨架分区/归并/不确定留 `<待补>` 禁编造）整理 → 合并进当前 md、新增行标 🆕。产出**填回编辑器当草稿，不自动保存**。
 - **distill prompt 走配置、可在设置页改**：prompt 不硬编码，作为 `PromptConfig.kb_distill` 存 `prompt-config.json`，在 `PromptConfigPage.vue` 的 `FIELDS` 里多一个 tab 可整段编辑（占位符 `{note}` `{existing_md}`，render 替换）。对比图路径由后端 `build_distill_note` 拼进 `{note}`。6 个骨架分区（模块划分/业务规则/必测场景/异常边界/隐性需求/跨模块依赖）由模型自行判断产品特定 vs 通用，**不再需要 `is_product` 参数**（已从命令签名移除）。
+
+## Review 模块定时批量拉取 + Telegram 通知（方案 A：前端定时器）
+
+- **背景/详细方案见** `handoff-scheduled-batch-fetch.md`。
+- **定时跑在前端，不跑在后端**：App.vue 常驻挂 `setInterval` tick，命中配置时间点就调复制精简出的 `scheduledFetch.ts`（不改 `ReviewPage.vue::handleBatchFetch`）。选它是因为配置（`play-console-multi-config-v1`）和筛选逻辑全在前端，后端 tokio 定时得把整套配置和筛选搬过去，改动面大不值；代价是 app 必须常开（进程活着即可，最小化/关窗都行，`Cmd+Q` 退出则不跑），系统睡眠会错过整点，靠启动/唤醒时的补发兜底（不保证准点）。
+- **通知 chat_id 与反馈私聊分开**：`notify.rs` 独立于 `feedback.rs`，各自一个 `~/.tester-app/*.json`；bot_token 可留空复用 feedback 的（同一个 bot，两个 chat）。
+- **「新增」判定用 per-app 已通知 id 集合 + diff，不用全量刷屏**：`review-schedule-notified-v1::{pkg}`。首次为某 app 启用时，当前命中的评论静默标记为 baseline（`review-schedule-baseline-done-v1::{pkg}`），不算新增——否则一启用就把近 7 天存量全当"新增"推给用户。集合按当前 API 返回窗口（Play 只返回近 7 天）裁剪，防止长期运行后无限增长。
+- **错过补发合并成一条消息，不逐个时间点分别发**：`checkAndFireSchedule()` 一次 tick 里把「今天已过且未触发」的所有时间点收集起来，只跑一次 `runScheduledFetch` + 发一条消息（标「错过补发」），再把这些时间点批量标记已触发——避免合盖过夜醒来后连续收到好几条几乎相同的消息。

@@ -52,6 +52,23 @@ pub fn is_feedback_configured() -> bool {
     resolve_telegram_config().is_some()
 }
 
+/// Bot token only (chat_id-agnostic), for callers (e.g. notify.rs) that keep their own
+/// chat_id but want to default to the same bot as feedback when they don't set one.
+pub fn resolve_bot_token() -> Option<String> {
+    if let Some(t) = BOT_TOKEN_COMPILED {
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    let path = data_dir().join("telegram.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let cfg: TelegramConfig = serde_json::from_str(&content).ok()?;
+    if cfg.bot_token.is_empty() {
+        return None;
+    }
+    Some(cfg.bot_token)
+}
+
 #[derive(Deserialize)]
 pub struct FeedbackInput {
     pub ai_drive_id: String,

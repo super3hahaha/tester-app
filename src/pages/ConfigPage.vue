@@ -2,10 +2,11 @@
 import { ref } from "vue";
 import PlayConsoleConfigPage from "./PlayConsoleConfigPage.vue";
 import BatchReplyConfigPage from "./BatchReplyConfigPage.vue";
+import ScheduleConfigPage from "./ScheduleConfigPage.vue";
 
-// 纯配置页：两个 Tab —— Play Console 拉取配置 + Batch Reply 配置。
-// 两个子页都用 v-show 常驻挂载，各自管理自己的 localStorage。
-const tab = ref<"play" | "batch">("play");
+// 纯配置页：三个 Tab —— Play Console 拉取配置 + Batch Reply 配置 + 定时通知。
+// 子页都用 v-show 常驻挂载，各自管理自己的 localStorage。
+const tab = ref<"play" | "batch" | "schedule">("play");
 </script>
 
 <template>
@@ -21,10 +22,16 @@ const tab = ref<"play" | "batch">("play");
         :class="{ active: tab === 'batch' }"
         @click="tab = 'batch'"
       >🤖 Batch Reply 配置</button>
+      <button
+        class="config-tab"
+        :class="{ active: tab === 'schedule' }"
+        @click="tab = 'schedule'"
+      >⏰ 定时通知</button>
     </nav>
     <div class="config-body">
       <PlayConsoleConfigPage v-show="tab === 'play'" />
       <BatchReplyConfigPage v-show="tab === 'batch'" />
+      <ScheduleConfigPage v-show="tab === 'schedule'" />
     </div>
   </div>
 </template>

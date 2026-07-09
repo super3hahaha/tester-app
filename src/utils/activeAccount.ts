@@ -6,6 +6,8 @@ import { ref } from "vue";
 // 唯一写入点：App.vue 的 watch(user)（user 是全局唯一真相源，切账号 update-user 自动带新 id）。
 // scopedKey / 快照 key 前缀 / 迁移守卫都读它。
 export const activeAccountId = ref<string>("");
+// 当前账号邮箱，仅用于展示（如定时通知模板里的「账号：xxx」），不参与隔离逻辑。
+export const activeAccountEmail = ref<string>("");
 
 export function getActiveAccountId(): string {
   return activeAccountId.value;

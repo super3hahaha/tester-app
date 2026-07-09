@@ -7,6 +7,7 @@ mod feedback;
 mod knowledge_base;
 mod manifest;
 mod model_config;
+mod notify;
 mod prompt_config;
 mod reply;
 mod reviews;
@@ -68,6 +69,10 @@ pub fn run() {
             feedback::is_feedback_configured,
             feedback::send_feedback,
             feedback::retry_pending_feedback,
+            notify::is_notify_configured,
+            notify::get_notify_config,
+            notify::save_notify_config,
+            notify::send_telegram_message,
             skill_sync::check_skill_updates,
             skill_sync::sync_all_skills,
             skill_sync::sync_skill,

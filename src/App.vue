@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from "vue";
+import { ref, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import LoginPage from "./pages/LoginPage.vue";
 import MainPage from "./pages/MainPage.vue";
-import { activeAccountId } from "./utils/activeAccount";
+import { activeAccountId, activeAccountEmail } from "./utils/activeAccount";
 import { migrateLegacyStorageOnce, migrateLegacyStorageOnceV2 } from "./utils/accountStorageMigration";
+import { checkAndFireSchedule } from "./utils/scheduleDriver";
 
 interface UserInfo {
   email: string;
@@ -20,6 +21,14 @@ const checking = ref(true);
 // 账号隔离维度的唯一来源：user 一变（登录/切换/登出）立即同步下发 id。
 // flush:'sync' 确保子页因 accountEpoch 重挂、onMounted 读 scopedKey 前，id 已就绪。
 watch(user, (u) => { activeAccountId.value = u?.id ?? ""; }, { immediate: true, flush: "sync" });
+watch(user, (u) => { activeAccountEmail.value = u?.email ?? ""; }, { immediate: true, flush: "sync" });
+
+// 定时通知驱动：常驻挂在这里（不受子页 v-show 切换/卸载影响）。每分钟 tick 一次；
+// 启动时和从后台/睡眠唤醒时都补跑一次检查，覆盖「app 没开/睡眠中错过整点」（坑 §7）。
+let scheduleTimer: number | undefined;
+function onScheduleVisibilityChange() {
+  if (document.visibilityState === "visible") checkAndFireSchedule();
+}
 
 onMounted(async () => {
   try {
@@ -45,6 +54,15 @@ onMounted(async () => {
     .catch((e) => {
       console.warn("[skill-sync] failed:", e);
     });
+
+  checkAndFireSchedule();
+  document.addEventListener("visibilitychange", onScheduleVisibilityChange);
+  scheduleTimer = window.setInterval(checkAndFireSchedule, 60_000);
+});
+
+onUnmounted(() => {
+  document.removeEventListener("visibilitychange", onScheduleVisibilityChange);
+  if (scheduleTimer !== undefined) window.clearInterval(scheduleTimer);
 });
 </script>
 
