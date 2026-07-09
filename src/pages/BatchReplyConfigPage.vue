@@ -27,11 +27,7 @@ interface MultiConfig {
   perApp: Record<string, AppConfig>;
 }
 
-// v3: when migrating from an older key, presets are force-reset to the default.
-//   v2 stored a preset, but early builds persisted a migration-artifact "custom"
-//   onto every app (even unchecked ones), so v2 presets aren't trustworthy.
-//   v1 stored absolute {fromDate, toDate} with no preset at all.
-// Reading the current v3 key preserves the user's explicit preset choices.
+// v1/v2 只用于 resetAll() 顺手清残留；不再作为读取兜底（见 onMounted 里的说明）。
 const STORAGE_KEY = "batch-reply-multi-config-v3";
 const LEGACY_KEYS = ["batch-reply-multi-config-v2", "batch-reply-multi-config-v1"];
 const APPS_CACHE_KEY = "batch-reply-apps-cache-v1";
@@ -91,27 +87,18 @@ const now = ref(new Date());
 let nowTimer: number | undefined;
 
 onMounted(() => {
-  // Read current v3 (preserve presets); else fall back through legacy keys
-  // (reset presets to default — legacy presets are migration artifacts).
-  let raw = localStorage.getItem(STORAGE_KEY);
-  let fromLegacy = false;
-  if (!raw) {
-    for (const k of LEGACY_KEYS) {
-      const v = localStorage.getItem(k);
-      if (v) {
-        raw = v;
-        fromLegacy = true;
-        break;
-      }
-    }
-  }
+  // Read current (scoped) v3 only. The pre-v3 LEGACY_KEYS fallback was global/unscoped
+  // and got migrated into the scoped v3 key once for the account active at upgrade time
+  // (see migrateLegacyStorageOnceV2) — reading it here directly would leak that same
+  // global leftover into every *other* account that hasn't saved its own config yet.
+  const raw = localStorage.getItem(scopedKey(STORAGE_KEY));
   if (raw) {
     try {
       const cfg = JSON.parse(raw) as MultiConfig;
       if (cfg.perApp && typeof cfg.perApp === "object") {
         const normalized: Record<string, AppConfig> = {};
         for (const [pkg, entry] of Object.entries(cfg.perApp)) {
-          normalized[pkg] = normalizeConfig(entry, fromLegacy);
+          normalized[pkg] = normalizeConfig(entry, false);
         }
         perApp.value = normalized;
       }
@@ -156,6 +143,9 @@ async function loadApps() {
     const msg = String(e);
     if (msg.startsWith("NEED_RELOGIN_SCOPE")) {
       appsError.value = "需要重新登录授权 playdeveloperreporting 权限。";
+      needRelogin.value = true;
+    } else if (msg.startsWith("NEED_RELOGIN:")) {
+      appsError.value = "登录已失效，请重新登录后再试。";
       needRelogin.value = true;
     } else {
       appsError.value = msg;
@@ -205,7 +195,7 @@ function resetAll() {
   }
   if (resetTimer) clearTimeout(resetTimer);
   resetArmed.value = false;
-  for (const k of [STORAGE_KEY, ...LEGACY_KEYS]) {
+  for (const k of [scopedKey(STORAGE_KEY), ...LEGACY_KEYS]) {
     localStorage.removeItem(k);
   }
   // Reset in-memory state to fresh defaults for the currently loaded apps.
@@ -251,7 +241,7 @@ function handleSave() {
     }
     perApp.value = pruned;
     const payload: MultiConfig = { perApp: perApp.value };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    localStorage.setItem(scopedKey(STORAGE_KEY), JSON.stringify(payload));
     savedSnapshot.value = JSON.stringify(perApp.value);
     saveFlash.value = "saved";
     setTimeout(() => {

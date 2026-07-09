@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, nextTick } from "vue";
+import { ref, computed, nextTick, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import SheetsPage from "./SheetsPage.vue";
 import SlidesPage from "./SlidesPage.vue";
 import GeneratePage from "./GeneratePage.vue";
@@ -20,6 +21,7 @@ interface UserInfo {
   email: string;
   name: string;
   picture?: string;
+  id?: string;
 }
 
 defineProps<{ user: UserInfo }>();
@@ -163,6 +165,34 @@ function applyAccountChange() {
   slidesSelection.value = [];
   accountEpoch.value++;
 }
+
+// 后端某账号 refresh_token 失效时会静默把它从账号列表移除、切到下一个 active（见
+// auth.rs::get_valid_access_token），不这样监听的话前端会继续显示已被踢掉的账号。
+const evictedNotice = ref("");
+let evictedTimer: number | undefined;
+let unlistenEvicted: UnlistenFn | undefined;
+
+onMounted(async () => {
+  unlistenEvicted = await listen<{ evicted_email: string; next: UserInfo | null }>(
+    "account-evicted",
+    (event) => {
+      const { evicted_email, next } = event.payload;
+      evictedNotice.value = `账号 ${evicted_email} 登录已失效，已自动登出`;
+      if (evictedTimer !== undefined) window.clearTimeout(evictedTimer);
+      evictedTimer = window.setTimeout(() => { evictedNotice.value = ""; }, 8000);
+      if (next) {
+        emit("update-user", next);
+        applyAccountChange();
+      } else {
+        emit("logout");
+      }
+    }
+  );
+});
+onUnmounted(() => {
+  unlistenEvicted?.();
+  if (evictedTimer !== undefined) window.clearTimeout(evictedTimer);
+});
 
 async function switchAccount(id: string) {
   menuOpen.value = false;
@@ -321,6 +351,7 @@ function onSlidesSelect(files: SlidesSelection[]) {
         </div>
       </div>
     </header>
+    <div v-if="evictedNotice" class="evicted-banner">{{ evictedNotice }}</div>
     <div class="body">
       <!-- Level 1: Workspace sidebar -->
       <nav class="workspace-bar">
@@ -425,6 +456,7 @@ function onSlidesSelect(files: SlidesSelection[]) {
           v-show="activeOption === 'review-config'"
         />
         <BatchReplyPage
+          :key="`acct-batch-${accountEpoch}`"
           v-show="activeOption === 'review-batch-reply'"
           :active-option="activeOption"
         />
@@ -483,6 +515,13 @@ function onSlidesSelect(files: SlidesSelection[]) {
 .app-title {
   font-weight: 600;
   font-size: 16px;
+}
+.evicted-banner {
+  padding: 8px 20px;
+  background: #fff3e0;
+  color: #b45309;
+  font-size: 13px;
+  border-bottom: 1px solid #fde2b0;
 }
 .user-section {
   position: relative;

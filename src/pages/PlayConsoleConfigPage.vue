@@ -94,6 +94,9 @@ async function loadApps() {
     if (msg.startsWith("NEED_RELOGIN_SCOPE")) {
       appsError.value = "需要重新登录授权 playdeveloperreporting 权限。";
       needRelogin.value = true;
+    } else if (msg.startsWith("NEED_RELOGIN:")) {
+      appsError.value = "登录已失效，请重新登录后再试。";
+      needRelogin.value = true;
     } else {
       appsError.value = msg;
     }

@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
-use tauri::State;
+use std::sync::{Mutex, OnceLock};
+use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -127,6 +127,22 @@ fn account_key(user: &UserInfo) -> String {
     user.sub.clone().unwrap_or_else(|| user.email.clone())
 }
 
+/// Set once in `lib.rs`'s `.setup()` so `get_valid_access_token` — reached from many
+/// commands that don't take `AppHandle` — can still emit the eviction event below.
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+
+pub fn init_app_handle(app: AppHandle) {
+    let _ = APP_HANDLE.set(app);
+}
+
+/// 某账号因 refresh_token 失效被静默移出账号列表时，通知前端同步 `user` / 重挂账号世界页面，
+/// 否则前端会继续显示已被踢掉的账号、而后端实际用的是另一个 active 账号。
+#[derive(Serialize, Clone)]
+struct AccountEvictedPayload {
+    evicted_email: String,
+    next: Option<UserInfo>,
+}
+
 /// Returns a non-expired access_token, refreshing if necessary.
 /// On refresh failure due to `invalid_grant` (refresh_token revoked / expired),
 /// clears persisted auth and returns an error starting with "NEED_RELOGIN:"
@@ -161,14 +177,30 @@ pub async fn get_valid_access_token(state: &State<'_, AuthState>) -> Result<Stri
         }
         Err(e) if e.starts_with("invalid_grant") => {
             // 该账号 refresh_token 失效：移除它，active 自动切到下一个（没有则回登录页）
+            let evicted_email = state
+                .accounts
+                .lock()
+                .unwrap()
+                .get(&key)
+                .map(|a| a.user.email.clone())
+                .unwrap_or_default();
             remove_account_dir(&key);
-            let next = {
+            let next_key = {
                 let mut accounts = state.accounts.lock().unwrap();
                 accounts.remove(&key);
                 accounts.keys().next().cloned()
             };
-            *state.active.lock().unwrap() = next.clone();
-            save_active_to_disk(next.as_deref());
+            *state.active.lock().unwrap() = next_key.clone();
+            save_active_to_disk(next_key.as_deref());
+            let next_user = next_key
+                .and_then(|k| state.accounts.lock().unwrap().get(&k).map(|a| a.user.clone()));
+            if let Some(app) = APP_HANDLE.get() {
+                app.emit(
+                    "account-evicted",
+                    AccountEvictedPayload { evicted_email, next: next_user },
+                )
+                .ok();
+            }
             Err(format!("NEED_RELOGIN: {}", e))
         }
         Err(e) => Err(format!("Token refresh failed: {}", e)),

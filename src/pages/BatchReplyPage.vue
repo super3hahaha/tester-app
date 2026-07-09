@@ -83,10 +83,7 @@ interface AppGroup {
   collapsed: boolean;
 }
 
-// v3: preserve presets from the current key; reset presets when migrating from
-// a legacy key (legacy presets are untrustworthy artifacts). See BatchReplyConfigPage.
 const STORAGE_KEY = "batch-reply-multi-config-v3";
-const LEGACY_KEYS = ["batch-reply-multi-config-v2", "batch-reply-multi-config-v1"];
 const APPS_CACHE_KEY = "batch-reply-apps-cache-v1";
 // 「人工处理」标记按 review_id 持久化：人工先筛一遍、不走 AI 模板批量的评论（有的
 // 不用回复，有的需要但模板不合适 → 手动写 / 用 AI 单条回复）。这些评论在 Play 上仍
@@ -96,7 +93,7 @@ const MANUAL_KEY = "batch-reply-manual-ids-v1";
 
 function loadManualIds(): Set<string> {
   try {
-    const arr = JSON.parse(localStorage.getItem(MANUAL_KEY) || "[]");
+    const arr = JSON.parse(localStorage.getItem(scopedKey(MANUAL_KEY)) || "[]");
     return new Set(Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : []);
   } catch {
     return new Set();
@@ -104,7 +101,7 @@ function loadManualIds(): Set<string> {
 }
 const manualIds = loadManualIds();
 function saveManualIds() {
-  localStorage.setItem(MANUAL_KEY, JSON.stringify([...manualIds]));
+  localStorage.setItem(scopedKey(MANUAL_KEY), JSON.stringify([...manualIds]));
 }
 
 function normalizeConfig(raw: any, resetPreset = false): AppConfig {
@@ -212,25 +209,17 @@ const fetchProgress = computed(() => {
 function loadConfig(): { config: MultiConfig | null; appsCache: PlayApp[] } {
   let config: MultiConfig | null = null;
   let appsCache: PlayApp[] = [];
-  let raw = localStorage.getItem(STORAGE_KEY);
-  let fromLegacy = false;
-  if (!raw) {
-    for (const k of LEGACY_KEYS) {
-      const v = localStorage.getItem(k);
-      if (v) {
-        raw = v;
-        fromLegacy = true;
-        break;
-      }
-    }
-  }
+  // Scoped v3 only — see BatchReplyConfigPage.vue's onMounted for why the old
+  // unscoped-global LEGACY_KEYS fallback was removed (it leaked one account's
+  // legacy data into every other account with no scoped config yet).
+  const raw = localStorage.getItem(scopedKey(STORAGE_KEY));
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as MultiConfig;
       if (parsed?.perApp) {
         const normalized: Record<string, AppConfig> = {};
         for (const [pkg, entry] of Object.entries(parsed.perApp)) {
-          normalized[pkg] = normalizeConfig(entry, fromLegacy);
+          normalized[pkg] = normalizeConfig(entry, false);
         }
         config = { perApp: normalized };
       }
@@ -304,8 +293,9 @@ onUnmounted(() => {
   unlistenReply?.();
   stopGenTimer();
 });
-// MainPage uses v-show (component stays mounted), so onMounted only fires once.
-// Re-read config whenever this page becomes visible — otherwise a config saved on
+// MainPage uses v-show (component stays mounted across tab switches, remounts only
+// on account switch via :key), so onMounted alone misses config changes made on other
+// tabs. Re-read config whenever this page becomes visible — otherwise a config saved on
 // the Config sub-page after first mount never reaches groups, leaving the page stuck
 // on "未配置启用任何应用" with the (groups-empty-disabled) fetch button uncllickable.
 const props = defineProps<{ activeOption: string }>();

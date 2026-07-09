@@ -49,8 +49,8 @@
 | Play Console 拉取配置 | `play-console-multi-config-v1` | PlayConsoleConfigPage / ReviewPage(loadPlayConfig) | ✅ scopedKey |
 | app 列表缓存 | `batch-reply-apps-cache-v1` | **三页共用** | ✅ scopedKey（三处引用同步改） |
 | **评论快照** | 后端 `reviews-cache/{pkg}.json` | ReviewPage | ✅ 前端把 key 拼成 `${id}__${pkg}`，`reviews.rs` 零改动 |
-| 批量回复配置 | `batch-reply-multi-config-v3` | BatchReply(Config)Page | ⏳ 二阶段 |
-| 批量手动标记 | `batch-reply-manual-ids-v1` | BatchReplyPage | ⏳ 二阶段 |
+| 批量回复配置 | `batch-reply-multi-config-v3` | BatchReply(Config)Page | ✅ scopedKey |
+| 批量手动标记 | `batch-reply-manual-ids-v1` | BatchReplyPage | ✅ scopedKey |
 | Gmail 源 / 已读 | `gmail-sources-v1` / `gmail-read-ids-v1` | GmailPage | ⏳ 二阶段 |
 | AppScript 项目 | `appscript-projects-v1` | AppScriptPage | ⏳ 二阶段 |
 
@@ -97,9 +97,27 @@
 
 ## 6. 二阶段（验证 OK 后独立做）
 
-同法把 `gmail-*` / `appscript-projects` / `batch-reply-multi-config-v3` /
-`batch-reply-manual-ids-v1` 包 scopedKey，并给 `BatchReplyPage` / `AppScriptPage` 补
+同法把 `gmail-*` / `appscript-projects` 包 scopedKey，并给 `AppScriptPage` 补
 `:key="acct-*-${accountEpoch}"`（现无 key，切账号不重挂、不重读）。
+
+- ✅ `BatchReplyPage` 已补 `:key="acct-batch-${accountEpoch}"`（MainPage.vue），切账号会重挂、
+  `rebuildGroups()` 重跑读新账号的 scoped 配置。
+- ✅ `batch-reply-multi-config-v3`（`BatchReplyPage.vue` / `BatchReplyConfigPage.vue`）和
+  `batch-reply-manual-ids-v1`（`BatchReplyPage.vue`）已包 scopedKey。
+- ⚠️ **迁移不搬 batch 配置（踩坑后的决定）**：`migrateLegacyStorageOnceV2` 最初照搬一阶段
+  「把旧全局配置复制给当前 active 账号」的做法，结果给一个从没配过 batch 的账号硬塞了
+  别的账号的全局配置（脏数据）——因为 batch 配置升级前是真正多账号混用的一份，无法归属。
+  已改为**只删旧全局 key、不复制**，各账号 batch 配置从空开始自己配。
+  - 副作用：已经跑过旧版 V2 迁移的用户（`store-migrated-v2=1`）脏数据仍在，改代码不回滚。
+    清理办法 = 在脏账号的 Batch Reply 配置页点「清空配置」（`resetAll` 删该账号 scoped 桶）。
+- **踩坑记录**：第一版只把 v3 key 本身 scopedKey 化，漏了一个细节——两个文件读 v3 失败
+  （即当前账号还没存过配置）时，都会**无账号区分地**回退读全局的 v1/v2 `LEGACY_KEYS`
+  （pre-v3 老格式，本意是给还没升级到 v3 的老用户兜底）。结果任何新账号第一次挂载都会一起摔进
+  这个全局兜底，读到同一份旧数据——表现为"切哪个账号都显示同样几个 app"。已删掉这两处的
+  unscoped 兜底读取（`BatchReplyPage.vue::loadConfig` / `BatchReplyConfigPage.vue::onMounted`），
+  `LEGACY_KEYS` 常量只保留给 `resetAll()` 清残留用。**代价**：如果真有用户还停留在纯 v1/v2
+  格式（从未存过 v3），这版之后会读不到那份旧配置——存量数据早在 v3 上线时已经不再是"当前"
+  格式，这个 tester-app 内部用户量很小，判断可接受。
 
 ## 7. 风险 / 注意
 

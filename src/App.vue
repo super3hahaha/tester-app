@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import LoginPage from "./pages/LoginPage.vue";
 import MainPage from "./pages/MainPage.vue";
 import { activeAccountId } from "./utils/activeAccount";
-import { migrateLegacyStorageOnce } from "./utils/accountStorageMigration";
+import { migrateLegacyStorageOnce, migrateLegacyStorageOnceV2 } from "./utils/accountStorageMigration";
 
 interface UserInfo {
   email: string;
@@ -25,7 +25,10 @@ onMounted(async () => {
   try {
     user.value = await invoke<UserInfo | null>("check_auth");
     // 已登录才迁移（此时 activeAccountId 已由上面的 watch 同步就绪），否则会落到 _none 桶。
-    if (user.value) migrateLegacyStorageOnce();
+    if (user.value) {
+      migrateLegacyStorageOnce();
+      migrateLegacyStorageOnceV2();
+    }
   } catch {
     user.value = null;
   } finally {
