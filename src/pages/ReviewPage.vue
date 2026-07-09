@@ -1335,11 +1335,11 @@ async function submitAnReply(task: AnTask) {
           <button class="an-btn" @click="openAnalysis(r)" title="分析这条评论暴露的问题并给出推荐回复">
             🔍 分析
           </button>
-          <button class="tpl-reply-btn" @click="openTplDialog(r)" title="用收藏的常用模板快速回复（按评论语言自动填译文）">
-            📋 模板回复
-          </button>
           <button class="ai-btn" @click="openAiDialog(r)">
             🤖 {{ r.developer_reply ? "AI 重新回复" : "AI 回复" }}
+          </button>
+          <button class="tpl-reply-btn" @click="openTplDialog(r)" title="用收藏的常用模板快速回复（按评论语言自动填译文）">
+            📋 模板回复
           </button>
           <span v-if="r.developer_reply" class="reply-tag replied">已回复</span>
           <span v-else class="reply-tag absent">未回复</span>
