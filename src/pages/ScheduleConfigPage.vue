@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { loadScheduleConfig, saveScheduleConfig, type ScheduleConfig } from "../utils/scheduleConfig";
+import { syncScheduleRuntimeToBackend } from "../utils/scheduleRuntimeSync";
 
 interface NotifyConfig {
   chat_id: string;
@@ -55,11 +56,33 @@ function handleSave() {
   try {
     saveScheduleConfig(cfg.value);
     savedSnapshot.value = JSON.stringify(cfg.value);
+    // 把配置镜像给后端定时线程（真正的定时在后端跑）。
+    syncScheduleRuntimeToBackend();
     saveFlash.value = "saved";
     setTimeout(() => { if (saveFlash.value === "saved") saveFlash.value = ""; }, 2500);
   } catch (e: any) {
     saveFlash.value = "error";
     saveError.value = String(e);
+  }
+}
+
+const runningNow = ref(false);
+const runResult = ref<"" | "ok" | "error">("");
+const runMsg = ref("");
+async function handleRunNow() {
+  runningNow.value = true;
+  runResult.value = "";
+  runMsg.value = "";
+  try {
+    // 先把最新配置同步过去，再让后端立刻真实巡检一次（尊重去重/baseline）。
+    await syncScheduleRuntimeToBackend();
+    runMsg.value = await invoke<string>("run_schedule_now");
+    runResult.value = "ok";
+  } catch (e: any) {
+    runResult.value = "error";
+    runMsg.value = String(e);
+  } finally {
+    runningNow.value = false;
   }
 }
 
@@ -99,7 +122,7 @@ async function handleTestSend() {
       <h3>定时通知</h3>
       <p class="subtitle">
         到点自动执行一次批量拉取（按「Play Console 拉取配置」里启用的应用及其筛选条件），把<b>新增差评</b>通过 Telegram 通知你。
-        需保持 app 运行（最小化 / 窗口关闭均可，<b>Cmd+Q</b> 完全退出则不跑；系统睡眠期间不跑，唤醒后会补发一次）。
+        只对当前登录的账号生效。
       </p>
     </header>
 
@@ -141,9 +164,18 @@ async function handleTestSend() {
         <button class="save-btn" @click="handleSave" :disabled="!isDirty">
           {{ isDirty ? "保存配置" : "已保存" }}
         </button>
+        <button class="test-btn" @click="handleRunNow" :disabled="runningNow" title="立刻按当前配置真实巡检一次（尊重去重，首次会先建基线）">
+          {{ runningNow ? "执行中…" : "立即执行一次" }}
+        </button>
         <span v-if="saveFlash === 'saved'" class="flash flash-ok">✓ 已保存到本地</span>
         <span v-if="saveFlash === 'error'" class="flash flash-err">保存失败：{{ saveError }}</span>
+        <span v-if="runResult === 'ok'" class="flash flash-ok">{{ runMsg }}</span>
+        <span v-if="runResult === 'error'" class="flash flash-err">执行失败：{{ runMsg }}</span>
       </div>
+      <p class="hint">
+        定时在后端运行：只要 app 进程没退出（<b>Cmd+Q</b> 才会退），窗口最小化/被遮挡/放后台都能准点；
+        电脑睡眠或 app 退出期间不跑，重新运行后会补发一次当天错过的时间点。
+      </p>
     </section>
 
     <section class="block">

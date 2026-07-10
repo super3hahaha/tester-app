@@ -111,6 +111,17 @@ pub async fn list_play_reviews(
     state: State<'_, AuthState>,
 ) -> Result<Vec<Review>, String> {
     let token = crate::auth::get_valid_access_token(&state).await?;
+    fetch_reviews(&package_name, max_pages, translation_language.as_deref(), &token).await
+}
+
+/// 拉评论的纯逻辑（不碰 AuthState）：命令 `list_play_reviews` 先取 token 再调它；
+/// 定时器（schedule.rs）拿到 token 后按启用 app 循环调它，复用同一套分页/错误处理。
+pub async fn fetch_reviews(
+    package_name: &str,
+    max_pages: Option<u32>,
+    translation_language: Option<&str>,
+    token: &str,
+) -> Result<Vec<Review>, String> {
     let max_pages = max_pages.unwrap_or(5).max(1);
 
     let client = reqwest::Client::new();
@@ -120,12 +131,12 @@ pub async fn list_play_reviews(
     for _ in 0..max_pages {
         let mut url = format!(
             "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{}/reviews?maxResults=100",
-            urlencoding::encode(&package_name)
+            urlencoding::encode(package_name)
         );
         if let Some(t) = &next_token {
             url.push_str(&format!("&token={}", urlencoding::encode(t)));
         }
-        if let Some(lang) = &translation_language {
+        if let Some(lang) = translation_language {
             if !lang.is_empty() {
                 url.push_str(&format!("&translationLanguage={}", urlencoding::encode(lang)));
             }
@@ -133,7 +144,7 @@ pub async fn list_play_reviews(
 
         let resp = client
             .get(&url)
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .send()
             .await
             .map_err(|e| format!("Reviews request failed: {}", e))?;

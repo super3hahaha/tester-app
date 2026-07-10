@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import LoginPage from "./pages/LoginPage.vue";
 import MainPage from "./pages/MainPage.vue";
 import { activeAccountId, activeAccountEmail } from "./utils/activeAccount";
 import { migrateLegacyStorageOnce, migrateLegacyStorageOnceV2 } from "./utils/accountStorageMigration";
-import { checkAndFireSchedule } from "./utils/scheduleDriver";
+import { syncScheduleRuntimeToBackend } from "./utils/scheduleRuntimeSync";
 
 interface UserInfo {
   email: string;
@@ -23,12 +23,9 @@ const checking = ref(true);
 watch(user, (u) => { activeAccountId.value = u?.id ?? ""; }, { immediate: true, flush: "sync" });
 watch(user, (u) => { activeAccountEmail.value = u?.email ?? ""; }, { immediate: true, flush: "sync" });
 
-// 定时通知驱动：常驻挂在这里（不受子页 v-show 切换/卸载影响）。每分钟 tick 一次；
-// 启动时和从后台/睡眠唤醒时都补跑一次检查，覆盖「app 没开/睡眠中错过整点」（坑 §7）。
-let scheduleTimer: number | undefined;
-function onScheduleVisibilityChange() {
-  if (document.visibilityState === "visible") checkAndFireSchedule();
-}
+// 定时通知：真正的定时跑在后端原生线程（schedule.rs），前端只负责把配置镜像过去。
+// 登录/切账号后同步一次当前账号的配置（登出时后端拿不到 active，同步会静默失败）。
+watch(user, (u) => { if (u) syncScheduleRuntimeToBackend(); });
 
 onMounted(async () => {
   try {
@@ -55,14 +52,8 @@ onMounted(async () => {
       console.warn("[skill-sync] failed:", e);
     });
 
-  checkAndFireSchedule();
-  document.addEventListener("visibilitychange", onScheduleVisibilityChange);
-  scheduleTimer = window.setInterval(checkAndFireSchedule, 60_000);
-});
-
-onUnmounted(() => {
-  document.removeEventListener("visibilitychange", onScheduleVisibilityChange);
-  if (scheduleTimer !== undefined) window.clearInterval(scheduleTimer);
+  // 启动时把当前账号的定时配置镜像给后端（后端从磁盘已知 active，但配置内容要靠这里推）。
+  if (user.value) syncScheduleRuntimeToBackend();
 });
 </script>
 

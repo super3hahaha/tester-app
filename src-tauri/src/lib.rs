@@ -11,6 +11,7 @@ mod notify;
 mod prompt_config;
 mod reply;
 mod reviews;
+mod schedule;
 mod sheets;
 mod skill_sync;
 mod templates;
@@ -31,6 +32,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             auth::init_app_handle(app.handle().clone());
+            // 定时通知：后台原生线程，不受 webview 前后台/节流影响（见 schedule.rs）。
+            schedule::start_scheduler(app.handle().clone());
             Ok(())
         })
         .manage(AuthState::new())
@@ -73,6 +76,8 @@ pub fn run() {
             notify::get_notify_config,
             notify::save_notify_config,
             notify::send_telegram_message,
+            schedule::save_schedule_runtime,
+            schedule::run_schedule_now,
             skill_sync::check_skill_updates,
             skill_sync::sync_all_skills,
             skill_sync::sync_skill,

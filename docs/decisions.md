@@ -146,3 +146,13 @@
 - **通知 chat_id 与反馈私聊分开**：`notify.rs` 独立于 `feedback.rs`，各自一个 `~/.tester-app/*.json`；bot_token 可留空复用 feedback 的（同一个 bot，两个 chat）。
 - **「新增」判定用 per-app 已通知 id 集合 + diff，不用全量刷屏**：`review-schedule-notified-v1::{pkg}`。首次为某 app 启用时，当前命中的评论静默标记为 baseline（`review-schedule-baseline-done-v1::{pkg}`），不算新增——否则一启用就把近 7 天存量全当"新增"推给用户。集合按当前 API 返回窗口（Play 只返回近 7 天）裁剪，防止长期运行后无限增长。
 - **错过补发合并成一条消息，不逐个时间点分别发**：`checkAndFireSchedule()` 一次 tick 里把「今天已过且未触发」的所有时间点收集起来，只跑一次 `runScheduledFetch` + 发一条消息（标「错过补发」），再把这些时间点批量标记已触发——避免合盖过夜醒来后连续收到好几条几乎相同的消息。
+
+## 定时通知从前端定时器改到后端线程（方案 A → 方案 B）
+
+- **起因**：方案 A（App.vue setInterval）实测**做不到后台准点**——电脑没睡、app 进程也在，但 webview 窗口长时间不在前台/被遮挡时，WKWebView 会挂起页面的 JS 定时器，配置 10:10 实际拖到用户切回窗口的 10:31 才触发（见 gotchas.md）。用户要「电脑开着、app 在后台就准点」，方案 A 架构上满足不了。
+- **改为方案 B**：定时逻辑整体搬到 Rust（`schedule.rs`），后台 std 线程每 30s tick + `block_on` 跑拉取/发送。原生线程 + Rust 网络栈不受 webview 节流影响，只要进程没被 Cmd+Q 杀就准点。
+- **配置镜像（关键）**：定时配置和 Play Console 拉取配置都在 localStorage，后端读不到 → 前端在「保存配置 / 启动 / 切账号」时用 `syncScheduleRuntimeToBackend()` 把「定时配置 + 启用应用及筛选 + 显示名」聚合成 `runtime.json` 推给后端（`save_schedule_runtime`）。后端只信这份镜像，不反查 localStorage。
+- **只对当前活跃账号生效**：后端读 `AuthState::active_key()`，与前端 scopedKey 是同一个 key（`UserInfo.id == account_key`），所以后端写的快照 key `{账号}__{包名}` 与 ReviewPage 完全兼容、可互读。切账号后定时对象随之改变，各账号 runtime/fired/notified 按 key 隔离。
+- **日期预设在 Rust 按到点时刻重算**（不能提前算死）：`resolve_range` port 自 `batchReplyDates.ts`（本地时区），新增 `chrono` 依赖。
+- **旧前端定时器已删**（`scheduleDriver.ts`/`scheduledFetch.ts`）：避免与后端双重发送。`scheduleConfig.ts` 保留作 UI 侧配置真相源。已通知集合/baseline/fired 全从 localStorage 迁到后端文件；后端首跑自动 baseline，不刷屏。
+- **仍未解决**：Cmd+Q 完全退出 / 关机期间不跑（进程都没了）——真要那样只能上 OS 级 cron 独立进程（handoff 方案 C），成本过高不做。「电脑开着 app 常驻」这个诉求方案 B 已满足。

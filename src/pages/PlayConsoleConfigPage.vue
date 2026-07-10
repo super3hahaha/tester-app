@@ -19,6 +19,7 @@ import {
   normalizePlayConfig,
 } from "../utils/playConsoleConfig";
 import { scopedKey } from "../utils/accountScopedKey";
+import { syncScheduleRuntimeToBackend } from "../utils/scheduleRuntimeSync";
 
 interface PlayApp {
   package_name: string;
@@ -192,6 +193,8 @@ function handleSave() {
     const payload: PlayMultiConfig = { perApp: perApp.value };
     localStorage.setItem(scopedKey(PLAY_STORAGE_KEY), JSON.stringify(payload));
     savedSnapshot.value = JSON.stringify(perApp.value);
+    // 启用应用/筛选变了要同步给后端定时器（定时按这份拉取）。
+    syncScheduleRuntimeToBackend();
     saveFlash.value = "saved";
     setTimeout(() => {
       if (saveFlash.value === "saved") saveFlash.value = "";

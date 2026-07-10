@@ -31,6 +31,7 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 dirs = "5"
+chrono = { version = "0.4", features = ["clock"] }
 open = "5"
 url = "2"
 urlencoding = "2"

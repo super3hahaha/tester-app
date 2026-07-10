@@ -1,11 +1,14 @@
 # Handoff：Review 模块「定时批量拉取 + Telegram 通知」
 
-> 状态：**已实现（方案 A）**。决策见 §四（已标 ✅）。实现清单（§六）全部完成：
-> - 后端 `notify.rs`（`send_telegram_message` + `get/save_notify_config` + `is_notify_configured`），`feedback.rs` 新增 `resolve_bot_token()` 供复用。
-> - 前端 `utils/scheduleConfig.ts`（配置）、`utils/scheduledFetch.ts`（拉取+diff+baseline）、`utils/scheduleDriver.ts`（tick 驱动+消息组装+错过补发）。
-> - `App.vue` 常驻挂驱动（tick + 启动 + visibilitychange）；`ConfigPage.vue` 新增「⏰ 定时通知」Tab → `ScheduleConfigPage.vue`。
-> - `cargo check` / `vue-tsc --noEmit` 均通过。**尚未在真机 Tauri 窗口里手动跑通「立即测试发送」和到点触发**——需要用户在自己已运行的 dev 窗口里验证（见对话里的验证说明）。
-> - 详细选型理由见 `decisions.md`「Review 模块定时批量拉取 + Telegram 通知」。
+> 状态：**已实现，后改为方案 B（后端定时）**。方案 A（前端定时器）实测做不到后台准点（webview 节流），已弃用改到后端。
+>
+> **最终实现（方案 B）**：
+> - 后端 `notify.rs`（Telegram 文本通道）+ `schedule.rs`（后台 std 线程定时：拉取+diff+baseline+消息组装+发送+错过补发；`save_schedule_runtime`/`run_schedule_now` 命令）；`reviews.rs` 抽出 `fetch_reviews` 复用；`auth.rs` 加 `active_key/active_email`；`feedback.rs` 加 `resolve_bot_token`；新增 `chrono` 依赖。
+> - 前端 `utils/scheduleConfig.ts`（UI 配置真相源）+ `utils/scheduleRuntimeSync.ts`（把配置镜像给后端）；`ScheduleConfigPage.vue`（含「立即测试发送」「立即执行一次」）挂 `ConfigPage.vue`「⏰ 定时通知」Tab；`App.vue`/`PlayConsoleConfigPage` 在保存/启动/切账号时同步。
+> - 旧前端定时器 `scheduleDriver.ts`/`scheduledFetch.ts` **已删除**。
+> - `cargo build` / `npm run build` 均通过。**待用户在真机窗口验证**「立即执行一次」+ 到点触发（尤其把窗口丢后台看是否仍准点）。
+> - 选型理由见 `decisions.md`「定时通知从前端定时器改到后端线程」；后台节流坑见 `gotchas.md`。
+> - 决策：只对**当前活跃账号**生效（用户确认）。
 
 ## 已确认决策（2026-07-09）
 

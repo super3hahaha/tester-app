@@ -97,3 +97,10 @@ Tauri 的 webview（WKWebView / WebView2）对同步对话框 `window.confirm()`
 `start_login` 的按-email 去重只在「运行中重新登录该账号」时触发，迁移残留若用户从不重登就永久共存。
 修复：`AuthState::new()` 在 `load_accounts_from_disk` 后调 `dedup_accounts()`——同 email 优先保留带 sub 的、删掉无 sub 的 email-key 残留，并把指向被删 key 的 `active` 重映射到 sub-key 后落盘。这样迁移撞车启动即自愈。
 教训：两套 key 来源（迁移 vs 登录）天然不统一，**任何"按内容算 key"的存储都要在加载层做一次按业务唯一键的去重**，不能只在写入路径去重。
+
+## 定时通知：窗口不在前台/被遮挡时，JS 定时器可能被系统挂起（不只是「app 没开」才会迟发）
+
+最初假设"进程活着即可，窗口最小化/不展示也不影响"（见 decisions.md 方案 A）。实测发现：电脑没睡眠、app 进程也在跑，但窗口**长时间不在前台**（被其它窗口遮挡/最小化）时，`setInterval` 仍可能被系统/WebKit（Tauri macOS 用 WKWebView）挂起而不按时触发——配置 10:10 发送，实际到用户把窗口切回前台的 10:31 才触发（说明定时器在后台期间没跑，一恢复前台立刻补发）。
+跟章节七「坑 1」的睡眠场景是同一类问题、触发条件更宽：不止睡眠会错过，**长时间不可见的窗口也会**。
+**已解决（改到后端方案 B）**：定时逻辑已整体搬到 Rust `schedule.rs`（后台 std 线程），原生线程不受 webview 节流影响，窗口最小化/后台/被遮挡都准点。前端定时器（`scheduleDriver.ts`/`scheduledFetch.ts`）已删除。详见 decisions.md「定时通知从前端定时器改到后端线程」。
+教训留档：**任何"必须按时/在后台跑"的逻辑都别放在 webview 的 JS 定时器里**——WKWebView 会在页面不可见时挂起 setInterval/setTimeout。要后台可靠执行就放后端原生线程。

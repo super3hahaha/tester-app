@@ -90,6 +90,21 @@ impl AuthState {
             active: Mutex::new(active),
         }
     }
+
+    /// 当前活跃账号的 key（= 前端 UserInfo.id / scopedKey 维度）。定时器读它决定「给谁跑」。
+    pub fn active_key(&self) -> Option<String> {
+        self.active.lock().unwrap().clone()
+    }
+
+    /// 当前活跃账号的邮箱（供定时通知消息展示「账号：xxx」）。
+    pub fn active_email(&self) -> Option<String> {
+        let key = self.active.lock().unwrap().clone()?;
+        self.accounts
+            .lock()
+            .unwrap()
+            .get(&key)
+            .map(|a| a.user.email.clone())
+    }
 }
 
 /// 同一 email 若同时存在「带 sub」与「无 sub（迁移残留）」条目，删除无 sub 的那条，

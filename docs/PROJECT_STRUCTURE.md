@@ -13,7 +13,7 @@ tester-app/
 ├── README.md                    # 项目说明
 ├── src/                         # Vue 3 前端源码
 │   ├── main.ts                  # Vue 应用入口，挂载根组件
-│   ├── App.vue                  # 根组件：认证状态路由（登录页 ↔ 主页）；watch(user) 把 UserInfo.id/email 同步写入 activeAccountId/activeAccountEmail（账号隔离维度的唯一来源），并首启触发 migrateLegacyStorageOnce；常驻挂「定时通知」驱动：每分钟 tick + 启动/唤醒时补跑 checkAndFireSchedule（不受子页切换影响）
+│   ├── App.vue                  # 根组件：认证状态路由（登录页 ↔ 主页）；watch(user) 把 UserInfo.id/email 同步写入 activeAccountId/activeAccountEmail（账号隔离维度的唯一来源），并首启触发 migrateLegacyStorageOnce；启动 + watch(user) 切账号时把定时配置镜像给后端（syncScheduleRuntimeToBackend）——定时本身跑在后端线程
 │   ├── vite-env.d.ts            # Vite 类型声明
 │   ├── assets/                  # 静态资源
 │   │   └── vue.svg              # Vue logo
@@ -24,9 +24,8 @@ tester-app/
 │   │   ├── activeAccount.ts     # 【账号隔离】模块级 `activeAccountId`（后端 UserInfo.id 下发的 opaque 账号标识）+ getActiveAccountId()；`activeAccountEmail` 仅供展示（如定时通知模板里的账号行）；唯一写入点在 App.vue 的 watch(user)
 │   │   ├── accountScopedKey.ts  # 【账号隔离】scopedKey(base)=`${base}::acct:${id||"_none"}`；给账号相关的 localStorage key 注入账号维度，切账号自然读到各自数据
 │   │   ├── accountStorageMigration.ts # 【账号隔离】首启一次性迁移：把旧全局配置 key 搬到当前账号命名空间下（幂等，标记 `store-migrated-v1`）；见 handoff-account-scoped-storage.md
-│   │   ├── scheduleConfig.ts    # 定时通知配置：类型 + localStorage 读写（`review-schedule-v1`，scopedKey 隔离）：enabled/times(HH:MM 列表)/notifyOnEmpty/maxItemsInMsg
-│   │   ├── scheduledFetch.ts    # 定时批量拉取的独立执行逻辑（从 handleBatchFetch 精简复制，不碰 ReviewPage）：读 Play Console 拉取配置启用的 app → 并行拉取 → 落 per-app 快照 → 按「已通知 review_id 集合」diff 出新增（含首次启用 baseline 静默、集合随 API 7 天窗口裁剪防无限增长）
-│   │   └── scheduleDriver.ts    # 定时通知驱动：checkAndFireSchedule() 比对当前 HH:MM 命中配置时间点（未触发过）→ 跑 scheduledFetch → 组装 Telegram HTML 消息 → invoke send_telegram_message；「(日期,时间点) 已触发」标记落 localStorage 防重复触发；挂在 App.vue（tick + 启动 + visibilitychange 唤醒补发）
+│   │   ├── scheduleConfig.ts    # 定时通知配置（UI 侧真相源）：类型 + localStorage 读写（`review-schedule-v1`，scopedKey 隔离）：enabled/times(HH:MM 列表)/notifyOnEmpty/maxItemsInMsg
+│   │   └── scheduleRuntimeSync.ts # 把「定时配置 + Play Console 启用应用及筛选 + 应用显示名」聚合成后端可读快照，invoke `save_schedule_runtime` 推给 Rust 定时线程。定时**真正执行在后端**（schedule.rs），前端只镜像配置。调用点：ScheduleConfigPage/PlayConsoleConfigPage 保存后、App.vue 启动 + watch(user) 切账号。（旧的纯前端定时器 scheduleDriver.ts/scheduledFetch.ts 已删除——webview JS 定时器窗口不在前台会被节流，做不到后台准点，见 gotchas.md）
 │   └── pages/                   # 页面组件
 │       ├── LoginPage.vue        # Google OAuth 登录页
 │       ├── MainPage.vue         # 主布局：三级导航（工作区 → 选项 → 内容）
@@ -64,7 +63,8 @@ tester-app/
 │   │   ├── manifest.rs          # 生成-上传 manifest 落盘：记录 Drive ID ↔ 源文件（CSV/PPTX/页码）的映射
 │   │   ├── feedback.rs          # 反馈打包：zip + Telegram sendDocument 上传 + 本地归档 / pending 重试；额外导出 resolve_bot_token()（bot token 单独取用，供 notify.rs 复用同一个 bot）
 │   │   ├── notify.rs            # 定时通知的 Telegram 文本通道：send_telegram_message(text) 调 sendMessage（HTML 模式）；get/save_notify_config 读写 ~/.tester-app/notify.json（chat_id 独立于 feedback，bot_token 留空则复用 feedback 的）；is_notify_configured 供 UI 判断
-│   │   ├── reviews.rs           # Google Play Developer API：评论拉取（list_play_reviews）/ 应用列表（list_play_apps）/ 评论回复（reply_to_review）
+│   │   ├── schedule.rs          # 【定时通知·后端】后台原生线程每 30s tick，到点拉当前活跃账号启用应用的评论→按日期+星级筛选→与已通知集合 diff→组装 HTML→send_telegram_message。跑在原生线程+Rust 网络栈，不受 webview 前后台/节流影响（只要进程没被 Cmd+Q 杀）。save_schedule_runtime（前端镜像配置入 ~/.tester-app/schedule/<账号>/runtime.json）/ run_schedule_now（UI「立即执行一次」）。日期预设 port 自 batchReplyDates；per-account fired/notified/baseline 文件；快照 key `{账号}__{包名}` 与前端兼容，ReviewPage 可读
+│   │   ├── reviews.rs           # Google Play Developer API：评论拉取（list_play_reviews；纯逻辑抽成 pub fetch_reviews(pkg,pages,lang,token) 供 schedule.rs 复用）/ 应用列表（list_play_apps）/ 评论回复（reply_to_review）
 │   │   ├── reply.rs             # 批量回复生成：写 pending JSON → 跑 claude /review-reply（--add-dir 模板目录 + prompt 传路径）→ 读回 candidates.json（reply-log 事件流）
 │   │   ├── skill_sync.rs        # Skill 热更新：从 GitHub 拉取 zipball 同步到 ~/.claude/skills/，启动时静默 + Settings 手动
 │   │   ├── templates.rs         # 模板管理：~/.tester-app/templates/ 的增删改 + xlsx 导入/导出（export_templates_xlsx：A 类别/B 英文/C 起各语言）；模板含 lang（en/zh-CN 双源）+ translations（预存各语言译文）；写全文同时重建瘦身 index；skill 从此目录读
@@ -126,6 +126,11 @@ tester-app/
 ├── reviews-cache/               # 评论快照（ReviewPage 持久化）：每个 app 一份（全量拉取列表 + fetchedAt），单 app 拉取与批量拉取写同一格式；批量视图重进时由多份 per-app 快照按当前 Config 派生拼装。免每次重拉、留住 7 天外评论。**按账号隔离**：文件名前端拼成 `{账号id}__{包名}`（账号 id 含 `@`/`.` 会被后端 sanitize 成 `_`），后端不感知账号
 │   └── {accountId}__{packageName}.json # { version, reviews:[全量 list], fetchedAt }；回复成功后按 review_id 读-改-写同步
 ├── review-analysis/             # 评论分析「知识配置」：每个产品一份应用知识块 .md（{slug}.md，如 xfolder.md）；知识配置页维护，分析时按评论来源 app 注入提示词
+├── schedule/                    # 定时通知（schedule.rs）：每个账号一个子目录（sanitize 后的 account-key）
+│   └── <account-key>/
+│       ├── runtime.json         # 前端镜像的运行时配置：{ schedule:{enabled,times,notifyOnEmpty,maxItemsInMsg}, apps:[{packageName,displayName,datePreset,customFromDate,customToDate,stars}] }
+│       ├── fired.json           # 今日已触发时间点：{ date:"YYYY-MM-DD", times:["10:00"] }（跨天自动重置）
+│       └── notified.json        # 每个 app 的已通知集合：{ "<包名>": { baselineDone, ids:[review_id...] } }；首次 baseline 静默、按 API 窗口裁剪
 ├── templates/                   # 回复模板（模板管理页维护）；review-reply skill 运行时从这里读
 │   ├── templates.json           # 全文权威源 {version, products:{产品:{templates:[{id,category,text,lang}]}}}（lang=en/zh-CN 源语言，缺省 en）
 │   ├── index.json               # 瘦身索引（id+category），写 templates 时由后端自动重建；skill 匹配只读它
@@ -159,9 +164,9 @@ tester-app/
 | 配置页（容器） | `ConfigPage.vue` | 纯配置页：顶部 Tab 切换「Play Console 拉取配置」/「Batch Reply 配置」/「⏰ 定时通知」，分别嵌 `PlayConsoleConfigPage` / `BatchReplyConfigPage` / `ScheduleConfigPage`（v-show 常驻挂载，各管自己的 localStorage）。挂在 Review 工作区的 `review-config` 入口 |
 | Play Console · 配置 | `PlayConsoleConfigPage.vue` | 多 app 卡片：勾选启用 + 日期预设 + 星级 + **回复状态**（全部/无回复/已回复/回复后又更新；选「回复后又更新」时星级置灰忽略）；非自定义预设显示「实际范围」预览（每分钟刷新）；顶部全选/全不选/刷新/清空配置/保存工具栏；写 localStorage `play-console-multi-config-v1`，应用列表缓存与 Batch 共用 `batch-reply-apps-cache-v1`；两者均经 scopedKey 按账号隔离（apps-cache 三页共用常量，引用处同步 scopedKey 化）。ReviewPage 读它作每个 app 的拉取/筛选默认值 |
 | 批量回复 · 配置 | `BatchReplyConfigPage.vue` | 多 app 卡片：每张卡片独立**日期预设**（自上一个工作日 / 昨天 / 今天 / 近 7 天 / 自定义）+ 星级；非自定义预设下显示「实际范围」预览（每分钟刷新一次，跨午夜自动重算）；顶部「全选/全不选/刷新/清空配置/保存」工具栏（清空配置 = 删除所有版本 localStorage key 并恢复出厂默认，带 confirm）；显式保存到 localStorage `batch-reply-multi-config-v3`（读当前 v3 保留用户显式预设选择；不再读 v1/v2 老格式做无账号区分的全局兜底——见下方「账号隔离」）；应用列表缓存在 `batch-reply-apps-cache-v1` 让冷启动秒回。**账号隔离**：apps-cache / `batch-reply-multi-config-v3` 均已 scopedKey 化（三处引用同步）。`LEGACY_KEYS`（v1/v2）常量只留给「清空配置」顺手清残留，onMounted 不再拿它们做兜底读——早期版本这里照搬过 review/play 那套「复制全局配置给当前 active 账号」的迁移，因为 batch 配置升级前是真正多账号混用的一份、无法归属，结果给从没配过 batch 的账号塞了别人的配置（脏数据教训），现在改为账号迁移只删旧 key、不复制，各账号从空开始配（见 `accountStorageMigration.ts::migrateLegacyStorageOnceV2`） |
-| 定时通知 · 配置 | `ScheduleConfigPage.vue` | 开关 + 时间点（`HH:MM`，可加多个）+「无新增也发心跳」开关 + 消息条数；Telegram 通知目标单独一块（chat_id + 可选 bot_token，留空复用 feedback 的 bot）+「立即测试发送」按钮；保存到 localStorage `review-schedule-v1`（scopedKey 隔离）+ 后端 `notify.json`（`save_notify_config`）|
-| 定时通知 · 驱动 | `App.vue` + `scheduleDriver.ts` | 每分钟 tick（`setInterval`）+ 启动时/`visibilitychange` 变为 visible 时都调 `checkAndFireSchedule()`：比对当前 `HH:MM` 是否有「今天已过且未触发」的配置时间点，命中则合并成一次 `runScheduledFetch()`（见下）+ 组装 HTML 消息 + `invoke send_telegram_message`；多个错过的时间点会合并成一条消息（避免刷屏），已触发的 `(日期,时间点)` 记 localStorage `review-schedule-fired-v1` 防重复。**休眠期间不会 tick**——唤醒后靠 `visibilitychange`/下一次 tick 补发，不保证准点 |
-| 定时通知 · 拉取 | `scheduledFetch.ts` | 从 `handleBatchFetch`（ReviewPage.vue）精简复制，不改原逻辑：读 `play-console-multi-config-v1` 启用的 app → 并行 `list_play_reviews` → 落 per-app 快照（与 ReviewPage 格式一致，互通）→ 按各 app 日期+星级筛选 → 与「已通知 review_id 集合」（`review-schedule-notified-v1::{pkg}`）diff 出新增。**首次为某 app 启用**（`review-schedule-baseline-done-v1::{pkg}` 未设）时静默把当前命中项全标为已通知，不算新增（避免把近 7 天存量当"新增"刷屏）；已通知集合每次按当前 API 返回窗口裁剪，防止无限增长 |
+| 定时通知 · 配置 | `ScheduleConfigPage.vue` | 开关 + 时间点（`HH:MM`，可加多个）+「无新增也发心跳」开关 + 消息条数；Telegram 通知目标单独一块（chat_id + 可选 bot_token，留空复用 feedback 的 bot）+「立即测试发送」（发一条固定测试消息）+「立即执行一次」（`run_schedule_now`：立刻真实巡检一次，尊重去重）按钮；保存到 localStorage `review-schedule-v1`（scopedKey 隔离）+ 后端 `notify.json`（`save_notify_config`）+ 保存后 `syncScheduleRuntimeToBackend()` 镜像给定时线程 |
+| 定时通知 · 驱动（后端） | `schedule.rs` + `App.vue`/`scheduleRuntimeSync.ts` | **真正的定时跑在后端原生线程**：每 30s tick，比对本地 `HH:MM` 是否有「今天已过且未触发」的配置时间点，命中则拉取+diff+发消息，`(日期,时间点)` 记 `~/.tester-app/schedule/<账号>/fired.json` 防重复；多个错过时间点合并成一条（标「错过补发」）。前端只在保存/启动/切账号时把配置镜像成 `runtime.json`。**优点**：窗口最小化/后台/被遮挡都准点（不受 webview 节流影响），只要进程没被 Cmd+Q 杀；睡眠/退出期间不跑，恢复后下一 tick 补发 |
+| 定时通知 · 拉取+diff（后端） | `schedule.rs::execute_and_notify` | 取当前活跃账号 token（失效发 Telegram 警告不静默吞）→ 逐个启用 app 调 `fetch_reviews` → 落 per-app 快照（key `{账号}__{包名}`，与 ReviewPage 格式一致互通）→ 按日期预设(port 自 batchReplyDates)+星级筛选 → 与 `notified.json` 里该 app 的已通知集合 diff 出新增。**首次某 app**（baselineDone 未设）静默把命中项全标已通知、不算新增（避免把近 7 天存量当新增刷屏）；已通知集合每次按当前 API 窗口裁剪防无限增长 |
 | 批量回复 · 执行 | `BatchReplyPage.vue` | **挂在 MainPage 时带 `:key="acct-batch-${accountEpoch}"`，切账号会整页重挂**（否则 v-show 常驻不重跑 onMounted，会显示上一个账号的候选）。进入时从 localStorage 读多 app 配置（scopedKey，同上）→ 「拉取候选评论」**在拉取时**调 `computeRange()` 把预设解析为绝对日期（所以配置一次永远新鲜）→ 并行调每个启用 app 的 `list_play_reviews`（不互相阻塞）→ 按 app 分组折叠展示（默认展开，组头显示 app 名 / 包名 / 当次实际日期范围 + 预设名 / 候选数）→ **「🔎 匹配模板并填充」调 `run_reply_skill`**（顶部下拉选回复语言默认 `auto`，模型固定 Sonnet）→ 命中模板的评论预填翻译好的模板正文（+中文预览）；未匹配的标「未匹配·需手动处理」留空手填 → 逐条提交直接发，「一键提交全部」弹 confirm 后跨 app 串行 + 200ms 间隔调 `reply_to_review`。每条评论可点「✋ 人工处理」手动标记（按 review_id 持久化到 localStorage `batch-reply-manual-ids-v1`，**已 scopedKey 化**，跨拉取/重启/账号切换各自独立保留）——标记后**只**从「匹配模板并填充」里排除，仍可手填 / AI 单条回复 / 逐条或一键提交。每张候选卡片另有「🤖 AI 回复」按钮 → 弹单条生成弹窗（回复方向**可留空**，留空时后端让模型据评论自行判断方向〔含「无法更新」等常见问题的标准排查引导〕；+ 语言 → `generate_single_reply` 出 3 条风格各异候选）→「选用并填入」把文案灌进该卡片回复框（标记手动、清掉未匹配标），再走原有逐条/一键提交。**单条弹窗是多任务的**：可同时开多条（缩小成右下角竖直堆叠的悬浮条），生成走前端队列排队（后端 `ReplyState` 一次只跑一个），`reply-log` 路由到当前正在生成的那个任务、不污染批量匹配日志。每条候选也有「➕ 添加模板」收录入口（任意语言：英文存英文、其它用中文预览存中文、填类别 → `product_for_package` + `add_template` 带 lang）。与「匹配模板」是两条独立路径：模板匹配=批量命中翻译，AI 回复=单条 freeform 现生成 |
 | 模板管理 | `TemplateManagerPage.vue` | 挂在 Review 工作区。每条模板行首有 ★收藏开关（写 `tpl-fav-ids-v1`，供评论页「模板回复」弹窗读）。按产品 tab 切换（显示条数 + 关联 app），列出该产品模板，每条可改 category/正文 → `update_template`，删除走**内联两步确认**；顶部「+ 新增模板」→ `add_template`（后端按产品前缀自动生成 id）；「📥 从 xlsx 导入」用系统文件选择器（`@tauri-apps/plugin-dialog`）选 xlsx → 内联确认（覆盖该产品）→ `import_templates_xlsx`。**产品 tab 管理**：hover 右上角出现 × 按钮，鼠标停留二步确认后 `delete_template_product` 删除产品及其所有模板；「管理关联」按钮弹窗编辑 `package_map.json`（`get_package_map` / `save_package_map`），可增删改包名↔产品映射（包名/显示名/关联产品下拉选）。所有写操作落 `~/.tester-app/templates/`，skill 直接读 |
 | Gmail 页 | `GmailPage.vue` | 读 Apps Script 同步出的 Google Sheet（手动粘贴表链接，存 localStorage `gmail-sources-v1`，每张表可配 Chrome profile + 关联邮件模板产品）：复用 `read_sheet`/`get_sheet_tabs` 读 `Mail` tab、按表头名取列；列表每封固定 3 行（发件人+日期 / 主题 / 机翻中文），「详情」弹大卡（机翻上 / 原文下），「↗」按配的 Chrome profile 打开邮件深链（`open_url_in_chrome_profile`），「已读」本地隐藏（localStorage `gmail-read-ids-v1`，「↩ 撤销上一封」LIFO）。绕开 Gmail OAuth Testing 7 天过期，全程见 `gmail-handoff.md` |
