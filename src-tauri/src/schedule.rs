@@ -34,6 +34,9 @@ pub struct ScheduleCfg {
     pub notify_on_empty: bool,
     #[serde(default = "default_max_items")]
     pub max_items_in_msg: usize,
+    // 额外扫「回复后又被用户更新」的评论（开发者回复过、用户又改了评论 → 回复可能过时需复查）。
+    #[serde(default)]
+    pub check_updated: bool,
 }
 fn default_max_items() -> usize {
     5
@@ -79,6 +82,11 @@ struct AppNotified {
 
 type NotifiedMap = HashMap<String, AppNotified>;
 
+// 「回复后又更新」已提醒记录：pkg -> (review_id -> 提醒时该评论的 user_comment_ts)。
+// 同一条只提醒一次；用户之后又更新（user_comment_ts 变大）则再次提醒。不做 baseline
+// —— 已存在的「待复查」是真实待办，首次就该提醒（与"新增差评"不同，那个才需静默基线）。
+type UpdatedMap = HashMap<String, HashMap<String, i64>>;
+
 // ---- 路径 ----
 
 fn data_dir() -> PathBuf {
@@ -109,6 +117,9 @@ fn fired_path(key: &str) -> PathBuf {
 }
 fn notified_path(key: &str) -> PathBuf {
     account_dir(key).join("notified.json")
+}
+fn updated_path(key: &str) -> PathBuf {
+    account_dir(key).join("updated.json")
 }
 
 fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &PathBuf) -> T {
@@ -213,17 +224,75 @@ fn truncate_chars(s: &str, n: usize) -> String {
     }
 }
 
-// 单个 app 的新增结果
+// 单个 app 的结果。item = (star_rating, text, user_comment_ts)
 struct AppResult {
     display_name: String,
-    // (star_rating, text, user_comment_ts)
     new_items: Vec<(i32, String, i64)>,
+    updated_items: Vec<(i32, String, i64)>,
+}
+
+fn star_counts_str(items: &[(i32, String, i64)]) -> String {
+    let mut counts: HashMap<i32, usize> = HashMap::new();
+    for (star, _, _) in items {
+        *counts.entry(*star).or_insert(0) += 1;
+    }
+    let mut keys: Vec<i32> = counts.keys().cloned().collect();
+    keys.sort();
+    keys.iter()
+        .map(|s| format!("★{}×{}", s, counts[s]))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 组装一段（新增 or 待复查）：按 app 的星级分布 + 时间倒序前 N 条明细。
+fn build_section(
+    lines: &mut Vec<String>,
+    results: &[AppResult],
+    pick: impl Fn(&AppResult) -> &Vec<(i32, String, i64)>,
+    header: &str,
+    list_header: &str,
+    max_items: usize,
+) {
+    lines.push(String::new());
+    lines.push(header.to_string());
+    for r in results {
+        let items = pick(r);
+        if items.is_empty() {
+            continue;
+        }
+        lines.push(format!(
+            "• {}　{}",
+            escape_html(&r.display_name),
+            star_counts_str(items)
+        ));
+    }
+    let mut all: Vec<(&str, i32, &str, i64)> = Vec::new();
+    for r in results {
+        for (star, text, ts) in pick(r) {
+            all.push((&r.display_name, *star, text, *ts));
+        }
+    }
+    all.sort_by(|a, b| b.3.cmp(&a.3));
+    let top_count = all.len().min(max_items);
+    if top_count > 0 {
+        lines.push(String::new());
+        lines.push(list_header.to_string());
+        for (i, (name, star, text, _)) in all.iter().take(max_items).enumerate() {
+            lines.push(format!("{} ★{} {}", i + 1, star, escape_html(name)));
+            lines.push(format!("   \"{}\"", escape_html(&truncate_chars(text, 40))));
+        }
+        let rest = all.len().saturating_sub(top_count);
+        if rest > 0 {
+            lines.push(format!("（其余 {} 条见 app）", rest));
+        }
+    }
 }
 
 fn build_message(
     results: &[AppResult],
     failed: &[String],
     total_new: usize,
+    total_updated: usize,
     email: &str,
     time_label: &str,
     max_items: usize,
@@ -237,50 +306,29 @@ fn build_message(
         now_month_day, time_label, catchup
     ));
     lines.push(format!("账号：{}", escape_html(email)));
-    lines.push(String::new());
-    lines.push(format!("📊 本次新增 <b>{}</b> 条（按配置筛选）", total_new));
-    for r in results {
-        if r.new_items.is_empty() {
-            continue;
-        }
-        let mut counts: HashMap<i32, usize> = HashMap::new();
-        for (star, _, _) in &r.new_items {
-            *counts.entry(*star).or_insert(0) += 1;
-        }
-        let mut keys: Vec<i32> = counts.keys().cloned().collect();
-        keys.sort();
-        let star_parts: Vec<String> = keys
-            .iter()
-            .map(|s| format!("★{}×{}", s, counts[s]))
-            .collect();
-        lines.push(format!(
-            "• {}　{}",
-            escape_html(&r.display_name),
-            star_parts.join(" ")
-        ));
-    }
 
-    // 汇总所有新增，按时间倒序取前 N 条
-    let mut all: Vec<(&str, i32, &str, i64)> = Vec::new();
-    for r in results {
-        for (star, text, ts) in &r.new_items {
-            all.push((&r.display_name, *star, text, *ts));
-        }
+    if total_new > 0 {
+        build_section(
+            &mut lines,
+            results,
+            |r| &r.new_items,
+            &format!("📊 本次新增 <b>{}</b> 条（按配置筛选）", total_new),
+            "—— 最新几条 ——",
+            max_items,
+        );
     }
-    all.sort_by(|a, b| b.3.cmp(&a.3));
-    let top = all.iter().take(max_items);
-    let top_count = all.len().min(max_items);
-    if top_count > 0 {
-        lines.push(String::new());
-        lines.push("—— 最新几条 ——".to_string());
-        for (i, (name, star, text, _)) in top.enumerate() {
-            lines.push(format!("{} ★{} {}", i + 1, star, escape_html(name)));
-            lines.push(format!("   \"{}\"", escape_html(&truncate_chars(text, 40))));
-        }
-        let rest = all.len().saturating_sub(top_count);
-        if rest > 0 {
-            lines.push(format!("（其余 {} 条见 app）", rest));
-        }
+    if total_updated > 0 {
+        build_section(
+            &mut lines,
+            results,
+            |r| &r.updated_items,
+            &format!(
+                "🔁 回复后又被用户更新 <b>{}</b> 条（回复可能过时，建议去 app 复查）",
+                total_updated
+            ),
+            "—— 待复查 ——",
+            max_items,
+        );
     }
 
     if !failed.is_empty() {
@@ -329,9 +377,12 @@ async fn execute_and_notify(
     let now_ms = now.timestamp_millis();
 
     let mut notified: NotifiedMap = read_json(&notified_path(key));
+    let mut updated_map: UpdatedMap = read_json(&updated_path(key));
+    let check_updated = runtime.schedule.check_updated;
     let mut results: Vec<AppResult> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
     let mut total_new = 0usize;
+    let mut total_updated = 0usize;
 
     for entry in &runtime.apps {
         let pkg = entry.package_name.clone();
@@ -388,16 +439,49 @@ async fn execute_and_notify(
         st.ids = updated;
         st.baseline_done = true;
 
+        // 「回复后又被用户更新」：开发者回复过 + 用户在回复之后又改了评论（user_comment_ts >
+        // developer_reply_ts）。同窗口内、忽略星级；去重靠 updated_map（同一条只在 user_comment_ts
+        // 变大时再次提醒）。不做 baseline —— 已存在的待复查是真实待办，首次就提醒。
+        let updated_items: Vec<(i32, String, i64)> = if check_updated {
+            let seen = updated_map.entry(pkg.clone()).or_default();
+            let mut out = Vec::new();
+            for r in &reviews {
+                if r.user_comment_ts < from_ts || r.user_comment_ts > to_ts {
+                    continue;
+                }
+                let is_updated = r.developer_reply.is_some()
+                    && r.developer_reply_ts.map(|rt| r.user_comment_ts > rt).unwrap_or(false);
+                if !is_updated {
+                    continue;
+                }
+                let prev = seen.get(&r.review_id).copied().unwrap_or(0);
+                if r.user_comment_ts > prev {
+                    out.push((r.star_rating, r.text.clone(), r.user_comment_ts));
+                    seen.insert(r.review_id.clone(), r.user_comment_ts);
+                }
+            }
+            out
+        } else {
+            Vec::new()
+        };
+        total_updated += updated_items.len();
+
         results.push(AppResult {
             display_name: name,
             new_items,
+            updated_items,
         });
     }
 
     let _ = write_json_atomic(&notified_path(key), &notified);
+    if check_updated {
+        let _ = write_json_atomic(&updated_path(key), &updated_map);
+    }
 
     let cfg = &runtime.schedule;
-    if total_new == 0 {
+
+    // 既无新增差评、也无待复查 → 心跳 or 静默。
+    if total_new == 0 && total_updated == 0 {
         if cfg.notify_on_empty {
             let suffix = if is_catchup { "（错过补发）" } else { "" };
             let msg = format!(
@@ -417,19 +501,26 @@ async fn execute_and_notify(
         return format!("{}（{} 个应用拉取失败）", base, failed.len());
     }
 
+    // 有新增 or 有待复查（待复查是可执行待办，即便无新增也发，不受 notify_on_empty 影响）。
     let msg = build_message(
         &results,
         &failed,
         total_new,
+        total_updated,
         &email,
         time_label,
         cfg.max_items_in_msg.max(1),
         is_catchup,
         &now_month_day,
     );
+    let summary = match (total_new, total_updated) {
+        (n, 0) => format!("新增 {} 条", n),
+        (0, u) => format!("待复查 {} 条", u),
+        (n, u) => format!("新增 {} 条 · 待复查 {} 条", n, u),
+    };
     match crate::notify::send_telegram_message(msg).await {
-        Ok(()) => format!("已推送：本次新增 {} 条", total_new),
-        Err(e) => format!("新增 {} 条，但推送失败：{}", total_new, e),
+        Ok(()) => format!("已推送：{}", summary),
+        Err(e) => format!("{}，但推送失败：{}", summary, e),
     }
 }
 

@@ -155,6 +155,14 @@ async function handleTestSend() {
       </div>
 
       <div class="row">
+        <label class="row-label">复查提醒</label>
+        <label class="inline-toggle">
+          <input type="checkbox" v-model="cfg.checkUpdated" />
+          <span>顺带扫「回复后又被用户更新」的评论（你回复后用户又改了评论，回复可能过时），有则提醒去复查</span>
+        </label>
+      </div>
+
+      <div class="row">
         <label class="row-label">消息条数</label>
         <input v-model.number="cfg.maxItemsInMsg" type="number" min="1" max="20" class="num-input" />
         <span class="hint">单条消息里最多列出的评论数，超出会折叠为"其余 N 条见 app"</span>

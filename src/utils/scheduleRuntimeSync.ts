@@ -52,6 +52,7 @@ export async function syncScheduleRuntimeToBackend(): Promise<void> {
       times: schedule.times,
       notifyOnEmpty: schedule.notifyOnEmpty,
       maxItemsInMsg: schedule.maxItemsInMsg,
+      checkUpdated: schedule.checkUpdated,
     },
     apps,
   };
