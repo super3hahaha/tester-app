@@ -149,8 +149,16 @@ onMounted(async () => {
     }
   }
   // 老版本只存了单个 appId：把它补进当前包名的记忆表，避免升级后深链失效。
-  if (packageName.value && appId.value && !appIdByPkg.value[packageName.value]) {
-    appIdByPkg.value[packageName.value] = appId.value;
+  // 只在每个账号首次升级时跑一次——否则 packageName/appId 哪怕只是短暂不同步一次
+  // （例如 loadApps() 在启动期静默切换过默认应用、而 appId 联动重置又被 booting 挡住），
+  // 下次启动这行代码就会把不属于当前包名的旧 App ID 永久烙进 appIdByPkg，某个 app
+  // 的评论详情深链会一直跳到别的 app（复现过一次：跳到了写死的默认 App ID）。
+  const legacyAppIdMigratedKey = scopedKey("review-page-appid-legacy-migrated-v1");
+  if (!localStorage.getItem(legacyAppIdMigratedKey)) {
+    if (packageName.value && appId.value && !appIdByPkg.value[packageName.value]) {
+      appIdByPkg.value[packageName.value] = appId.value;
+    }
+    localStorage.setItem(legacyAppIdMigratedKey, "1");
   }
   await loadApps();
   await restoreLastView();
