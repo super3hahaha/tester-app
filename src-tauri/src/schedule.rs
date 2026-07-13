@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone, Timelike};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::auth::AuthState;
 
@@ -477,6 +477,9 @@ async fn execute_and_notify(
     if check_updated {
         let _ = write_json_atomic(&updated_path(key), &updated_map);
     }
+
+    // 通知前端：本账号的评论快照已在后台刷新过 → ReviewPage 重读快照，免得用户还得手动拉取。
+    let _ = app.emit("scheduled-fetch-done", serde_json::json!({ "account": key }));
 
     let cfg = &runtime.schedule;
 

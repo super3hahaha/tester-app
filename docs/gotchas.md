@@ -104,3 +104,14 @@ Tauri 的 webview（WKWebView / WebView2）对同步对话框 `window.confirm()`
 跟章节七「坑 1」的睡眠场景是同一类问题、触发条件更宽：不止睡眠会错过，**长时间不可见的窗口也会**。
 **已解决（改到后端方案 B）**：定时逻辑已整体搬到 Rust `schedule.rs`（后台 std 线程），原生线程不受 webview 节流影响，窗口最小化/后台/被遮挡都准点。前端定时器（`scheduleDriver.ts`/`scheduledFetch.ts`）已删除。详见 decisions.md「定时通知从前端定时器改到后端线程」。
 教训留档：**任何"必须按时/在后台跑"的逻辑都别放在 webview 的 JS 定时器里**——WKWebView 会在页面不可见时挂起 setInterval/setTimeout。要后台可靠执行就放后端原生线程。
+
+## 定时通知：后端刷新了评论快照，ReviewPage 不会自动重读（要 emit 事件推一把）
+
+ReviewPage.vue 是 v-show 常驻挂载，`onMounted` 只在首次跑一次读快照。后端定时线程在后台
+拉完评论、把 `reviews-cache/{账号}__{包名}.json` 更新了，但 ReviewPage 早已挂载、内存里
+还是旧数据 → 用户进页面看不到定时拉到的评论，还得手动点「拉取」。
+修复：`schedule.rs::execute_and_notify` 巡检完 emit `scheduled-fetch-done`（带 account key），
+ReviewPage 监听该事件、非手动拉取中就 `restoreLastView()` 重读快照。冷启动本就会在 onMounted
+读盘、无此问题；这个事件专治「app 一直开着、定时在后台刷新」的场景。
+教训：**后端在后台改了前端已加载的持久化数据，必须主动 emit 事件通知前端刷新**，不能指望
+常驻组件自己发现（v-show 不重挂、onMounted 不重跑）。

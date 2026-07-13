@@ -82,6 +82,19 @@ function daysAgoIso(n: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// Play reviews API 的 androidOsVersion 是设备的 **API Level**（如 35），不是系统版本号。
+// 映射成用户看得懂的 Android 版本；表里没有的（很老/很新）退回标 API 号，避免把 API 当版本误显。
+const ANDROID_API_TO_VERSION: Record<number, string> = {
+  16: "4.1", 17: "4.2", 18: "4.3", 19: "4.4", 21: "5.0", 22: "5.1",
+  23: "6", 24: "7.0", 25: "7.1", 26: "8.0", 27: "8.1", 28: "9",
+  29: "10", 30: "11", 31: "12", 32: "12L", 33: "13", 34: "14",
+  35: "15", 36: "16",
+};
+function androidVersionLabel(api: number): string {
+  const v = ANDROID_API_TO_VERSION[api];
+  return v ? `Android ${v}` : `Android API ${api}`;
+}
+
 const fromDate = ref(daysAgoIso(7));
 const toDate = ref(todayIso());
 
@@ -1060,6 +1073,26 @@ onUnmounted(() => {
   if (unlistenAnalysisLog) unlistenAnalysisLog();
 });
 
+// 后端定时线程巡检完会刷新磁盘快照并 emit 此事件 → 这里重读快照，免得用户还得手动点拉取。
+// 只处理当前活跃账号的事件；用户正在手动拉取时不打断。
+let unlistenScheduled: UnlistenFn | null = null;
+onMounted(async () => {
+  unlistenScheduled = await listen<{ account: string }>("scheduled-fetch-done", async (e) => {
+    if (loading.value || batchLoading.value) return;
+    if (e.payload?.account && e.payload.account !== getActiveAccountId()) return;
+    // 定时拉的是批量那一组（Config 启用的 app）→ 直接落到批量视图，让这页一次看到全部；
+    // 无可用批量快照才退回上次视图。并把上次视图指针置为 batch，下次进来也保持一致。
+    if (await restoreBatch()) {
+      localStorage.setItem(scopedKey(LAST_VIEW_KEY), "batch");
+    } else {
+      await restoreLastView();
+    }
+  });
+});
+onUnmounted(() => {
+  if (unlistenScheduled) unlistenScheduled();
+});
+
 function openAnalysis(r: TaggedReview) {
   // 已为该评论建过分析任务就直接展开它（避免重复 / 丢状态）
   const existing = anTasks.value.find((t) => t.review.review_id === r.review_id);
@@ -1354,7 +1387,7 @@ async function submitAnReply(task: AnTask) {
         <div class="review-meta">
           <span v-if="r.app_version_name">v{{ r.app_version_name }}<span v-if="r.app_version_code"> ({{ r.app_version_code }})</span></span>
           <span v-if="r.device">{{ r.device }}</span>
-          <span v-if="r.android_os_version">Android {{ r.android_os_version }}</span>
+          <span v-if="r.android_os_version">{{ androidVersionLabel(r.android_os_version) }}</span>
           <span v-if="r.reviewer_language">lang: {{ r.reviewer_language }}</span>
           <span v-if="r.thumbs_up_count">👍 {{ r.thumbs_up_count }}</span>
           <span v-if="r.thumbs_down_count">👎 {{ r.thumbs_down_count }}</span>
