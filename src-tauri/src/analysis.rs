@@ -143,12 +143,37 @@ fn rv_str<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
 /// 到最后一个 '}'。
 fn extract_json_object(s: &str) -> Option<&str> {
     let start = s.find('{')?;
-    let end = s.rfind('}')?;
-    if end > start {
-        Some(&s[start..=end])
-    } else {
-        None
+    let bytes = s.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escape {
+            escape = false;
+        } else if in_string {
+            match b {
+                b'\\' => escape = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+        } else {
+            match b {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&s[start..=i]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
     }
+    None
 }
 
 /// 拼接评论分析提示词。{app_knowledge} 来自按 package_name 解析出的产品知识块；

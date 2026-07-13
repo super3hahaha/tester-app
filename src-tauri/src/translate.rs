@@ -333,15 +333,41 @@ fn build_prompt(channel: &str, chunk: &[Job]) -> String {
     )
 }
 
-/// 从可能被 markdown/散文包裹的输出里截取 JSON 对象：第一个 '{' 到最后一个 '}'。
+/// 从可能被 markdown/散文包裹的输出里截取 JSON 对象：按括号深度配对（感知字符串/转义），
+/// 避免结尾散文里出现的 '}' 把不相关内容也框进来。
 fn extract_json_object(s: &str) -> Option<&str> {
     let start = s.find('{')?;
-    let end = s.rfind('}')?;
-    if end > start {
-        Some(&s[start..=end])
-    } else {
-        None
+    let bytes = s.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escape {
+            escape = false;
+        } else if in_string {
+            match b {
+                b'\\' => escape = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+        } else {
+            match b {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&s[start..=i]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
     }
+    None
 }
 
 /// 字符数（Unicode scalar 计；与前端 .length 对 BMP 字符一致）。
