@@ -44,6 +44,12 @@ const menuOpen = ref(false);
 const accountEpoch = ref(0);
 const switching = ref(false);
 
+// 头像 URL 有时会加载失败（网络/链接失效），记录下来后改用首字母占位，避免露出裂图图标
+const failedPictures = ref<Record<string, boolean>>({});
+function markPictureFailed(key: string) {
+  failedPictures.value[key] = true;
+}
+
 interface SheetSelection {
   spreadsheetId: string;
   spreadsheetName: string;
@@ -305,11 +311,13 @@ function onSlidesSelect(files: SlidesSelection[]) {
       <div class="user-section">
         <button class="account-trigger" @click="toggleAccountMenu">
           <img
-            v-if="user.picture"
+            v-if="user.picture && !failedPictures[user.id || user.email]"
             :src="user.picture"
             class="avatar"
             referrerpolicy="no-referrer"
+            @error="markPictureFailed(user.id || user.email)"
           />
+          <div v-else class="avatar avatar-fallback">{{ (user.name || user.email).charAt(0).toUpperCase() }}</div>
           <span class="user-email">{{ user.email }}</span>
           <svg class="chevron" :class="{ open: menuOpen }" width="12" height="12" viewBox="0 0 16 16" fill="none">
             <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
@@ -325,10 +333,11 @@ function onSlidesSelect(files: SlidesSelection[]) {
             @click="switchAccount(a.id)"
           >
             <img
-              v-if="a.picture"
+              v-if="a.picture && !failedPictures[a.id]"
               :src="a.picture"
               class="avatar-sm"
               referrerpolicy="no-referrer"
+              @error="markPictureFailed(a.id)"
             />
             <div v-else class="avatar-sm avatar-fallback">{{ (a.name || a.email).charAt(0).toUpperCase() }}</div>
             <div class="account-meta">
