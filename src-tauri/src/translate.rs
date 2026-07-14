@@ -380,8 +380,9 @@ fn parse_translations(raw: &str) -> Result<BTreeMap<String, BTreeMap<String, Str
     let json_str = extract_json_object(raw).ok_or_else(|| {
         format!("模型输出里找不到 JSON 对象：{}", raw.chars().take(300).collect::<String>())
     })?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(json_str).map_err(|e| format!("译文不是合法 JSON：{}", e))?;
+    let parsed: serde_json::Value = serde_json::from_str(json_str)
+        .or_else(|_| serde_json::from_str(&crate::json_repair::repair_json(json_str)))
+        .map_err(|e| format!("译文不是合法 JSON：{}", e))?;
     let mut updates: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     if let Some(obj) = parsed.as_object() {
         for (id, langs_obj) in obj {

@@ -437,8 +437,9 @@ async fn generate_analysis_inner(
             raw.chars().take(300).collect::<String>()
         )
     })?;
-    let analysis: serde_json::Value =
-        serde_json::from_str(json_str).map_err(|e| format!("分析结果不是合法 JSON：{}", e))?;
+    let analysis: serde_json::Value = serde_json::from_str(json_str)
+        .or_else(|_| serde_json::from_str(&crate::json_repair::repair_json(json_str)))
+        .map_err(|e| format!("分析结果不是合法 JSON：{}", e))?;
 
     let usage = usage_cell.lock().unwrap().take();
     Ok(AnalysisResult { analysis, usage })

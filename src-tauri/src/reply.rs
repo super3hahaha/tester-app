@@ -483,6 +483,7 @@ async fn generate_single_reply_inner(
     let json_str = extract_json_array(&raw)
         .ok_or_else(|| format!("模型输出里找不到 JSON 数组：{}", raw.chars().take(300).collect::<String>()))?;
     let candidates: serde_json::Value = serde_json::from_str(json_str)
+        .or_else(|_| serde_json::from_str(&crate::json_repair::repair_json(json_str)))
         .map_err(|e| format!("候选不是合法 JSON 数组：{}", e))?;
 
     let usage = usage_cell.lock().unwrap().take();
@@ -934,6 +935,7 @@ async fn generate_mail_reply_inner(
     let json_str = extract_json_object(&raw)
         .ok_or_else(|| format!("模型输出里找不到 JSON 对象：{}", raw.chars().take(300).collect::<String>()))?;
     let obj: serde_json::Value = serde_json::from_str(json_str)
+        .or_else(|_| serde_json::from_str(&crate::json_repair::repair_json(json_str)))
         .map_err(|e| format!("回复不是合法 JSON：{}", e))?;
 
     let language_out = obj.get("language").and_then(|v| v.as_str()).unwrap_or(&language).to_string();

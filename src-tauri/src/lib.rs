@@ -4,6 +4,7 @@ mod chrome;
 mod claude;
 mod compare;
 mod feedback;
+mod json_repair;
 mod knowledge_base;
 mod manifest;
 mod model_config;
