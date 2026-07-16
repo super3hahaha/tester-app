@@ -63,7 +63,7 @@ tester-app/
 │   │   ├── manifest.rs          # 生成-上传 manifest 落盘：记录 Drive ID ↔ 源文件（CSV/PPTX/页码）的映射
 │   │   ├── feedback.rs          # 反馈打包：zip + Telegram sendDocument 上传 + 本地归档 / pending 重试；额外导出 resolve_bot_token()（bot token 单独取用，供 notify.rs 复用同一个 bot）
 │   │   ├── notify.rs            # 定时通知的 Telegram 文本通道：send_telegram_message(text) 调 sendMessage（HTML 模式）；get/save_notify_config 读写 ~/.tester-app/notify.json（chat_id 独立于 feedback，bot_token 留空则复用 feedback 的）；is_notify_configured 供 UI 判断
-│   │   ├── schedule.rs          # 【定时通知·后端】后台原生线程每 30s tick，到点拉当前活跃账号启用应用的评论→按日期+星级筛选→与已通知集合 diff→组装 HTML→send_telegram_message。跑在原生线程+Rust 网络栈，不受 webview 前后台/节流影响（只要进程没被 Cmd+Q 杀）。save_schedule_runtime（前端镜像配置入 ~/.tester-app/schedule/<账号>/runtime.json）/ run_schedule_now（UI「立即执行一次」）。日期预设 port 自 batchReplyDates；per-account fired/notified/baseline 文件；快照 key `{账号}__{包名}` 与前端兼容，ReviewPage 可读。**巡检完 emit `scheduled-fetch-done`（带 account key）通知前端重读快照**（否则常驻挂载的 ReviewPage 看不到后台刚拉的评论，见 gotchas.md）
+│   │   ├── schedule.rs          # 【定时通知·后端】后台原生线程每 30s tick，到点拉当前活跃账号启用应用的评论→按日期+星级+回复状态（reply_state: ANY/ABSENT/REPLIED/UPDATED，语义与前端 ReviewPage.vue::matchesReplyState 一致）筛选→与已通知集合 diff→组装 HTML→send_telegram_message。跑在原生线程+Rust 网络栈，不受 webview 前后台/节流影响（只要进程没被 Cmd+Q 杀）。save_schedule_runtime（前端镜像配置入 ~/.tester-app/schedule/<账号>/runtime.json）/ run_schedule_now（UI「立即执行一次」）。日期预设 port 自 batchReplyDates；per-account fired/notified/baseline 文件；快照 key `{账号}__{包名}` 与前端兼容，ReviewPage 可读。**巡检完 emit `scheduled-fetch-done`（带 account key）通知前端重读快照**（否则常驻挂载的 ReviewPage 看不到后台刚拉的评论，见 gotchas.md）
 │   │   ├── reviews.rs           # Google Play Developer API：评论拉取（list_play_reviews；纯逻辑抽成 pub fetch_reviews(pkg,pages,lang,token) 供 schedule.rs 复用）/ 应用列表（list_play_apps）/ 评论回复（reply_to_review）
 │   │   ├── reply.rs             # 批量回复生成：写 pending JSON → 跑 claude /review-reply（--add-dir 模板目录 + prompt 传路径）→ 读回 candidates.json（reply-log 事件流）
 │   │   ├── skill_sync.rs        # Skill 热更新：从 GitHub 拉取 zipball 同步到 ~/.claude/skills/，启动时静默 + Settings 手动
@@ -129,9 +129,9 @@ tester-app/
 ├── review-analysis/             # 评论分析「知识配置」：每个产品一份应用知识块 .md（{slug}.md，如 xfolder.md）；知识配置页维护，分析时按评论来源 app 注入提示词
 ├── schedule/                    # 定时通知（schedule.rs）：每个账号一个子目录（sanitize 后的 account-key）
 │   └── <account-key>/
-│       ├── runtime.json         # 前端镜像的运行时配置：{ schedule:{enabled,times,notifyOnEmpty,maxItemsInMsg}, apps:[{packageName,displayName,datePreset,customFromDate,customToDate,stars}] }
+│       ├── runtime.json         # 前端镜像的运行时配置：{ schedule:{enabled,times,notifyOnEmpty,maxItemsInMsg}, apps:[{packageName,displayName,datePreset,customFromDate,customToDate,stars,replyState}] }；replyState 默认 ANY，兼容旧文件（字段是后补的）
 │       ├── fired.json           # 今日已触发时间点：{ date:"YYYY-MM-DD", times:["10:00"] }（跨天自动重置）
-│       ├── notified.json        # 每个 app 的已通知集合：{ "<包名>": { baselineDone, ids:[review_id...] } }；首次 baseline 静默、按 API 窗口裁剪
+│       ├── notified.json        # 每个 app 的已通知集合：{ "<包名>": { baselineDone, ids:[review_id...] } }；首次 baseline 静默；ids 只增不减（不再按当次 API 窗口裁剪——Google 评论接口分页/排序不稳定，裁剪会把已推送过的记录冲掉导致重复推送）
 │       └── updated.json         # （checkUpdated 开启时）「回复后又更新」已提醒记录：{ "<包名>": { "<review_id>": 提醒时的 user_comment_ts } }；同条只在 ts 变大时再次提醒，不做 baseline
 ├── templates/                   # 回复模板（模板管理页维护）；review-reply skill 运行时从这里读
 │   ├── templates.json           # 全文权威源 {version, products:{产品:{templates:[{id,category,text,lang}]}}}（lang=en/zh-CN 源语言，缺省 en）
