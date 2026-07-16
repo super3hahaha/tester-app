@@ -43,6 +43,7 @@ export async function syncScheduleRuntimeToBackend(): Promise<void> {
           customFromDate: c.customFromDate,
           customToDate: c.customToDate,
           stars: c.stars,
+          replyState: c.replyState,
         }))
     : [];
 

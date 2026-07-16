@@ -56,6 +56,25 @@ pub struct AppEntry {
     pub custom_to_date: String,
     #[serde(default)]
     pub stars: Vec<i32>,
+    // ANY|ABSENT|REPLIED|UPDATED，语义与前端 ReviewPage.vue::matchesReplyState 一致。
+    // 默认 ANY 兼容旧 runtime.json（字段是后补的）。
+    #[serde(default = "default_reply_state")]
+    pub reply_state: String,
+}
+fn default_reply_state() -> String {
+    "ANY".to_string()
+}
+
+fn matches_reply_state(r: &crate::reviews::Review, state: &str) -> bool {
+    match state {
+        "ABSENT" => r.developer_reply.is_none(),
+        "REPLIED" => r.developer_reply.is_some(),
+        "UPDATED" => {
+            r.developer_reply.is_some()
+                && r.developer_reply_ts.map(|rt| r.user_comment_ts > rt).unwrap_or(false)
+        }
+        _ => true, // ANY / 未知值不筛
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Default)]
@@ -410,6 +429,7 @@ async fn execute_and_notify(
                 r.user_comment_ts >= from_ts
                     && r.user_comment_ts <= to_ts
                     && entry.stars.contains(&r.star_rating)
+                    && matches_reply_state(r, &entry.reply_state)
             })
             .collect();
 
@@ -417,26 +437,25 @@ async fn execute_and_notify(
         let first_run = !st.baseline_done;
         // 用 owned 集合，避免 known 借用 st.ids 挡住后面对 st 的写。
         let known: std::collections::HashSet<String> = st.ids.iter().cloned().collect();
+        let new_matches: Vec<&crate::reviews::Review> =
+            matched.iter().filter(|r| !known.contains(&r.review_id)).cloned().collect();
         let new_items: Vec<(i32, String, i64)> = if first_run {
             Vec::new()
         } else {
-            matched
+            new_matches
                 .iter()
-                .filter(|r| !known.contains(&r.review_id))
                 .map(|r| (r.star_rating, r.text.clone(), r.user_comment_ts))
                 .collect()
         };
         total_new += new_items.len();
 
-        // 已通知集合裁剪到当前 API 窗口内 + 纳入本次命中，防止无限增长
-        let matched_set: std::collections::HashSet<String> =
-            matched.iter().map(|r| r.review_id.clone()).collect();
-        let updated: Vec<String> = reviews
-            .iter()
-            .map(|r| r.review_id.clone())
-            .filter(|id| known.contains(id) || matched_set.contains(id))
-            .collect();
-        st.ids = updated;
+        // 已通知集合只增不减：把本次新命中的 id 并入即可，不再按「是否在这次 API 返回里」
+        // 裁剪旧记录——Google 评论接口分页/排序不保证稳定，按存在与否裁剪会把已推送过的
+        // 记录冲掉，导致同一条评论在之后某次巡检里被误判成「新增」重新推送（即便它早已被
+        // 回复）。增长量可忽略：id 是字符串，长期攒积也就几十 KB。
+        for r in &new_matches {
+            st.ids.push(r.review_id.clone());
+        }
         st.baseline_done = true;
 
         // 「回复后又被用户更新」：开发者回复过 + 用户在回复之后又改了评论（user_comment_ts >
