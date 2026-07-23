@@ -640,6 +640,34 @@ pub struct ClaudeAccountInfo {
     pub logged_in: bool,
     pub email: Option<String>,
     pub subscription: Option<String>,
+    /// 裸命令 `claude` 是否能在登录 shell 的 PATH 里被解析到。
+    /// cli_path 可能来自 Claude Desktop App 内置副本（不在 PATH 里），
+    /// 这种情况下终端敲 `claude` 会 command not found，需要提示完整路径。
+    pub cli_in_path: bool,
+}
+
+/// 检查裸命令 `claude` 能否在登录 shell 里被解析（即终端直接敲 `claude` 是否可用）。
+/// 只在需要展示登录提示命令时才调用，避免给已登录的快速路径增加 shell 启动开销。
+fn claude_command_in_path() -> bool {
+    if cfg!(windows) {
+        std::process::Command::new("cmd")
+            .args(["/c", "where", "claude"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    } else {
+        for shell in &["/bin/zsh", "/bin/bash"] {
+            if let Ok(out) = std::process::Command::new(shell)
+                .args(["-l", "-c", "command -v claude"])
+                .output()
+            {
+                if out.status.success() && !out.stdout.is_empty() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 fn extract_email_from_jwt(token: &str) -> Option<String> {
@@ -733,12 +761,21 @@ pub fn get_claude_account() -> ClaudeAccountInfo {
             .map(String::from);
     }
 
+    // 只有"已安装但未登录"时才需要告诉前端登录提示命令该不该显示完整路径,
+    // 已登录或未安装时这个值无关紧要，不必多花一次 shell 启动开销去查。
+    let cli_in_path = if installed && !logged_in {
+        claude_command_in_path()
+    } else {
+        true
+    };
+
     ClaudeAccountInfo {
         installed,
         cli_path,
         logged_in,
         email,
         subscription,
+        cli_in_path,
     }
 }
 

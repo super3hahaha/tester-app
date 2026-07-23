@@ -114,6 +114,7 @@ interface ClaudeAccountInfo {
   logged_in: boolean;
   email: string | null;
   subscription: string | null;
+  cli_in_path: boolean;
 }
 
 const claudeInfo = ref<ClaudeAccountInfo | null>(null);
@@ -150,6 +151,17 @@ const claudeStatus = computed<"ok" | "no-login" | "no-install" | "unknown">(() =
   if (!info.installed) return "no-install";
   if (!info.logged_in) return "no-login";
   return "ok";
+});
+
+// cli_path 可能来自 Claude Desktop App 内置副本，不在终端 PATH 里；
+// 这种情况下裸命令 `claude` 会 command not found，改用完整路径提示登录。
+const claudeLoginCommand = computed(() => {
+  const info = claudeInfo.value;
+  if (!info) return "claude";
+  if (!info.cli_in_path && info.cli_path) {
+    return `"${info.cli_path}"`;
+  }
+  return "claude";
 });
 
 onMounted(() => {
@@ -308,11 +320,16 @@ async function copyText(text: string) {
         <div class="status-text">
           <div class="status-line">已安装，但未登录</div>
           <div class="status-sub">
-            打开终端运行下面这条命令，按提示完成登录：
+            <template v-if="claudeInfo!.cli_in_path">
+              打开终端运行下面这条命令，按提示完成登录：
+            </template>
+            <template v-else>
+              检测到的 CLI 不在终端 PATH 里（终端直接敲 <code>claude</code> 会提示找不到命令），打开终端运行下面这条完整路径命令来登录：
+            </template>
           </div>
           <div class="code-row">
-            <code>claude</code>
-            <button class="copy-btn" @click="copyText('claude')">Copy</button>
+            <code>{{ claudeLoginCommand }}</code>
+            <button class="copy-btn" @click="copyText(claudeLoginCommand)">Copy</button>
           </div>
         </div>
       </div>

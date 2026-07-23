@@ -913,6 +913,29 @@ const tplUsedLang = ref(""); // 实际填入用的语言码
 const tplFallback = ref(false); // 无对应语言译文、回退英文源文
 const tplWantedLang = ref(""); // 回退时记下原本想要的语言（提示用）
 const tplSubmitting = ref(false);
+const tplCurrentItem = ref<FavTemplate | null>(null); // 当前选中模板（供语言下拉列出可用语言）
+
+// 语言下拉的显示名（评论语言字段来自 Google API，取值不总是可信，
+// 这里允许手动改选模板已有的任意译文语言，而不是死等自动识别）
+const TPL_LANG_NAMES: Record<string, string> = {
+  en: "英语", "zh-CN": "中文", ar: "阿拉伯语", cs: "捷克语", de: "德语", es: "西班牙语",
+  fa: "波斯语", fr: "法语", in: "印尼语", it: "意大利语", ja: "日语", ko: "韩语",
+  ms: "马来语", nl: "荷兰语", pl: "波兰语", pt: "葡萄牙语", ro: "罗马尼亚语", ru: "俄语",
+  th: "泰语", tr: "土耳其语", uk: "乌克兰语", vi: "越南语", "zh-rCN": "简体中文", "zh-rTW": "繁体中文",
+  bn: "孟加拉语", da: "丹麦语", el: "希腊语", fi: "芬兰语", hi: "印地语", hu: "匈牙利语",
+  "kn-rIN": "卡纳达语", "ml-rIN": "马拉雅拉姆语", mr: "马拉地语", "pa-rIN": "旁遮普语",
+  sk: "斯洛伐克语", sv: "瑞典语", "ta-rIN": "泰米尔语", "te-rIN": "泰卢固语", "ur-rIN": "乌尔都语",
+};
+function tplLangLabel(code: string): string {
+  const name = TPL_LANG_NAMES[code];
+  return name ? `${code} · ${name}` : code;
+}
+// 当前模板已有译文的语言清单（源语言 + translations 的 key），供下拉手动切换
+const tplLangOptions = computed(() => {
+  const t = tplCurrentItem.value;
+  if (!t) return [] as string[];
+  return Array.from(new Set([t.lang, ...Object.keys(t.translations || {})]));
+});
 
 const tplReplyLen = computed(() => [...tplReplyText.value].length);
 const tplHasFavs = computed(
@@ -958,6 +981,7 @@ async function openTplDialog(r: TaggedReview) {
   tplFallback.value = false;
   tplUsedLang.value = "";
   tplWantedLang.value = "";
+  tplCurrentItem.value = null;
   tplGeneral.value = [];
   tplSpecific.value = [];
   tplSpecificProduct.value = "";
@@ -992,7 +1016,18 @@ function applyTemplate(item: FavTemplate) {
   tplUsedLang.value = res.lang;
   tplFallback.value = res.fallback;
   tplWantedLang.value = res.fallback ? r.reviewer_language || "" : "";
+  tplCurrentItem.value = item;
   tplError.value = "";
+}
+
+// 手动切换语言下拉：不依赖评论语言检测，直接按用户选的语言取译文
+function onTplLangChange() {
+  const t = tplCurrentItem.value;
+  if (!t) return;
+  const lang = tplUsedLang.value;
+  tplReplyText.value = lang === t.lang ? t.text : (t.translations?.[lang] ?? t.text);
+  tplFallback.value = false;
+  tplWantedLang.value = "";
 }
 
 function closeTplDialog() {
@@ -1740,11 +1775,23 @@ async function submitAnReply(task: AnTask) {
         </template>
 
         <div v-if="tplSelectedId || tplReplyText" class="ai-final">
-          <label class="ai-label">回复内容（可手动微调）</label>
-          <div v-if="tplFallback" class="tpl-fallback-note">
-            ⚠️ 该模板没有「{{ tplWantedLang || "该语言" }}」译文，已用{{ tplUsedLang === "zh-CN" ? "中文" : "英文" }}源文填入，可手动改后再提交。
+          <div class="tpl-preview-label-row">
+            <label class="ai-label">回复内容（可手动微调）</label>
+            <select
+              v-if="tplLangOptions.length"
+              class="tpl-lang-select"
+              v-model="tplUsedLang"
+              @change="onTplLangChange"
+            >
+              <option v-for="code in tplLangOptions" :key="code" :value="code">
+                {{ tplLangLabel(code) }}
+              </option>
+            </select>
           </div>
-          <div v-else-if="tplUsedLang" class="tpl-used-note">已按评论语言填入译文（{{ tplUsedLang }}）</div>
+          <div v-if="tplFallback" class="tpl-fallback-note">
+            ⚠️ 该模板没有「{{ tplWantedLang || "该语言" }}」译文，已用{{ tplUsedLang === "zh-CN" ? "中文" : "英文" }}源文填入，可在右上角选别的语言，或手动改后再提交。
+          </div>
+          <div v-else-if="tplUsedLang" class="tpl-used-note">已按评论语言填入译文（{{ tplUsedLang }}），也可在右上角手动切换语言</div>
           <textarea v-model="tplReplyText" class="ai-final-text" rows="4"></textarea>
           <div class="ai-final-foot">
             <span class="ai-charcount" :class="{ over: tplReplyLen > 350 }">{{ tplReplyLen }} / 350</span>
@@ -2807,5 +2854,23 @@ async function submitAnReply(task: AnTask) {
 .tpl-used-note {
   font-size: 11px;
   color: #2f855a;
+}
+.tpl-preview-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.tpl-lang-select {
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #4a5568;
+  cursor: pointer;
+  outline: none;
+}
+.tpl-lang-select:focus {
+  border-color: #9f7aea;
 }
 </style>
