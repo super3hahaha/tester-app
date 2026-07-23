@@ -80,7 +80,7 @@
 - **选择**：在 app 里加「模板管理」页，模板落 `~/.tester-app/templates/`（独立于 skill），skill 改成从这里读——路径由 `reply.rs` 通过 `--add-dir` 授权 + prompt（「模板数据目录：…」）显式传给 skill。
 - **为什么不直接写 skill 的 data/**：skill_sync 更新 skill 时会覆盖 `~/.claude/skills/review-reply/`，写那里会被冲掉；且让 app 耦合 skill 内部路径不干净。独立目录解耦。
 - **索引由全文派生、app 重建**：`templates.json` 是权威全文源，`index.json`（id+category 瘦身索引）由后端 `write_templates_and_index` 在每次写时重建——不再依赖 python build，且二者永不漂移（唯一写出口）。
-- **种子迁移**：首次（无 `~/.tester-app/templates/templates.json`）从 skill 已同步的 `~/.claude/skills/review-reply/data/` 拷三个 json；之后以 app 目录为准。仓库内 xlsx/json/build 脚本降级为历史/初始种子。
+- **种子迁移已退役**：曾在首次（无 `~/.tester-app/templates/templates.json`）从 skill 已同步的 `~/.claude/skills/review-reply/data/` 拷三个 json，供老架构迁移用；迁移早已完成，该逻辑会导致任何新装机器只要同步过 review-reply skill 就被埋入真实业务模板（新用户应看到空界面），已删除。现在没有 `templates.json` 就直接建空结构，不再看 skill data。
 - **package_map 第一期不在 app 管**：包名↔产品映射沿用现有（拷过来只读），skill 仍读它；产品/映射的增改留作后续。
 - **xlsx 仍可批量导入**：保留「从 xlsx 导入」入口（calamine 读，复刻原解析口径），覆盖式灌某产品；日常增删改则在 app 里直接做。
 

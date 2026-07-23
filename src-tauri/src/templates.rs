@@ -93,16 +93,6 @@ fn ns_dir(namespace: &str) -> PathBuf {
     }
 }
 
-/// skill_sync 把 review-reply 下载到这里，首次迁移从它拷种子。
-fn skill_data_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap()
-        .join(".claude")
-        .join("skills")
-        .join("review-reply")
-        .join("data")
-}
-
 fn now_secs() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -118,16 +108,6 @@ pub fn ensure_templates_dir_ns(namespace: &str) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建模板目录失败：{}", e))?;
 
     let tpl = dir.join("templates.json");
-    if !tpl.exists() && namespace != "email" {
-        let seed = skill_data_dir();
-        for f in ["templates.json", "index.json", "package_map.json"] {
-            let src = seed.join(f);
-            let dst = dir.join(f);
-            if src.exists() && !dst.exists() {
-                let _ = std::fs::copy(&src, &dst);
-            }
-        }
-    }
     if !tpl.exists() {
         let mut empty = TemplatesFile {
             version: now_secs(),
