@@ -136,3 +136,21 @@ const maxSelectableDate = computed(() => todayIso());  // ❌ 首次算完就冻
 **推广**：本项目任何"依赖当前时间"的 computed/派生值都有这个风险（因为 app 常驻）。凡是 getter 里出现 `new Date()`、`Date.now()`、"今天/本周/最近 N 天"，都要问一句"跨天后会不会自动更新"。
 
 **顺带**：跨天判断别用 `toDate.value === today`（用户手动选历史日期时会误触发平移），用 `maxSelectableDate.value === today` 只在真跨天时动。
+
+## App 图标两个坑：dev 模式不会自动更新 + macOS 标准比例是 80.5%
+
+**坑 1：改了 `src-tauri/icons/` 里的图标，`tauri dev` 重启后 Dock 图标还是旧的。**
+
+根因：图标是 `generate_context!` 宏在**编译期**嵌进 Rust 二进制的，cargo 不追踪图标文件的变化，所以改图标不会触发重编译，dev 二进制里永远是旧图。
+
+修法：`touch src-tauri/src/lib.rs`（`generate_context!` 所在文件）强制重编，再跑 dev。验证方法：从二进制里提 PNG 看 bbox（`re.finditer(b'\x89PNG\r\n\x1a\n', data)` + PIL getbbox）。
+
+**坑 2：图标内容占画布的比例，macOS 标准是 80.5%（1024 画布上 824px）。**
+
+- 满铺 100% → Dock 里比别的图标大一圈（v1.0.2~v1.0.4 的问题）
+- 缩到 73% → 又偏小（e4b22ca 修过头了）
+- 正确做法：圆角方形图形占画布 80.5%、居中、四周透明。源图从 ac8c859 的 icns 里提 1024px 版，缩放到 824px 贴到 1024 透明画布，再 `npx tauri icon`。
+
+**坑 3（顺带）**：新版 tauri CLI 的 `tauri icon` 会额外生成 `icons/android/`、`icons/ios/` 和 `64x64.png`，本项目不用移动端，生成后要删掉。
+
+另外：已安装的 `/Applications/tester-app.app` 是 ad-hoc 签名，可以直接替换 `Contents/Resources/icon.icns` 后 `codesign --force --deep -s -` 重签 + `killall Dock` 热更图标，不用重新打包。
