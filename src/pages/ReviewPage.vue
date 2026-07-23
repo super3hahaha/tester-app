@@ -736,6 +736,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (unlistenReplyLog) unlistenReplyLog();
   document.removeEventListener("visibilitychange", onVisibilityChange);
+  if (dayRolloverTimer) clearInterval(dayRolloverTimer);
 });
 
 function openAiDialog(r: TaggedReview) {
