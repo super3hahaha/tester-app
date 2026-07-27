@@ -156,3 +156,29 @@
 - **日期预设在 Rust 按到点时刻重算**（不能提前算死）：`resolve_range` port 自 `batchReplyDates.ts`（本地时区），新增 `chrono` 依赖。
 - **旧前端定时器已删**（`scheduleDriver.ts`/`scheduledFetch.ts`）：避免与后端双重发送。`scheduleConfig.ts` 保留作 UI 侧配置真相源。已通知集合/baseline/fired 全从 localStorage 迁到后端文件；后端首跑自动 baseline，不刷屏。
 - **仍未解决**：Cmd+Q 完全退出 / 关机期间不跑（进程都没了）——真要那样只能上 OS 级 cron 独立进程（handoff 方案 C），成本过高不做。「电脑开着 app 常驻」这个诉求方案 B 已满足。
+
+## BugPage / mantis.rs：先只做「查看 + 复制」，后来接上自动化（已超越这条决策，见下一节）
+
+- **需求原话**：拉某 app 某版本的 bug 详情给 skill 用，认证方式是 MantisBT 个人 API Token（而非 review-reply 那种共享账号/浏览器登录态）。
+- **最初选择只做 app 内查看 + 手动复制**，不落文件、不新建/改动任何 skill：当时这条链路只有「人工看完自己判断怎么喂给 Claude」这一个真实用例。**后来加了「勾选 bug + 选 PRD → 生成风险画像」的自动化链路（见下一节），这条手动复制按钮已删除**——具体的 skill 需求出现了，不再是过度设计。
+- **配置不按账号隔离**：`mantis-config.json` 是全局唯一一份（同 `model-config.json`/`notify.json` 的模式）。Mantis 账号体系和本工具的 Google 多账号登录是两套独立的东西，没有理由绑定。
+- **版本筛选在后端做，不在前端**：MantisBT REST API（`GET /api/rest/issues`）只支持 `project_id` 维度的服务端筛选，没有按版本筛的查询参数（核对过官方 `mantisbt_openapi.yaml`，`/api/rest/projects/{id}/versions` 单独是一个接口，issue 列表里只能拿到 `version.name` 字段）。所以 `list_mantis_issues` 翻页拉该项目全量 issue 后在 Rust 侧按 `version.name`（trim + 小写）本地比对，`version_name` 传空串＝不过滤（列出该项目全部）。
+- **响应体用 `serde_json::Value` 防御式解析，不建强类型 struct 对应 Mantis schema**：Mantis 不同大版本/插件配置字段会有出入（比如自定义字段、`notes` 是否内嵌在 issue 详情里），用 `.get("field")` 链 + 缺省空串／`unwrap_or_default()` 比强 struct 更抗变动，代价是 Rust 侧拿不到编译期字段校验，可接受。
+- **列表/详情两段式请求**：`list_mantis_issues` 只回精简摘要（够列表展示），点开某条才 `get_mantis_issue` 单独拉 `description`/`steps_to_reproduce`/`notes` 等重字段——避免为一次列表把所有 issue 的长文本和历史备注都拉下来。
+
+## BugPage 勾选 bug + PRD → prd-risk-profiler 沉淀：只负责「正确调用」，不重新实现沉淀逻辑
+
+- **需求**：在 BugPage 勾选某版本下的一批 bug + 配一份 PRD（Slides），一键跑 `prd-risk-profiler` skill 的「沉淀模式」，更新它自己的知识库（`references/risk-taxonomy.md` 通用层 + `references/apps/<APP名>.md` 专属层，不存在就照 `_TEMPLATE.md` 新建）。
+- **`prd_risk.rs` 不解析/不生成这两份 md**：沉淀模式的"读 PRD 提炼变更清单→和 bug 报告做证据映射→归类通用/专属→更新对应文件"这套逻辑已经完整写在 SKILL.md 里，Rust 侧重新实现一遍既是重复劳动，又容易和 skill 自己的分类规则（置信度、跨 APP 强度判定等）跑偏。`run_prd_risk_profiler` 只做三件事：把勾选 bug 的详情拼成一份文本落盘、把 PRD 导出成逐页 PNG、拼对 `/prd-risk-profiler` 的 prompt 和 `--add-dir` 权限——文件的实际读写完全交给跑在 `bypassPermissions` 下的 claude 子进程自己完成。
+- **`--add-dir` 显式加了 skill 自身目录**（`~/.claude/skills/prd-risk-profiler`）：这是本仓库第一次让 skill 反过来写自己的安装目录（之前所有 skill 调用都只写外部数据目录，如 `~/.tester-app/reviews`），不确定 `bypassPermissions` 是否已经隐含了对 skill 自身目录的写权限，防御性地显式加上更保险，无副作用。
+- **PRD 选择器做成最简版**（只列 Slides 文件名单选一个，不做页码/缩略图）：用户明确要求，且 `export_slides_pdf` 的 `pages` 传空数组本来就是"导出全篇"（`extract_prd.py::parse_slide_range` 空 spec 时返回全部页），不需要另外为这个入口做页码选择 UI。
+- **模型回退到 `model_config::load().testcase`**：最初照抄 `reply.rs` 的 `--model` 传参写法时漏掉了空值回退，导致 `model` 为 `None` 时完全不传 `--model`，claude CLI 会退回它自己全局配置（`~/.claude/settings.json` 的 `model`）——这个值和 app 设置页「模型配置」完全脱节，换台机器或用户改了自己的 CLI 默认模型就会跟着变。修正为跟 `kb_ai_distill` 一样，空值时回退读 `testcase` 字段：PRD 风险画像和 test-case-generator 一样都是 skill 依赖类功能，复用同一个配置项，不新增一个专属字段。
+- **KnowledgeBasePage 新增「PRD 风险画像」视图，直接读写 skill 目录原文件、不做另一份拷贝**：用户明确要求"能预览和修改"，但这两份 md 的权威副本就是 skill 自己的 `references/*.md`——如果 tester-app 自己的知识库（`~/.tester-app/knowledge/`）另存一份，等于引入两份数据源的同步问题（skill 跑沉淀时更新哪一份？两边不一致算谁的？）。所以 `kb_list_skill_risk_docs`/`kb_read_skill_doc`/`kb_save_skill_doc` 直接对着 `~/.claude/skills/prd-risk-profiler/references/` 操作，不建 `KbDoc` 索引，也不允许在这个视图里新建/删除文件（新建是 skill 沉淀时的副作用，人在 app 里手工建一份空文件没有意义）。
+
+## SupplementPage（复用模式）：另开一条独立链路，不并进 BugPage 的沉淀模式
+
+- **需求**：只给一份新 PRD（没有 bug 报告），调 `prd-risk-profiler` skill 的「复用模式」产出《风险分析报告》+《补充测试点》清单，在 app 里做成可勾选/编辑/保存、按 App→版本管理的界面。这是与 BugPage 现有链路（沉淀模式：勾 bug + PRD → 更新 skill 自己的知识库）**性质不同的另一条路径**：输入不同（不需要 bug）、产出不同（skill 自己的知识库文件 vs. 两份独立的分析报告文件）、消费方式不同（更新知识库 vs. 人工勾选清单），所以做成独立的 `prd_supplement.rs` + `SupplementPage.vue`，不往 `prd_risk.rs`/`BugPage.vue` 里加分支。
+- **调用时用 prompt 显式覆盖 skill 默认的输出路径，不改 SKILL.md**：SKILL.md 复用模式那一节写的是保存到 `/mnt/user-data/outputs/`（云端沙盒路径，本地 CLI 场景不存在），文件名也是 `<APP名>_<版本号>_风险分析.md` 这种带前缀的命名。调用时的 prompt 里直接告诉 claude"这次请保存到 <本地绝对路径>，文件名固定为「风险分析.md」「补充测试点.md」"，覆盖默认建议。选择改 prompt 而不是改 SKILL.md 本身：SKILL.md 是 GitHub 上的共享 skill 源码，本地改了会被 `skill_sync` 下次热更新直接覆盖冲掉；且沿用现有 `prd_risk.rs` 的"只负责正确调用，不重新实现 skill 逻辑"的原则——只是把"调用时到底传什么参数"的范围也扩大到"输出到哪"。生成成功后额外校验这两个约定路径下的文件确实存在，不存在直接报错（防止 skill 没听懂指示、还是写去了默认路径，静默丢数据）。
+- **存储：按 App → 版本 → 生成时间戳三层目录，允许同版本多次生成、不覆盖旧的**：用户明确要"可能会生成很多个补充测试点文档"的管理诉求（比如 PRD 中途改过、想再跑一次看看风险变化），所以每次生成落一个新的时间戳子目录，旧记录保留，前端列表里按时间倒序展示、用户手动删除不需要的。这与《风险分析报告》《补充测试点》一起打包在同一个生成目录下——**两者是文档级关联**（同一次生成产出的一对文件），不做逐条测试点↔分析行的精确映射：skill 产出补充测试点时已经把"风险类别/依据来源/置信度"等字段从建议测试重点里剥掉了（见 SKILL.md 复用模式第 5 步），字段本身不保留可追溯的行 ID，做精确映射要么要求 skill 额外产出结构化索引（增加复杂度和出错面），要么靠文本相似度匹配（脆弱、不可靠）。前端"查看风险报告"就是展开同一目录下的《风险分析.md》整篇只读渲染，成本低、够用。
+- **补充测试点.md 既是展示格式也是存储格式，不引入额外的 JSON 状态文件**：skill 产出的复选框清单（`**模块**` 加粗标题 + `- [ ]` 条目）本身就是可读写的复选框语法，前端解析成 `{modules:[{name, items:[{text, checked}]}]}` 结构渲染成可勾选/编辑的表单，保存时把结构重新序列化回同样格式的 md 直接覆盖原文件——单一数据源，不用维护"md 是显示层、JSON 是数据层"两份互相同步的状态。代价是解析格式绑定 skill 当前产出的固定结构（模块加粗标题 + 复选框列表），SKILL.md 改了格式这边解析会跟着失效，可接受（skill 这一段格式约定写得很死，属于稳定契约）。
+- **勾选/编辑保存直接覆盖，不留 AI 原始版本对比**：这和 `testcase-eval-visual-report` skill 的"评估 AI 用例准确率"场景不同——这里的补充测试点清单是给测试人员自己勾选确认用的工作清单，不是要拿去评估 AI 生成质量，所以不需要额外维护一份"AI 原始生成快照"来支持后续 diff。用户确认过如果以后真需要评估准确率，走现成的 testcase-eval-visual-report 更合适，不必在这里预先设计。

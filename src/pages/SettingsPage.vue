@@ -86,7 +86,8 @@ async function startDownload() {
 }
 
 const MODEL_OPTIONS = [
-  { label: "Sonnet 4.6（推荐）", value: "claude-sonnet-4-6" },
+  { label: "Sonnet 5（推荐）", value: "claude-sonnet-5" },
+  { label: "Sonnet 4.6", value: "claude-sonnet-4-6" },
   { label: "Haiku 4.5（快速省额）", value: "claude-haiku-4-5" },
 ];
 

@@ -2,6 +2,7 @@
 import { ref, computed, watch, nextTick } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { marked } from "marked";
 
 interface KbProduct {
   id: string;
@@ -13,6 +14,16 @@ interface KbDoc {
   name: string;
   productIds: string[];
   scenes: string[];
+}
+
+// PRD 风险画像库：prd-risk-profiler skill 自己的知识库文件（通用层
+// risk-taxonomy.md + 专属层 apps/<APP名>.md），直接读写 skill 目录下的原文件，
+// 不是另存一份；文件的新建由 skill 在 BugPage 跑「生成风险画像」时自动完成，
+// 这里只做浏览 + 纠错编辑。viewId === "prd-risk" 时整个走这一套独立状态。
+interface SkillRiskDoc {
+  id: string;
+  name: string;
+  path: string;
 }
 
 const SKELETON_GENERAL = `# 通用用例偏好（适用于我负责的所有产品）
@@ -90,11 +101,24 @@ const activeDoc = computed(() =>
   allDocs.value.find((d) => d.id === activeDocId.value) || null
 );
 
+// 记住每个视图（通用/各产品）上次打开的资料 id，视图间切换回来时恢复，而不是总落到第一篇
+const lastDocByView = ref<Record<string, string>>({});
+
 const editContent = ref("");
 const savedContent = ref("");
 const dirty = computed(() => editContent.value !== savedContent.value);
 const saving = ref(false);
 const error = ref("");
+
+// 预览模式（渲染后的 md，不可编辑）—— 按文档 id 各自记住，切换文档不互相影响
+const previewModeByDoc = ref<Record<string, boolean>>({});
+const previewMode = computed({
+  get: () => (activeDocId.value ? !!previewModeByDoc.value[activeDocId.value] : false),
+  set: (v: boolean) => {
+    if (activeDocId.value) previewModeByDoc.value[activeDocId.value] = v;
+  },
+});
+const renderedContent = computed(() => marked.parse(editContent.value || "") as string);
 
 // 管理关联弹窗
 const showAssocModal = ref(false);
@@ -260,6 +284,76 @@ async function runDistill() {
   }
 }
 
+// ── PRD 风险画像库（skill 自己的文件） ────────────────────────────────────────
+const skillRiskDocs = ref<SkillRiskDoc[]>([]);
+const skillLoadingList = ref(false);
+const activeSkillDocPath = ref<string | null>(null);
+const activeSkillDoc = computed(
+  () => skillRiskDocs.value.find((d) => d.path === activeSkillDocPath.value) || null
+);
+const skillEditContent = ref("");
+const skillSavedContent = ref("");
+const skillDirty = computed(() => skillEditContent.value !== skillSavedContent.value);
+const skillSaving = ref(false);
+// 预览模式按文件 path 各自记住
+const skillPreviewModeByDoc = ref<Record<string, boolean>>({});
+const skillPreviewMode = computed({
+  get: () => (activeSkillDocPath.value ? !!skillPreviewModeByDoc.value[activeSkillDocPath.value] : false),
+  set: (v: boolean) => {
+    if (activeSkillDocPath.value) skillPreviewModeByDoc.value[activeSkillDocPath.value] = v;
+  },
+});
+const skillRenderedContent = computed(() => marked.parse(skillEditContent.value || "") as string);
+
+async function loadSkillRiskDocs() {
+  skillLoadingList.value = true;
+  error.value = "";
+  try {
+    skillRiskDocs.value = await invoke<SkillRiskDoc[]>("kb_list_skill_risk_docs");
+    if (skillRiskDocs.value.length > 0) {
+      if (!skillRiskDocs.value.some((d) => d.path === activeSkillDocPath.value)) {
+        await selectSkillDoc(skillRiskDocs.value[0].path, true);
+      }
+    } else {
+      activeSkillDocPath.value = null;
+      skillEditContent.value = "";
+      skillSavedContent.value = "";
+    }
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    skillLoadingList.value = false;
+  }
+}
+
+async function selectSkillDoc(path: string, force = false) {
+  if (!force && path === activeSkillDocPath.value) return;
+  if (!force && skillDirty.value && !(await showConfirm("当前文件有未保存改动，切换将丢弃。继续？"))) return;
+  activeSkillDocPath.value = path;
+  error.value = "";
+  try {
+    const content = await invoke<string>("kb_read_skill_doc", { path });
+    skillEditContent.value = content;
+    skillSavedContent.value = content;
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+async function saveSkillDoc() {
+  if (!activeSkillDocPath.value || skillSaving.value) return;
+  skillSaving.value = true;
+  error.value = "";
+  try {
+    await invoke("kb_save_skill_doc", { path: activeSkillDocPath.value, content: skillEditContent.value });
+    skillSavedContent.value = skillEditContent.value;
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    skillSaving.value = false;
+  }
+}
+
 async function loadData() {
   error.value = "";
   try {
@@ -278,6 +372,7 @@ async function selectDoc(id: string, force = false) {
   if (!force && id === activeDocId.value) return;
   if (!force && dirty.value && !await showConfirm("当前资料有未保存改动，切换将丢弃。继续？")) return;
   activeDocId.value = id;
+  lastDocByView.value[props.viewId] = id;
   error.value = "";
   try {
     const content = await invoke<string>("kb_read_doc", { id });
@@ -291,12 +386,23 @@ async function selectDoc(id: string, force = false) {
 // viewId 变化时重新确定默认选中 tab
 watch(
   () => props.viewId,
-  async () => {
+  async (v) => {
+    if (v === "prd-risk") {
+      await loadSkillRiskDocs();
+      return;
+    }
     await loadData();
     const docs = viewDocs.value;
     if (docs.length > 0) {
-      if (!docs.some((d) => d.id === activeDocId.value)) {
-        await selectDoc(docs[0].id, true);
+      const remembered = lastDocByView.value[v];
+      const target =
+        activeDocId.value && docs.some((d) => d.id === activeDocId.value)
+          ? activeDocId.value
+          : remembered && docs.some((d) => d.id === remembered)
+          ? remembered
+          : docs[0].id;
+      if (target !== activeDocId.value) {
+        await selectDoc(target, true);
       }
     } else {
       activeDocId.value = null;
@@ -311,7 +417,9 @@ watch(
 watch(
   () => props.activeOption,
   async (v) => {
-    if (v.startsWith("kb-view:")) {
+    if (v === "kb-view:prd-risk") {
+      await loadSkillRiskDocs();
+    } else if (v.startsWith("kb-view:")) {
       await loadData();
     }
   }
@@ -484,6 +592,70 @@ async function deleteCurrentProduct() {
 
 <template>
   <div class="kb-page">
+    <!-- PRD 风险画像库：skill 自己的文件，浏览 + 纠错编辑 -->
+    <template v-if="viewId === 'prd-risk'">
+      <div class="kb-header">
+        <h3 class="product-title">PRD 风险画像</h3>
+        <p class="subtitle">
+          prd-risk-profiler skill 自己的知识库文件（通用层 risk-taxonomy.md + 专属层
+          apps/&lt;APP名&gt;.md）。这里直接读写 skill 目录下的原文件，不是另存一份；新建由 skill 在
+          Bug 页跑「生成风险画像」时自动完成。
+        </p>
+      </div>
+
+      <div v-if="error" class="banner banner-error">{{ error }}</div>
+
+      <div class="tab-row">
+        <div
+          v-for="doc in skillRiskDocs"
+          :key="doc.path"
+          class="tab-item"
+          :class="{ active: doc.path === activeSkillDocPath }"
+          @click="selectSkillDoc(doc.path)"
+        >
+          <span class="tab-name">{{ doc.name }}</span>
+        </div>
+        <button class="tab-new" :disabled="skillLoadingList" @click="loadSkillRiskDocs">
+          {{ skillLoadingList ? "刷新中…" : "⟳ 刷新" }}
+        </button>
+      </div>
+
+      <div v-if="skillRiskDocs.length === 0 && !skillLoadingList" class="empty-state">
+        <p class="empty-title">暂无文件</p>
+        <p class="empty-desc">
+          先在 Bug 页勾选 bug + 选 PRD，跑一次「生成风险画像」，skill 会自动新建这些文件。
+        </p>
+      </div>
+
+      <div v-if="activeSkillDoc" class="editor-wrap">
+        <div class="pane">
+          <div class="pane-head">
+            <span>{{ activeSkillDoc.name }}</span>
+            <code class="doc-path">{{ activeSkillDoc.path }}</code>
+            <span class="char-count">{{ skillEditContent.length }} 字</span>
+            <button class="preview-toggle" @click="skillPreviewMode = !skillPreviewMode">
+              {{ skillPreviewMode ? "✎ 编辑" : "👁 预览" }}
+            </button>
+          </div>
+          <textarea
+            v-if="!skillPreviewMode"
+            v-model="skillEditContent"
+            class="editor"
+            spellcheck="false"
+          ></textarea>
+          <div v-else class="markdown-preview" v-html="skillRenderedContent"></div>
+        </div>
+        <div v-if="!skillPreviewMode" class="editor-actions">
+          <div class="spacer"></div>
+          <span v-if="skillDirty" class="dirty-hint">● 未保存</span>
+          <button class="btn-primary" :disabled="skillSaving || !skillDirty" @click="saveSkillDoc">
+            {{ skillSaving ? "保存中…" : "保存" }}
+          </button>
+        </div>
+      </div>
+    </template>
+
+    <template v-else>
     <!-- 头部：产品信息 + 操作 -->
     <div class="kb-header" v-if="viewId !== 'common'">
       <div class="product-title-row">
@@ -572,15 +744,20 @@ async function deleteCurrentProduct() {
           <span>{{ activeDoc.name }}</span>
           <code class="doc-path">~/.tester-app/knowledge/docs/{{ activeDoc.id }}.md</code>
           <span class="char-count">{{ editContent.length }} 字</span>
+          <button class="preview-toggle" @click="previewMode = !previewMode">
+            {{ previewMode ? "✎ 编辑" : "👁 预览" }}
+          </button>
         </div>
         <textarea
+          v-if="!previewMode"
           v-model="editContent"
           class="editor"
           spellcheck="false"
           placeholder="开始编写偏好内容，或点下方「插入骨架」…"
         ></textarea>
+        <div v-else class="markdown-preview" v-html="renderedContent"></div>
       </div>
-      <div class="editor-actions">
+      <div v-if="!previewMode" class="editor-actions">
         <button class="btn-ghost" @click="insertSkeleton('general')">插入通用骨架</button>
         <button class="btn-ghost" @click="insertSkeleton('product')">插入产品骨架</button>
         <button class="btn-ghost" @click="openDistillModal">AI 起草/合并</button>
@@ -752,6 +929,7 @@ async function deleteCurrentProduct() {
         <button class="mini-expand" @click.stop="distillMinimized = false">展开</button>
       </div>
     </div>
+    </template>
   </div>
 </template>
 
@@ -962,6 +1140,69 @@ async function deleteCurrentProduct() {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #2d3748;
 }
+
+.preview-toggle {
+  flex-shrink: 0;
+  margin-left: 8px;
+  padding: 3px 10px;
+  font-size: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: white;
+  color: #4a5568;
+  cursor: pointer;
+}
+.preview-toggle:hover { border-color: #667eea; color: #667eea; background: #ebf4ff; }
+
+.markdown-preview {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #2d3748;
+}
+.markdown-preview :deep(h1) { font-size: 19px; font-weight: 700; margin: 0 0 12px; color: #1a202c; }
+.markdown-preview :deep(h2) { font-size: 16px; font-weight: 700; margin: 20px 0 10px; color: #1a202c; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
+.markdown-preview :deep(h3) { font-size: 14px; font-weight: 600; margin: 16px 0 8px; color: #2d3748; }
+.markdown-preview :deep(p) { margin: 0 0 10px; }
+.markdown-preview :deep(ul), .markdown-preview :deep(ol) { margin: 0 0 10px; padding-left: 22px; }
+.markdown-preview :deep(li) { margin-bottom: 4px; }
+.markdown-preview :deep(code) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #f1f5f9;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #d53f8c;
+}
+.markdown-preview :deep(pre) {
+  background: #f7fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0 0 10px;
+}
+.markdown-preview :deep(pre code) { background: none; padding: 0; color: #2d3748; }
+.markdown-preview :deep(blockquote) {
+  margin: 0 0 10px;
+  padding: 4px 12px;
+  border-left: 3px solid #cbd5e0;
+  color: #718096;
+  background: #f7fafc;
+}
+.markdown-preview :deep(table) { border-collapse: collapse; margin: 0 0 12px; width: 100%; }
+.markdown-preview :deep(th), .markdown-preview :deep(td) {
+  border: 1px solid #e2e8f0;
+  padding: 6px 10px;
+  text-align: left;
+}
+.markdown-preview :deep(th) { background: #f7fafc; font-weight: 600; }
+.markdown-preview :deep(hr) { border: none; border-top: 1px solid #e2e8f0; margin: 16px 0; }
+.markdown-preview :deep(a) { color: #667eea; }
+.markdown-preview :deep(strong) { color: #1a202c; }
 
 .editor-actions {
   display: flex;

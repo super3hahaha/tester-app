@@ -6,6 +6,8 @@ import SheetsPage from "./SheetsPage.vue";
 import SlidesPage from "./SlidesPage.vue";
 import GeneratePage from "./GeneratePage.vue";
 import ComparePage from "./ComparePage.vue";
+import BugPage from "./BugPage.vue";
+import SupplementPage from "./SupplementPage.vue";
 import ReviewPage from "./ReviewPage.vue";
 import ConfigPage from "./ConfigPage.vue";
 import BatchReplyPage from "./BatchReplyPage.vue";
@@ -118,6 +120,8 @@ const navItems: NavItem[] = [
       { id: "slides", label: "Google Slides", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="12" height="12" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M5 6h6M5 8.5h4M5 11h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>` },
       { id: "generate", label: "Generate", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 14l5-5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M8 2l.5 1.5L10 4l-1.5.5L8 6l-.5-1.5L6 4l1.5-.5L8 2z" stroke="currentColor" stroke-width="1" fill="currentColor"/><path d="M13 8l.35 1.05 1.05.35-1.05.35L13 10.8l-.35-1.05-1.05-.35 1.05-.35L13 8z" fill="currentColor"/></svg>` },
       { id: "compare", label: "compare", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="4.5" width="5" height="7" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="9.5" y="4.5" width="5" height="7" rx="1" stroke="currentColor" stroke-width="1.2"/><path d="M7 8h2" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/><path d="M6.5 6.5L8 8l-1.5 1.5M9.5 6.5L8 8l1.5 1.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/></svg>` },
+      { id: "bug", label: "Bug", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 5a2.5 2.5 0 012.5 2.5V9A2.5 2.5 0 018 11.5 2.5 2.5 0 015.5 9V7.5A2.5 2.5 0 018 5z" stroke="currentColor" stroke-width="1.2"/><path d="M8 5V3.5M6 3.8L5 3M10 3.8l1-.8M2.8 8h2.2M11 8h2.2M3.3 11.5l2-1.3M12.7 11.5l-2-1.3" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>` },
+      { id: "supplement", label: "补充测试点", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="2.5" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.3"/><path d="M5 8.2l1.6 1.6L11 5.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>` },
     ],
   },
   {
@@ -251,11 +255,23 @@ async function logoutAccount(id: string) {
   }
 }
 
+// 记住每个一级目录上次停留的二级选项，下次点回来时恢复，而不是总重置到默认项
+const lastOptionByWorkspace = ref<Record<string, string>>({});
+
 async function selectWorkspace(ws: NavItem) {
+  lastOptionByWorkspace.value[activeWorkspace.value] = activeOption.value;
   activeWorkspace.value = ws.id;
+  const remembered = lastOptionByWorkspace.value[ws.id];
+
   if (ws.id === "knowledge") {
     await reloadKbProducts();
-    activeOption.value = "kb-view:common";
+    const rememberedValid =
+      remembered === "kb-view:common" ||
+      remembered === "kb-view:prd-risk" ||
+      kbProducts.value.some((p) => `kb-view:${p.id}` === remembered);
+    activeOption.value = rememberedValid ? remembered : "kb-view:common";
+  } else if (remembered && ws.children.some((c) => c.id === remembered)) {
+    activeOption.value = remembered;
   } else if (ws.children.length > 0) {
     activeOption.value = ws.children[0].id;
   }
@@ -406,6 +422,14 @@ function onSlidesSelect(files: SlidesSelection[]) {
           <span class="opt-label">通用</span>
         </div>
         <div
+          class="opt-item"
+          :class="{ active: activeOption === 'kb-view:prd-risk' }"
+          @click="activeOption = 'kb-view:prd-risk'"
+        >
+          <span class="opt-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 5a2.5 2.5 0 012.5 2.5V9A2.5 2.5 0 018 11.5 2.5 2.5 0 015.5 9V7.5A2.5 2.5 0 018 5z" stroke="currentColor" stroke-width="1.2"/><path d="M8 5V3.5M6 3.8L5 3M10 3.8l1-.8M2.8 8h2.2M11 8h2.2M3.3 11.5l2-1.3M12.7 11.5l-2-1.3" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg></span>
+          <span class="opt-label">PRD 风险画像</span>
+        </div>
+        <div
           v-for="p in kbProducts"
           :key="p.id"
           class="opt-item"
@@ -455,6 +479,12 @@ function onSlidesSelect(files: SlidesSelection[]) {
         />
         <ComparePage
           v-show="activeOption === 'compare'"
+        />
+        <BugPage
+          v-show="activeOption === 'bug'"
+        />
+        <SupplementPage
+          v-show="activeOption === 'supplement'"
         />
         <ReviewPage
           :key="`acct-review-${accountEpoch}`"

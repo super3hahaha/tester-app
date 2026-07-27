@@ -7,8 +7,11 @@ mod feedback;
 mod json_repair;
 mod knowledge_base;
 mod manifest;
+mod mantis;
 mod model_config;
 mod notify;
+mod prd_risk;
+mod prd_supplement;
 mod prompt_config;
 mod reply;
 mod reviews;
@@ -23,6 +26,8 @@ use analysis::AnalysisState;
 use auth::AuthState;
 use claude::ClaudeState;
 use compare::CompareState;
+use prd_risk::PrdRiskState;
+use prd_supplement::PrdSupplementState;
 use reply::ReplyState;
 use translate::TranslateState;
 
@@ -41,6 +46,8 @@ pub fn run() {
         .manage(ClaudeState::new())
         .manage(CompareState::new())
         .manage(ReplyState::new())
+        .manage(PrdRiskState::default())
+        .manage(PrdSupplementState::default())
         .manage(TranslateState::new())
         .manage(AnalysisState::new())
         .invoke_handler(tauri::generate_handler![
@@ -137,6 +144,24 @@ pub fn run() {
             knowledge_base::kb_resolve_doc_paths,
             knowledge_base::kb_save_temp_image,
             knowledge_base::kb_ai_distill,
+            mantis::get_mantis_config,
+            mantis::save_mantis_config,
+            mantis::list_mantis_projects,
+            mantis::list_mantis_issues,
+            mantis::get_mantis_issue,
+            prd_risk::run_prd_risk_profiler,
+            prd_risk::stop_prd_risk_profiler,
+            knowledge_base::kb_list_skill_risk_docs,
+            knowledge_base::kb_read_skill_doc,
+            knowledge_base::kb_save_skill_doc,
+            prd_supplement::run_prd_supplement_reuse,
+            prd_supplement::stop_prd_supplement_reuse,
+            prd_supplement::list_prd_supplement_apps,
+            prd_supplement::list_prd_supplement_versions,
+            prd_supplement::list_prd_supplement_generations,
+            prd_supplement::read_prd_supplement_generation,
+            prd_supplement::save_prd_supplement_generation,
+            prd_supplement::delete_prd_supplement_generation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

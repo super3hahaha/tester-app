@@ -22,6 +22,11 @@ const SKILLS: &[SkillSource] = &[
         owner: "super3hahaha",
         repo: "review-reply",
     },
+    SkillSource {
+        name: "prd-risk-profiler",
+        owner: "super3hahaha",
+        repo: "prd-risk-profiler",
+    },
 ];
 
 // GitHub API requires a User-Agent on every request. Anything identifying works.

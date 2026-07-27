@@ -443,3 +443,111 @@ pub async fn kb_ai_distill(
     }
     Ok(final_text)
 }
+
+// ── PRD 风险画像库：浏览/编辑 prd-risk-profiler skill 自己的知识库文件 ──────────
+//
+// 这些 .md 文件（references/risk-taxonomy.md 通用层 + references/apps/<APP>.md
+// 专属层）由 skill 在跑「沉淀模式」时自己读写（见 prd_risk.rs），这里只提供一个
+// 只读扫描 + 读/写入口，让用户不用跳出 app 就能预览、纠错。不建索引、不落
+// KbDoc——直接对着 skill 目录操作，是同一份文件，不是另存一份拷贝。
+
+fn skill_risk_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap()
+        .join(".claude")
+        .join("skills")
+        .join("prd-risk-profiler")
+        .join("references")
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillRiskDoc {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+}
+
+/// 校验 path 落在 skill_risk_dir() 内，防止越权读写任意文件（本地单用户桌面应用，
+/// 仍做最小防御）。canonicalize 要求文件已存在；新文件走 kb_save_skill_doc 时
+/// 允许目标不存在，只校验父目录。
+fn ensure_within_skill_risk_dir(path: &str) -> Result<PathBuf, String> {
+    let root = skill_risk_dir()
+        .canonicalize()
+        .map_err(|e| format!("skill 知识库目录不存在：{}", e))?;
+    let target = PathBuf::from(path);
+    let check_base = if target.exists() {
+        target.canonicalize().map_err(|e| format!("解析路径失败：{}", e))?
+    } else {
+        let parent = target.parent().ok_or("非法路径")?;
+        let parent = parent
+            .canonicalize()
+            .map_err(|e| format!("解析路径失败：{}", e))?;
+        parent.join(target.file_name().ok_or("非法路径")?)
+    };
+    if !check_base.starts_with(&root) {
+        return Err("路径越权：只能访问 prd-risk-profiler 知识库目录下的文件".to_string());
+    }
+    Ok(target)
+}
+
+#[tauri::command]
+pub fn kb_list_skill_risk_docs() -> Result<Vec<SkillRiskDoc>, String> {
+    let dir = skill_risk_dir();
+    let mut docs = Vec::new();
+
+    let taxonomy = dir.join("risk-taxonomy.md");
+    if taxonomy.exists() {
+        docs.push(SkillRiskDoc {
+            id: "risk-taxonomy".to_string(),
+            name: "通用风险（risk-taxonomy）".to_string(),
+            path: taxonomy.to_string_lossy().to_string(),
+        });
+    }
+
+    let dev_compat = dir.join("dev-api-compat.md");
+    if dev_compat.exists() {
+        docs.push(SkillRiskDoc {
+            id: "dev-api-compat".to_string(),
+            name: "开发向 API 兼容性".to_string(),
+            path: dev_compat.to_string_lossy().to_string(),
+        });
+    }
+
+    let apps_dir = dir.join("apps");
+    if let Ok(entries) = std::fs::read_dir(&apps_dir) {
+        let mut app_files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().map(|x| x == "md").unwrap_or(false)
+                    && p.file_stem().map(|s| s != "_TEMPLATE").unwrap_or(false)
+            })
+            .collect();
+        app_files.sort();
+        for p in app_files {
+            let stem = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            docs.push(SkillRiskDoc {
+                id: format!("app:{}", stem),
+                name: format!("{}（专属风险）", stem),
+                path: p.to_string_lossy().to_string(),
+            });
+        }
+    }
+
+    Ok(docs)
+}
+
+#[tauri::command]
+pub fn kb_read_skill_doc(path: String) -> Result<String, String> {
+    let target = ensure_within_skill_risk_dir(&path)?;
+    std::fs::read_to_string(&target).map_err(|e| format!("读取失败：{}", e))
+}
+
+#[tauri::command]
+pub fn kb_save_skill_doc(path: String, content: String) -> Result<(), String> {
+    let target = ensure_within_skill_risk_dir(&path)?;
+    std::fs::write(&target, content).map_err(|e| format!("保存失败：{}", e))
+}
