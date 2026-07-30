@@ -348,6 +348,15 @@ fn migrate_legacy_if_needed() {
     std::fs::remove_file(&legacy_user).ok();
 }
 
+/// 当前 active 账号的 (email, name)，供 feedback.rs 等不持有 AuthState 的模块
+/// 展示"是谁提交的"。直接读盘而非走 AuthState，避免这些调用方都要求前端传 State。
+pub fn current_user() -> Option<(String, String)> {
+    let key = load_active_from_disk()?;
+    let content = std::fs::read_to_string(account_dir(&key).join("auth-user.json")).ok()?;
+    let user: UserInfo = serde_json::from_str(&content).ok()?;
+    Some((user.email, user.name))
+}
+
 fn now_ts() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -48,7 +48,7 @@ fn skill_version_file(name: &str) -> PathBuf {
     skill_local_dir(name).join(".tester-app-version")
 }
 
-fn read_local_version(name: &str) -> Option<String> {
+pub(crate) fn read_local_version(name: &str) -> Option<String> {
     std::fs::read_to_string(skill_version_file(name))
         .ok()
         .map(|s| s.trim().to_string())

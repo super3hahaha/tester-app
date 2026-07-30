@@ -98,16 +98,14 @@ struct FeedbackMeta {
     manifest: Option<GenerateManifest>,
 }
 
-#[derive(Deserialize)]
 struct StoredUser {
     email: String,
     name: String,
 }
 
 fn load_user() -> Option<StoredUser> {
-    let path = data_dir().join("auth-user.json");
-    let content = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
+    let (email, name) = crate::auth::current_user()?;
+    Some(StoredUser { email, name })
 }
 
 fn now_secs() -> u64 {
@@ -227,8 +225,10 @@ fn build_caption(
     manifest: Option<&GenerateManifest>,
     user: Option<&StoredUser>,
 ) -> String {
-    let skill_ver = manifest
-        .and_then(|m| m.skill_version.clone())
+    // ComparePage 的反馈目前只针对 test-case-generator 这一个 skill，直接读本地安装的版本，
+    // 不依赖 manifest 快照（manifest 只在当次生成成功写入时才有，历史/跨会话数据常年缺失）。
+    let skill_ver = crate::skill_sync::read_local_version("test-case-generator")
+        .map(|v| format!("test-case-generator@{}", v))
         .unwrap_or_else(|| "unknown".into());
     let issue = match input.issue_type.as_str() {
         "missing_case" => "漏用例",
