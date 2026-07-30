@@ -585,6 +585,7 @@ pub async fn run_claude_task(
 pub async fn send_claude_input(
     input: String,
     model: Option<String>,
+    image_paths: Option<Vec<String>>,
     app: AppHandle,
     state: State<'_, ClaudeState>,
 ) -> Result<(), String> {
@@ -608,6 +609,17 @@ pub async fn send_claude_input(
     if let Some(m) = model.as_ref().filter(|s| !s.is_empty()) {
         args.push("--model".to_string());
         args.push(m.clone());
+    }
+
+    let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for p in image_paths.unwrap_or_default() {
+        if let Some(parent) = std::path::Path::new(&p).parent() {
+            dirs.insert(parent.to_string_lossy().to_string());
+        }
+    }
+    for d in &dirs {
+        args.push("--add-dir".to_string());
+        args.push(d.clone());
     }
 
     run_claude_and_stream(args, Some(input), app, &state).await

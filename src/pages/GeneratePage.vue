@@ -97,6 +97,7 @@ const error = ref("");
 const done = ref(false);
 const hasSession = ref(false);
 const userInput = ref("");
+const pastedInputImages = ref<string[]>([]);
 const extraInfo = ref("");
 const sending = ref(false);
 const logPanel = ref<HTMLElement | null>(null);
@@ -272,8 +273,48 @@ const canGenerate = computed(
 );
 
 const canSendInput = computed(
-  () => hasSession.value && !generating.value && !sending.value && userInput.value.trim().length > 0
+  () =>
+    hasSession.value &&
+    !generating.value &&
+    !sending.value &&
+    (userInput.value.trim().length > 0 || pastedInputImages.value.length > 0)
 );
+
+// 粘贴截图：从剪贴板取图片 → base64 → 后端落盘拿路径（复用知识库那套逻辑）
+async function onInputPaste(e: ClipboardEvent) {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith("image/")) {
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (!file) continue;
+      try {
+        const buf = await file.arrayBuffer();
+        let binary = "";
+        const bytes = new Uint8Array(buf);
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        const b64 = btoa(binary);
+        const ext = item.type.split("/")[1] || "png";
+        const path = await invoke<string>("kb_save_temp_image", {
+          dataBase64: b64,
+          ext,
+        });
+        pastedInputImages.value.push(path);
+      } catch (err) {
+        error.value = String(err);
+      }
+    }
+  }
+}
+
+function removePastedInputImage(idx: number) {
+  pastedInputImages.value.splice(idx, 1);
+}
+
+function pastedImageName(path: string): string {
+  return path.split(/[/\\]/).pop() || path;
+}
 
 async function handleGenerate() {
   if (props.slidesSelection.length === 0) return;
@@ -374,19 +415,27 @@ async function handleGenerate() {
 async function handleSendInput() {
   if (!canSendInput.value) return;
 
-  const input = userInput.value.trim();
+  const text = userInput.value.trim();
+  const images = pastedInputImages.value.slice();
   userInput.value = "";
+  pastedInputImages.value = [];
   sending.value = true;
   generating.value = true;
   done.value = false;
   error.value = "";
   progress.value = "Sending to Claude...";
 
-  pushLog(`> ${input}`, "user");
+  let input = text;
+  if (images.length > 0) {
+    const imageLines = images.map((p) => `Image: ${p}`).join("\n");
+    input = text ? `${imageLines}\n\n${text}` : imageLines;
+  }
+
+  pushLog(`> ${text}${images.length > 0 ? ` [+${images.length} image(s)]` : ""}`, "user");
   startIdleWatch();
 
   try {
-    await invoke("send_claude_input", { input, model: selectedModel.value });
+    await invoke("send_claude_input", { input, model: selectedModel.value, imagePaths: images });
   } catch (e: any) {
     error.value = String(e);
     sending.value = false;
@@ -396,7 +445,7 @@ async function handleSendInput() {
 }
 
 function handleInputKeydown(e: KeyboardEvent) {
-  if (e.key === "Enter" && !e.shiftKey) {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
     handleSendInput();
   }
@@ -678,21 +727,30 @@ watch(
 
       <!-- Input area for Claude interaction -->
       <div v-if="hasSession && done" class="input-area">
-        <textarea
-          v-model="userInput"
-          class="claude-input"
-          placeholder="Type your response to Claude..."
-          rows="2"
-          :disabled="sending"
-          @keydown="handleInputKeydown"
-        ></textarea>
-        <button
-          class="send-btn"
-          :disabled="!canSendInput"
-          @click="handleSendInput"
-        >
-          {{ sending ? "Sending..." : "Send" }}
-        </button>
+        <div v-if="pastedInputImages.length > 0" class="input-chips">
+          <span v-for="(p, i) in pastedInputImages" :key="i" class="input-chip">
+            🖼 {{ pastedImageName(p) }}
+            <button class="chip-x" @click="removePastedInputImage(i)">✕</button>
+          </span>
+        </div>
+        <div class="input-row">
+          <textarea
+            v-model="userInput"
+            class="claude-input"
+            placeholder="Type your response to Claude... (⌘/Ctrl+Enter 发送，可直接 ⌘/Ctrl+V 粘贴截图)"
+            rows="2"
+            :disabled="sending"
+            @keydown="handleInputKeydown"
+            @paste="onInputPaste"
+          ></textarea>
+          <button
+            class="send-btn"
+            :disabled="!canSendInput"
+            @click="handleSendInput"
+          >
+            {{ sending ? "Sending..." : "Send" }}
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -1109,10 +1167,46 @@ h3 {
 }
 .input-area {
   display: flex;
+  flex-direction: column;
   gap: 8px;
   padding: 12px 14px;
   background: #fafafa;
   border-top: 1px solid #e0e0e0;
+}
+.input-row {
+  display: flex;
+  gap: 8px;
+}
+.input-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.input-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #ebf4ff;
+  color: #4a5568;
+  border-radius: 6px;
+  padding: 3px 6px 3px 8px;
+  font-size: 12px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.input-chip .chip-x {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #718096;
+  font-size: 11px;
+  padding: 0 2px;
+  line-height: 1;
+}
+.input-chip .chip-x:hover {
+  color: #c53030;
 }
 .claude-input {
   flex: 1;
