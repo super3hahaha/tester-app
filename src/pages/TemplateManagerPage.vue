@@ -179,6 +179,7 @@ const pendingImportPath = ref("");
 const showTranslateModal = ref(false);
 const selectedLangs = ref<string[]>([...DEFAULT_CODES]);
 const overwriteMode = ref(false); // false=只补缺失（追加）, true=覆盖重译
+const translateScope = ref<Template | null>(null); // null=整个产品；非 null=仅该条模板
 const translating = ref(false);
 const translateDone = ref(false); // 本次批量翻译已完成 → 按钮变「好的」
 const translateMinimized = ref(false); // 弹窗缩小成右下浮条（仍在翻、编辑仍禁用）
@@ -552,7 +553,14 @@ const importFileName = computed(() => {
 
 // ── 补全多语言弹窗 ──
 
-function openTranslateModal() {
+function openTranslateModal(t?: Template) {
+  translateScope.value = t ?? null;
+  // 单条模式：默认勾选该条已有译文语言（没有则用默认铺底集），且默认「只补缺失」
+  if (t) {
+    const existing = Object.keys(t.translations || {});
+    selectedLangs.value = existing.length ? existing : [...DEFAULT_CODES];
+    overwriteMode.value = false;
+  }
   translateLog.value = [];
   translateDone.value = false;
   translateMinimized.value = false;
@@ -563,6 +571,7 @@ function closeTranslateModal() {
   translateDone.value = false;
   translateMinimized.value = false;
   showTranslateModal.value = false;
+  translateScope.value = null;
 }
 function toggleLang(code: string) {
   const i = selectedLangs.value.indexOf(code);
@@ -589,9 +598,10 @@ async function runBatchTranslate() {
   progressDone.value = 0;
   error.value = "";
   try {
+    const scopeId = translateScope.value?.id;
     const r = await invoke<TranslateResult>("translate_templates", {
       product: selectedProduct.value,
-      ids: null,
+      ids: scopeId ? [scopeId] : null,
       langs: [...selectedLangs.value],
       overwrite: overwriteMode.value,
       channel: NS.value === "email" ? "email" : "gp",
@@ -601,12 +611,18 @@ async function runBatchTranslate() {
     await loadTemplates();
     translateDone.value = true;
     translateMinimized.value = false; // 完成自动弹回大窗，显示「好的」
-    const overCount = NS.value !== 'email' ? templates.value.reduce(
-      (n, t) =>
-        n + Object.values(t.translations || {}).filter((v) => (v as string).length > 350).length,
-      0
+    const scopeAfter = scopeId ? templates.value.find((x) => x.id === scopeId) : null;
+    const overCount = NS.value !== 'email' ? (scopeId
+      ? Object.values(scopeAfter?.translations || {}).filter((v) => (v as string).length > 350).length
+      : templates.value.reduce(
+          (n, t) =>
+            n + Object.values(t.translations || {}).filter((v) => (v as string).length > 350).length,
+          0
+        )
     ) : 0;
-    let msg = `补全完成：${r.templates} 条模板 / ${r.units} 条译文`;
+    let msg = scopeId
+      ? `${scopeId} 补全完成：${r.units} 条译文`
+      : `补全完成：${r.templates} 条模板 / ${r.units} 条译文`;
     if (overCount) msg += ` · ⚠ ${overCount} 条仍超 350（已标红）`;
     flash(msg);
   } catch (e: any) {
@@ -753,7 +769,7 @@ watch(
 
       <div class="meta-spacer"></div>
 
-      <button class="translate-btn" :disabled="translating" @click="openTranslateModal">
+      <button class="translate-btn" :disabled="translating" @click="openTranslateModal()">
         🌐 补全多语言
       </button>
 
@@ -884,6 +900,14 @@ watch(
           </span>
           <div class="tpl-head-spacer"></div>
           <button
+            class="fill-btn"
+            :disabled="translating"
+            title="补全该条：可选目标语言，只补缺失或覆盖重译"
+            @click="openTranslateModal(t)"
+          >
+            补全
+          </button>
+          <button
             class="retrans-btn"
             :class="{ stale: t.stale, busy: retransId === t.id }"
             :disabled="translating"
@@ -923,7 +947,7 @@ watch(
     >
       <div class="modal">
         <div class="modal-head">
-          <h4>补全多语言 · {{ selectedProduct }}</h4>
+          <h4>补全多语言 · {{ translateScope ? translateScope.id : selectedProduct }}</h4>
           <button
             v-if="translating"
             class="modal-min"
@@ -977,7 +1001,12 @@ watch(
           </div>
 
           <p class="est">
-            约 {{ templates.length }} 条模板 × {{ selectedLangs.length }} 语言
+            <template v-if="translateScope">
+              {{ translateScope.id }} × {{ selectedLangs.length }} 语言
+            </template>
+            <template v-else>
+              约 {{ templates.length }} 条模板 × {{ selectedLangs.length }} 语言
+            </template>
             <template v-if="!overwriteMode">（只补缺失，实际更少）</template>
           </p>
 
@@ -1430,6 +1459,7 @@ watch(
 .tpl-head-spacer {
   flex: 1;
 }
+.fill-btn,
 .retrans-btn,
 .save-btn,
 .del-btn {
@@ -1438,6 +1468,18 @@ watch(
   border-radius: 6px;
   cursor: pointer;
   flex-shrink: 0;
+}
+.fill-btn {
+  border: 1px solid #cbd5e0;
+  background: white;
+  color: #2b6cb0;
+}
+.fill-btn:hover {
+  background: #ebf8ff;
+}
+.fill-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .retrans-btn {
   border: 1px solid #cbd5e0;
