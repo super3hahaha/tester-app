@@ -15,9 +15,13 @@ interface SheetData {
   spreadsheet_url: string;
 }
 
-// 一个邮件源 = 一张表（对应一个 Gmail 账号）。手动粘贴链接维护。
+// 一个邮件源 = 一张表的一个分页（同一账号如果同步了多个标签，各标签各自一个分页，
+// 需要分别添加一条邮件源才能都读到；否则永远只读得到 DEFAULT_TAB 那一个分页）。
+// 手动粘贴链接维护。
 interface MailSource {
+  key: string; // 唯一标识：同一 spreadsheet 可能被拆成多条 source（各读不同分页），不能再用 id 当 key
   id: string; // spreadsheet id
+  tab?: string; // 读取的工作表分页名；留空 = 走旧的默认逻辑（优先 Mail，找不到才退回第一个分页）
   label: string; // 备注（账号邮箱等）
   profileDir?: string; // 用哪个 Chrome profile 打开邮件（目录名；空=系统默认浏览器）
   templateProduct?: string; // 关联的邮件模板产品名
@@ -79,6 +83,7 @@ const sheetUrl = ref("");
 const adding = ref(false);
 const newUrl = ref("");
 const newLabel = ref("");
+const newTab = ref("");
 const newProfile = ref("");
 const newTemplateProduct = ref("");
 
@@ -149,7 +154,7 @@ function tplTextForLang(t: TemplateView | undefined, lang: string): string {
 const chromeProfiles = ref<ChromeProfile[]>([]);
 
 const currentSource = computed(
-  () => sources.value.find((s) => s.id === selectedId.value) || null
+  () => sources.value.find((s) => s.key === selectedId.value) || null
 );
 
 async function loadEmailProducts() {
@@ -167,6 +172,10 @@ onMounted(() => {
   } catch {
     sources.value = [];
   }
+  // 旧数据没有 key 字段（当时一个 spreadsheet id 只对应一条 source），补上即可
+  for (const s of sources.value) {
+    if (!s.key) s.key = s.id;
+  }
   try {
     readIds.value = JSON.parse(localStorage.getItem(STORAGE_KEY_READ) || "[]");
   } catch {
@@ -175,7 +184,7 @@ onMounted(() => {
   loadChromeProfiles();
   loadEmailProducts();
   if (sources.value.length > 0) {
-    selectedId.value = sources.value[0].id;
+    selectedId.value = sources.value[0].key;
     loadMails();
   } else {
     adding.value = true;
@@ -215,22 +224,26 @@ function addSource() {
     errorMsg.value = "无效的 Google Sheet 链接（应形如 …/spreadsheets/d/<ID>/edit）";
     return;
   }
-  if (sources.value.some((s) => s.id === id)) {
+  const tab = newTab.value.trim() || undefined;
+  // key 带上 tab，同一个 spreadsheet 才能按分页拆成多条 source；tab 留空则退回旧的按 id 去重
+  const key = tab ? `${id}::${tab}` : id;
+  if (sources.value.some((s) => s.key === key)) {
     errorMsg.value = "";
-    selectSource(id);
+    selectSource(key);
     cancelAdd();
     return;
   }
   const label = newLabel.value.trim() || `表 ${id.slice(0, 6)}…`;
-  sources.value.push({ id, label, profileDir: newProfile.value || undefined, templateProduct: newTemplateProduct.value || undefined });
+  sources.value.push({ key, id, tab, label, profileDir: newProfile.value || undefined, templateProduct: newTemplateProduct.value || undefined });
   cancelAdd();
-  selectSource(id);
+  selectSource(key);
 }
 
 function cancelAdd() {
   adding.value = false;
   newUrl.value = "";
   newLabel.value = "";
+  newTab.value = "";
   newProfile.value = "";
   newTemplateProduct.value = "";
   errorMsg.value = "";
@@ -243,19 +256,19 @@ function onTemplateProductChange(e: Event) {
 
 function removeCurrent() {
   if (!selectedId.value) return;
-  sources.value = sources.value.filter((s) => s.id !== selectedId.value);
+  sources.value = sources.value.filter((s) => s.key !== selectedId.value);
   selectedId.value = "";
   mails.value = [];
   fetchedAt.value = null;
   if (sources.value.length > 0) {
-    selectSource(sources.value[0].id);
+    selectSource(sources.value[0].key);
   } else {
     adding.value = true;
   }
 }
 
-function selectSource(id: string) {
-  selectedId.value = id;
+function selectSource(key: string) {
+  selectedId.value = key;
   loadMails();
 }
 
@@ -265,23 +278,27 @@ function colIndex(headers: string[], name: string): number {
 
 async function loadMails() {
   if (!selectedId.value) return;
+  const source = currentSource.value;
+  if (!source) return;
   loading.value = true;
   errorMsg.value = "";
   permissionDenied.value = false;
   mails.value = [];
   try {
-    // 优先读 Mail tab；万一表里 tab 名不同，退回第一个 tab
-    let tab = DEFAULT_TAB;
-    try {
-      const tabs = await invoke<string[]>("get_sheet_tabs", {
-        spreadsheetId: selectedId.value,
-      });
-      if (tabs.length > 0 && !tabs.includes(DEFAULT_TAB)) tab = tabs[0];
-    } catch {
-      // 取 tab 失败就直接试 Mail
+    // source 显式指定了 tab（分页）就直接读那个；否则走旧逻辑：优先读 Mail tab，万一表里 tab 名不同就退回第一个 tab
+    let tab = source.tab || DEFAULT_TAB;
+    if (!source.tab) {
+      try {
+        const tabs = await invoke<string[]>("get_sheet_tabs", {
+          spreadsheetId: source.id,
+        });
+        if (tabs.length > 0 && !tabs.includes(DEFAULT_TAB)) tab = tabs[0];
+      } catch {
+        // 取 tab 失败就直接试 Mail
+      }
     }
     const data = await invoke<SheetData>("read_sheet", {
-      spreadsheetId: selectedId.value,
+      spreadsheetId: source.id,
       range: tab,
     });
     sheetUrl.value = data.spreadsheet_url;
@@ -442,7 +459,7 @@ async function copyAndJump() {
 }
 
 const currentLabel = computed(
-  () => sources.value.find((s) => s.id === selectedId.value)?.label || ""
+  () => sources.value.find((s) => s.key === selectedId.value)?.label || ""
 );
 
 // ── AI 回复 ───────────────────────────────────────────────────────────────────
@@ -490,6 +507,57 @@ const activeAiId = ref<string | null>(null);
 let aiTaskSeq = 0;
 let aiGenBusy = false;
 
+// 「添加模板」：把 AI 生成的回复草稿收录进当前邮件源关联的模板库（与 ReviewPage 同一套逻辑）。
+// 邮件模板库同样只有 en / zh-CN 两种源语言，非中/英草稿用机翻中文入库。
+const addTplOpen = ref(false);
+const addTplCategory = ref("");
+const addTplBusy = ref(false);
+const addTplError = ref("");
+const addTplFlash = ref("");
+
+function tplPayloadForResult(result: MailReplyResult): { text: string; lang: string } {
+  const l = (result.language || "").toLowerCase();
+  if (l.startsWith("en")) return { text: result.text, lang: "en" };
+  if (l.startsWith("zh")) return { text: result.text, lang: "zh-CN" };
+  return { text: result.text_zh && result.text_zh.trim() ? result.text_zh : result.text, lang: "zh-CN" };
+}
+function startAddTpl() {
+  addTplOpen.value = true;
+  addTplCategory.value = "";
+  addTplError.value = "";
+}
+function cancelAddTpl() {
+  addTplOpen.value = false;
+  addTplError.value = "";
+}
+async function confirmAddTpl(task: AiMailTask) {
+  if (addTplBusy.value || !task.result) return;
+  const product = currentSource.value?.templateProduct;
+  if (!product) {
+    addTplError.value = "当前邮件表未关联模板产品，无法收录。";
+    return;
+  }
+  addTplBusy.value = true;
+  addTplError.value = "";
+  try {
+    const { text, lang } = tplPayloadForResult(task.result);
+    await invoke<string>("add_template", {
+      product,
+      category: addTplCategory.value,
+      text,
+      lang,
+      namespace: "email",
+    });
+    addTplOpen.value = false;
+    addTplFlash.value = `已收录到「${product}」模板库（${lang === "en" ? "英文" : "中文"}模板）`;
+    window.setTimeout(() => (addTplFlash.value = ""), 2500);
+  } catch (e: any) {
+    addTplError.value = String(e);
+  } finally {
+    addTplBusy.value = false;
+  }
+}
+
 const activeAiTask = computed(
   () => aiTasks.value.find((t) => t.id === activeAiId.value) ?? null
 );
@@ -512,6 +580,9 @@ onUnmounted(() => {
 });
 
 function openAiDialog(m: Mail) {
+  addTplOpen.value = false;
+  addTplError.value = "";
+  addTplFlash.value = "";
   const existing = aiTasks.value.find((t) => t.mail.messageId === m.messageId);
   if (existing) { activeAiId.value = existing.id; return; }
   const task: AiMailTask = {
@@ -537,7 +608,11 @@ function closeAiTask(task: AiMailTask) {
 }
 
 function minimizeAiDialog() { activeAiId.value = null; }
-function restoreAiTask(id: string) { activeAiId.value = id; }
+function restoreAiTask(id: string) {
+  activeAiId.value = id;
+  addTplOpen.value = false;
+  addTplError.value = "";
+}
 
 function enqueueAiReply(task: AiMailTask) {
   if (task.status === "generating" || task.status === "queued") return;
@@ -547,6 +622,8 @@ function enqueueAiReply(task: AiMailTask) {
   task.result = null;
   task.editText = "";
   task.copied = false;
+  addTplOpen.value = false;
+  addTplError.value = "";
   processAiQueue();
 }
 
@@ -613,8 +690,8 @@ async function copyAndJumpAi(task: AiMailTask) {
             @change="loadMails"
           >
             <option v-if="sources.length === 0" disabled value="">暂无邮件表</option>
-            <option v-for="s in sources" :key="s.id" :value="s.id">
-              {{ s.label }}
+            <option v-for="s in sources" :key="s.key" :value="s.key">
+              {{ s.label }}{{ s.tab ? ` · ${s.tab}` : "" }}
             </option>
           </select>
           <button class="icon-btn" @click="loadMails" :disabled="loading || !selectedId" title="重新读取">
@@ -639,6 +716,13 @@ async function copyAndJumpAi(task: AiMailTask) {
             @keyup.enter="addSource"
           />
           <input v-model="newLabel" class="label-input" placeholder="备注（账号邮箱，可选）" />
+          <input
+            v-model="newTab"
+            class="label-input"
+            placeholder="分页名（可选，如 Mail_MP3Cutter；留空=默认）"
+            title="表格里对应哪个工作表分页；同一张表想同时加多个标签的邮件源，各自填不同分页名"
+            @keyup.enter="addSource"
+          />
           <button class="fetch-btn" @click="addSource">添加</button>
           <button class="icon-btn" @click="cancelAdd" v-if="sources.length > 0" title="取消">←</button>
         </template>
@@ -844,13 +928,36 @@ async function copyAndJumpAi(task: AiMailTask) {
           </div>
           <textarea class="ai-result-text" v-model="activeAiTask.editText" rows="6"></textarea>
           <div v-if="activeAiTask.result.text_zh" class="ai-result-zh">{{ activeAiTask.result.text_zh }}</div>
-          <div class="ai-result-foot">
+
+          <div v-if="addTplFlash" class="ai-tpl-flash">✓ {{ addTplFlash }}</div>
+          <div v-if="!addTplOpen" class="ai-result-foot">
             <button class="ai-copy-btn secondary" @click="copyAiReply(activeAiTask)">
               {{ activeAiTask.copied ? "已复制 ✓" : "仅复制" }}
             </button>
             <button class="ai-copy-btn" @click="copyAndJumpAi(activeAiTask)">
               复制并跳转 ↗
             </button>
+            <button
+              class="ai-addtpl-btn"
+              :disabled="!currentSource?.templateProduct"
+              :title="currentSource?.templateProduct ? '收录为模板（英文/中文草稿存对应源；其它语言用机翻中文入库）' : '当前邮件表未关联模板产品，先在上方设置里选一个'"
+              @click="startAddTpl"
+            >
+              ➕ 添加模板
+            </button>
+          </div>
+          <div v-else class="ai-addtpl-panel">
+            <input
+              v-model="addTplCategory"
+              class="ai-addtpl-category"
+              placeholder="类别（如：售后道歉 / 排查引导；可留空=未分类）"
+              @keyup.enter="confirmAddTpl(activeAiTask)"
+            />
+            <button class="ai-addtpl-ok" :disabled="addTplBusy" @click="confirmAddTpl(activeAiTask)">
+              {{ addTplBusy ? "收录中…" : "收录" }}
+            </button>
+            <button class="ai-addtpl-cancel" :disabled="addTplBusy" @click="cancelAddTpl">取消</button>
+            <span v-if="addTplError" class="ai-addtpl-err">{{ addTplError }}</span>
           </div>
         </template>
       </div>
@@ -1732,5 +1839,71 @@ async function copyAndJumpAi(task: AiMailTask) {
 }
 .ai-copy-btn.secondary:hover {
   background: #fffaf0;
+}
+.ai-addtpl-btn {
+  font-size: 12px;
+  padding: 5px 14px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  background: white;
+  color: #5a67d8;
+  cursor: pointer;
+}
+.ai-addtpl-btn:hover:not(:disabled) {
+  background: #eef0ff;
+}
+.ai-addtpl-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ai-tpl-flash {
+  font-size: 12px;
+  color: #22543d;
+  background: #c6f6d5;
+  border-radius: 6px;
+  padding: 5px 10px;
+  margin-top: 8px;
+}
+.ai-addtpl-panel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.ai-addtpl-category {
+  flex: 1;
+  min-width: 160px;
+  padding: 4px 8px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.ai-addtpl-ok,
+.ai-addtpl-cancel {
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-addtpl-ok {
+  border: 1px solid #ed8936;
+  background: #ed8936;
+  color: white;
+}
+.ai-addtpl-ok:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ai-addtpl-cancel {
+  border: 1px solid #e2e8f0;
+  background: white;
+  color: #718096;
+}
+.ai-addtpl-err {
+  font-size: 11px;
+  color: #c53030;
+  width: 100%;
 }
 </style>
