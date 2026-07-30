@@ -268,6 +268,9 @@ tester-app/
        │      → ~/.tester-app/exports/{name}_images/*.png（返回 PNG 路径列表）
        └─ 调用 Claude CLI  → run_claude_task(csv, imgPaths)
             └─ claude --print --verbose --output-format stream-json --file <csv> --file <img1> ... '/test-case-generator ...'
+                 ├─ prompt 里附带一条强制绝对路径：~/.tester-app/exports/testcases_<时间戳>.xlsx
+                 │    （防止 skill 内部 pip/生成脚本失败走兜底方案时把文件存去别处，如 ~/Downloads——
+                 │     否则 find_latest_export 扫不到，"Upload to Drive" 按钮就不会出现）
                  └─ 流式 JSON → claude-log 事件 → 前端终端日志
 
 多轮对话

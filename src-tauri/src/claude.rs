@@ -489,6 +489,10 @@ async fn run_claude_and_stream(
 }
 
 
+fn data_dir() -> PathBuf {
+    dirs::home_dir().unwrap().join(".tester-app")
+}
+
 #[tauri::command]
 pub async fn run_claude_task(
     csv_path: Option<String>,
@@ -533,10 +537,21 @@ pub async fn run_claude_task(
             dirs.insert(parent.to_string_lossy().to_string());
         }
     }
+    let exports_dir = data_dir().join("exports");
+    std::fs::create_dir_all(&exports_dir).map_err(|e| e.to_string())?;
+    dirs.insert(exports_dir.to_string_lossy().to_string());
     for d in &dirs {
         args.push("--add-dir".to_string());
         args.push(d.clone());
     }
+
+    let output_path = exports_dir
+        .join(format!(
+            "testcases_{}.xlsx",
+            chrono::Local::now().format("%Y%m%d_%H%M%S")
+        ))
+        .to_string_lossy()
+        .to_string();
 
     let mut prompt = String::from("/test-case-generator\n\n");
     if let Some(csv) = csv_path.as_ref() {
@@ -558,6 +573,10 @@ pub async fn run_claude_task(
         prompt.push_str(extra);
         prompt.push('\n');
     }
+    prompt.push_str(&format!(
+        "\n最终生成的 xlsx 必须保存到这个绝对路径（不要改名、不要换目录，即使中途 pip/生成脚本失败走了兜底方案也要落到这个路径）: {}\n",
+        output_path
+    ));
 
     run_claude_and_stream(args, Some(prompt), app, &state).await
 }

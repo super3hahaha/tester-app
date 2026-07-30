@@ -154,3 +154,11 @@ const maxSelectableDate = computed(() => todayIso());  // ❌ 首次算完就冻
 **坑 3（顺带）**：新版 tauri CLI 的 `tauri icon` 会额外生成 `icons/android/`、`icons/ios/` 和 `64x64.png`，本项目不用移动端，生成后要删掉。
 
 另外：已安装的 `/Applications/tester-app.app` 是 ad-hoc 签名，可以直接替换 `Contents/Resources/icon.icns` 后 `codesign --force --deep -s -` 重签 + `killall Dock` 热更图标，不用重新打包。
+
+## GeneratePage「Upload to Drive」按钮不出现 = skill 把 xlsx 存去了别处
+
+按钮显示条件是 `done && latestExport`（[GeneratePage.vue](../src/pages/GeneratePage.vue)），`latestExport` 来自 `find_latest_export`（[sheets.rs](../src-tauri/src/sheets.rs)），**只扫描 `~/.tester-app/exports/` 目录**，不是全局搜文件。
+
+以前 `run_claude_task` 拼给 Claude 的 prompt（[claude.rs](../src-tauri/src/claude.rs)）从没明确告诉它最终 xlsx 要存哪——完全依赖 `/test-case-generator` skill 自己"猜对"目录。一旦 skill 内部 `pip install` 失败走兜底方案（比如这台机器只有 `pip3`），Claude 会自己选一个"看起来合理"的地方存（比如 `~/Downloads/xxx.xlsx`），导致扫描目录里找不到文件，按钮就不出现，用户会以为这功能没做。
+
+修复：`run_claude_task` 现在会预先创建 `~/.tester-app/exports/`，生成一个带时间戳的绝对路径，并在 prompt 里显式要求"必须存到这个路径，即使兜底方案也要落到这"。**这类"生成产物要被 app 后续扫描/消费"的功能，prompt 里必须给绝对路径，不能指望 skill 文档里的相对路径约定（如 SKILL.md 的 `--output output.xlsx`）在所有分支都被遵守。**
