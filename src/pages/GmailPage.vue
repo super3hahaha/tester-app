@@ -3,6 +3,12 @@ import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  loadFavorites as loadMailFavorites,
+  addFavorite as addMailFavorite,
+  removeFavorite as removeMailFavorite,
+  mailFavKey,
+} from "../utils/mailFavorites";
 
 // app 读的是 Apps Script（gmail-sync.gs）同步出来的 Google Sheet。
 // 表的列顺序固定（见 gmail-sync.gs 的 HEADERS）：
@@ -59,6 +65,9 @@ interface Mail {
   attachments: string;
   link: string;
 }
+
+// MainPage 传当前二级导航项，用来在切回本页时刷新收藏星标（见下面 favKeys 的 watch）
+const props = defineProps<{ activeOption?: string }>();
 
 const STORAGE_KEY = "gmail-sources-v1";
 // 本地「已读/已处理」隐藏标记：存 messageId，拉取时过滤掉（表里的行不会删，靠这个隐藏）
@@ -362,6 +371,44 @@ async function openInGmail(m: Mail) {
   } catch (e: any) {
     errorMsg.value = "打开失败：" + String(e);
   }
+}
+
+// 收藏邮件：星标即收藏状态。收藏时连同当前邮件源信息一起存快照，
+// 这样即使之后标为已读隐藏、或删掉该邮件源，收藏页仍能完整显示并打开原邮件。
+const favKeys = ref<Set<string>>(new Set(Object.keys(loadMailFavorites())));
+
+// MainPage 用 v-show，本页常驻不重新 mount：在「收藏邮件」页取消收藏后切回来，
+// favKeys 还停在切走前的状态（星标仍显示已收藏）。切回本页时重读一次。
+watch(
+  () => props.activeOption,
+  (v) => {
+    if (v === "gmail-inbox") favKeys.value = new Set(Object.keys(loadMailFavorites()));
+  }
+);
+
+function isFavorited(m: Mail): boolean {
+  return favKeys.value.has(mailFavKey(m));
+}
+
+function toggleFavorite(m: Mail) {
+  const key = mailFavKey(m);
+  if (!key) return;
+  if (favKeys.value.has(key)) {
+    removeMailFavorite(key);
+    favKeys.value.delete(key);
+  } else {
+    addMailFavorite({
+      ...m,
+      _sourceKey: currentSource.value?.key || "",
+      _sourceLabel: currentLabel.value,
+      _sourceTab: currentSource.value?.tab || "",
+      _profileDir: currentSource.value?.profileDir || "",
+      favoritedAt: Date.now(),
+    });
+    favKeys.value.add(key);
+  }
+  // Set 原地增删不触发模板重算，换个引用强制刷新星标
+  favKeys.value = new Set(favKeys.value);
 }
 
 function openDetail(m: Mail) {
@@ -807,6 +854,12 @@ async function copyAndJumpAi(task: AiMailTask) {
           <span v-if="hasAttachment(m)" class="att-dot" :title="m.attachments">📎</span>
           <div class="mi-actions">
             <button
+              class="fav-star-btn"
+              :class="{ active: isFavorited(m) }"
+              @click="toggleFavorite(m)"
+              :title="isFavorited(m) ? '取消收藏' : '收藏这封邮件'"
+            >{{ isFavorited(m) ? "★" : "☆" }}</button>
+            <button
               v-if="currentSource?.templateProduct"
               class="tpl-btn"
               @click="openTplDialog(m)"
@@ -993,6 +1046,12 @@ async function copyAndJumpAi(task: AiMailTask) {
             <span class="ts">{{ selectedMail.date }}</span>
           </div>
           <div class="detail-head-actions">
+            <button
+              class="fav-star-btn"
+              :class="{ active: isFavorited(selectedMail) }"
+              @click="toggleFavorite(selectedMail)"
+              :title="isFavorited(selectedMail) ? '取消收藏' : '收藏这封邮件'"
+            >{{ isFavorited(selectedMail) ? "★" : "☆" }}</button>
             <button
               v-if="currentSource?.templateProduct"
               class="web-btn tpl-web-btn"
@@ -1219,8 +1278,24 @@ async function copyAndJumpAi(task: AiMailTask) {
 .mi-actions {
   margin-left: auto;
   display: flex;
+  align-items: center;
   gap: 6px;
   flex-shrink: 0;
+}
+.fav-star-btn {
+  border: none;
+  background: transparent;
+  font-size: 17px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  color: #cbd5e0;
+}
+.fav-star-btn:hover {
+  color: #d69e2e;
+}
+.fav-star-btn.active {
+  color: #d69e2e;
 }
 .detail-btn {
   padding: 3px 12px;

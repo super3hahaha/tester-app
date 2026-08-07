@@ -6,8 +6,11 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { lastWorkdayBefore, toIso, computeRange } from "../utils/batchReplyDates";
 import { loadPlayConfig } from "../utils/playConsoleConfig";
 import { loadFavIds } from "../utils/templateFavorites";
+import { loadFavorites, addFavorite, removeFavorite, updateFavoriteReply } from "../utils/reviewFavorites";
 import { scopedKey } from "../utils/accountScopedKey";
 import { getActiveAccountId } from "../utils/activeAccount";
+
+const props = defineProps<{ activeOption?: string }>();
 
 interface PlayApp {
   package_name: string;
@@ -604,6 +607,35 @@ const selectedAppLabel = computed(() => {
   return a ? a.display_name : "";
 });
 
+// ── 收藏评论（评论卡片右下角 ★，收录进「收藏评论」tab）─────────────────────
+const favIds = ref<Set<string>>(new Set());
+onMounted(() => {
+  favIds.value = new Set(Object.keys(loadFavorites()));
+});
+
+// MainPage 用 v-show，本页常驻不重新 mount；从「收藏评论」tab 取消收藏后切回本页
+// 需要重新读一次，否则这里的 favIds 还停在切走前的状态（显示已收藏）。
+watch(
+  () => props.activeOption,
+  (v) => {
+    if (v === "review-play") favIds.value = new Set(Object.keys(loadFavorites()));
+  }
+);
+
+function isFavorited(r: TaggedReview): boolean {
+  return favIds.value.has(r.review_id);
+}
+
+function toggleFavorite(r: TaggedReview) {
+  if (favIds.value.has(r.review_id)) {
+    removeFavorite(r.review_id);
+    favIds.value.delete(r.review_id);
+  } else {
+    addFavorite({ ...r, favoritedAt: Date.now() });
+    favIds.value.add(r.review_id);
+  }
+}
+
 // ── AI 回复 ──────────────────────────────────────────────────────────────
 interface GenCandidate {
   style: string;
@@ -878,6 +910,7 @@ async function handleSubmitReply(task: AiTask) {
     task.review.developer_reply = text;
     task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
     persistReplyToSnapshot(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
+    updateFavoriteReply(task.review.review_id, text, task.review.developer_reply_ts);
     aiTasks.value = aiTasks.value.filter((t) => t.id !== task.id);
     if (activeTaskId.value === task.id) activeTaskId.value = null;
   } catch (e: any) {
@@ -1058,6 +1091,7 @@ async function submitTplReply() {
     r.developer_reply = text;
     r.developer_reply_ts = Math.floor(Date.now() / 1000);
     persistReplyToSnapshot(r._pkg, r.review_id, text, r.developer_reply_ts);
+    updateFavoriteReply(r.review_id, text, r.developer_reply_ts);
     tplDlgReview.value = null;
   } catch (e: any) {
     tplError.value = String(e);
@@ -1271,6 +1305,7 @@ async function submitAnReply(task: AnTask) {
     task.review.developer_reply = text;
     task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
     persistReplyToSnapshot(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
+    updateFavoriteReply(task.review.review_id, text, task.review.developer_reply_ts);
     anTasks.value = anTasks.value.filter((t) => t.id !== task.id);
     if (activeAnId.value === task.id) activeAnId.value = null;
   } catch (e: any) {
@@ -1458,6 +1493,12 @@ async function submitAnReply(task: AnTask) {
           <div class="reply-text">{{ r.developer_reply }}</div>
         </div>
         <div class="review-actions">
+          <button
+            class="fav-star-btn"
+            :class="{ active: isFavorited(r) }"
+            @click="toggleFavorite(r)"
+            :title="isFavorited(r) ? '取消收藏' : '收藏这条评论'"
+          >{{ isFavorited(r) ? "★" : "☆" }}</button>
           <button class="web-btn" @click="openReviewInConsole(r)" title="在 Play Console 中打开该评论">
             🌐 在网页中打开
           </button>
@@ -2386,6 +2427,21 @@ async function submitAnReply(task: AnTask) {
   background: #f5f5fa;
   border-color: #cbd5e0;
   color: #2d3748;
+}
+.fav-star-btn {
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+  color: #cbd5e0;
+}
+.fav-star-btn:hover {
+  color: #d69e2e;
+}
+.fav-star-btn.active {
+  color: #d69e2e;
 }
 
 .ai-overlay {

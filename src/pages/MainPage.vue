@@ -9,12 +9,14 @@ import ComparePage from "./ComparePage.vue";
 import BugPage from "./BugPage.vue";
 import SupplementPage from "./SupplementPage.vue";
 import ReviewPage from "./ReviewPage.vue";
+import FavoriteReviewsPage from "./FavoriteReviewsPage.vue";
 import ConfigPage from "./ConfigPage.vue";
 import BatchReplyPage from "./BatchReplyPage.vue";
 import TemplateManagerPage from "./TemplateManagerPage.vue";
 import KnowledgeConfigPage from "./KnowledgeConfigPage.vue";
 import KnowledgeBasePage from "./KnowledgeBasePage.vue";
 import GmailPage from "./GmailPage.vue";
+import FavoriteMailsPage from "./FavoriteMailsPage.vue";
 import AppScriptPage from "./AppScriptPage.vue";
 import SettingsPage from "./SettingsPage.vue";
 import PromptConfigPage from "./PromptConfigPage.vue";
@@ -99,6 +101,7 @@ const navItems: NavItem[] = [
       { id: "review-batch-reply", label: "Batch Reply · Run", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="9" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M5 6h2M5 9h2M9 6h2M9 9h2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>` },
       { id: "review-templates", label: "GP模板管理", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 5c0-.55.45-1 1-1h10c.55 0 1 .45 1 1v7c0 .55-.45 1-1 1H3c-.55 0-1-.45-1-1V5z" stroke="currentColor" stroke-width="1.3"/><path d="M5 4V3.5a.5.5 0 011 0V4M10 4V3.5a.5.5 0 011 0V4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M2 7h12" stroke="currentColor" stroke-width="1.2"/><path d="M5.5 10h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>` },
       { id: "review-knowledge", label: "知识配置", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 2h7l3 3v9H3V2z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M10 2v3h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5 7h6M5 10h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>` },
+      { id: "review-favorites", label: "收藏评论", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 2l1.8 3.6 4 .6-2.9 2.8.7 4L8 11.2 4.4 13l.7-4L2.2 6.2l4-.6L8 2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>` },
     ],
   },
   {
@@ -109,6 +112,7 @@ const navItems: NavItem[] = [
       { id: "gmail-inbox", label: "Gmail", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M2 6l6 4 6-4" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>` },
       { id: "gmail-appscript", label: "App Script", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 2h5l3 3v9H4V2z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 2v3h3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M6 8l1 1 3-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>` },
       { id: "gmail-templates", label: "Gmail模板管理", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 5c0-.55.45-1 1-1h10c.55 0 1 .45 1 1v7c0 .55-.45 1-1 1H3c-.55 0-1-.45-1-1V5z" stroke="currentColor" stroke-width="1.3"/><path d="M5 4V3.5a.5.5 0 011 0V4M10 4V3.5a.5.5 0 011 0V4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M2 7h12" stroke="currentColor" stroke-width="1.2"/><path d="M5.5 10h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>` },
+      { id: "gmail-favorites", label: "收藏邮件", icon: `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 2l1.8 3.6 4 .6-2.9 2.8.7 4L8 11.2 4.4 13l.7-4L2.2 6.2l4-.6L8 2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>` },
     ],
   },
   {
@@ -489,6 +493,7 @@ function onSlidesSelect(files: SlidesSelection[]) {
         <ReviewPage
           :key="`acct-review-${accountEpoch}`"
           v-show="activeOption === 'review-play'"
+          :active-option="activeOption"
         />
         <ConfigPage
           :key="`acct-config-${accountEpoch}`"
@@ -507,9 +512,15 @@ function onSlidesSelect(files: SlidesSelection[]) {
           v-show="activeOption === 'review-knowledge'"
           :active-option="activeOption"
         />
+        <FavoriteReviewsPage
+          :key="`acct-review-fav-${accountEpoch}`"
+          v-show="activeOption === 'review-favorites'"
+          :active-option="activeOption"
+        />
         <GmailPage
           :key="`acct-gmail-${accountEpoch}`"
           v-show="activeOption === 'gmail-inbox'"
+          :active-option="activeOption"
         />
         <AppScriptPage
           v-show="activeOption === 'gmail-appscript'"
@@ -519,6 +530,10 @@ function onSlidesSelect(files: SlidesSelection[]) {
           :active-option="activeOption"
           trigger-option="gmail-templates"
           namespace="email"
+        />
+        <FavoriteMailsPage
+          v-show="activeOption === 'gmail-favorites'"
+          :active-option="activeOption"
         />
         <SettingsPage
           v-show="activeOption === 'settings-general'"

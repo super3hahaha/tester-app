@@ -71,6 +71,12 @@ Tauri 的 webview（WKWebView / WebView2）对同步对话框 `window.confirm()`
 必须用 `GmailApp.getUserLabelByName('⭐mp3cutter-50字+-')` 拿到 Label 对象再 `.getThreads()`。
 `gmail-sync.gs` 已按此实现（`LABEL` 常量填显示名，`getUserLabelByName` 取对象），新账号部署时 `LABEL` 改成该账号的标签显示名即可。
 
+## Apps Script 同步 Gmail：`msg.getDate()` 读的是可被污染的邮件头，不是收信时间
+
+`GmailMessage.getDate()` 返回邮件自己的 `Date:` 头，这个头是**发件方设备/客户端自己写的**——若对方系统时钟不对（老旧/被改过时间的安卓机很常见，这批邮件是 App 内反馈邮件，发件方是普通用户手机），头里的时间就是错的。Gmail 网页版打开邮件显示的时间用的是服务器侧 `internalDate`（收信时间戳，不可伪造），跟 `Date:` 头是两个不同的值，可能天差地别（曾出现同步进 Sheet 后日期显示成两年前，但网页端打开同一封邮件显示的是正确的当前日期）。
+
+修复：`getReceivedDate_(msg)` 改用 Gmail 高级服务（Advanced Google Service）`Gmail.Users.Messages.get("me", msg.getId(), {format:"minimal"})` 读 `internalDate`（ms 时间戳），失败才回退 `msg.getDate()`。需要两步手动开通（API 做不到，见 §9.10）：① 编辑器左侧「服务」加 Gmail API；② 若项目绑定自建 GCP 项目，还要去 Cloud Console 手动启用一次 `gmail.googleapis.com`（报错信息会给直达链接）；③ 加完新服务后必须在编辑器里手动跑一次函数走一遍新授权弹窗，否则触发器静默跑会因未授权失败。
+
 ## LLM 控不住字数：350 字符必须后端硬校验 + 压缩兜底
 
 模板翻译每条要 ≤ 350 字符（gp 回复硬限制），但**光靠 prompt 约束 LLM 字数不可靠**——haiku 实测把俄语模板翻成 371（俄/德/法/西比英文长 20-30%，直译就超）。`translate.rs` 三层兜底（单条重译 / 批量补全都走 `translate_one_batch`，故都生效）：
@@ -162,3 +168,9 @@ const maxSelectableDate = computed(() => todayIso());  // ❌ 首次算完就冻
 以前 `run_claude_task` 拼给 Claude 的 prompt（[claude.rs](../src-tauri/src/claude.rs)）从没明确告诉它最终 xlsx 要存哪——完全依赖 `/test-case-generator` skill 自己"猜对"目录。一旦 skill 内部 `pip install` 失败走兜底方案（比如这台机器只有 `pip3`），Claude 会自己选一个"看起来合理"的地方存（比如 `~/Downloads/xxx.xlsx`），导致扫描目录里找不到文件，按钮就不出现，用户会以为这功能没做。
 
 修复：`run_claude_task` 现在会预先创建 `~/.tester-app/exports/`，生成一个带时间戳的绝对路径，并在 prompt 里显式要求"必须存到这个路径，即使兜底方案也要落到这"。**这类"生成产物要被 app 后续扫描/消费"的功能，prompt 里必须给绝对路径，不能指望 skill 文档里的相对路径约定（如 SKILL.md 的 `--output output.xlsx`）在所有分支都被遵守。**
+
+## Gmail 同步表的「附件」列：无附件写的是字符串「无」，不是空
+
+[gmail-sync.gs](gmail-sync.gs) 的 `extractAttachments_()` 在没附件时 **return "无"**（不是空串），有附件才写 `名字1; 名字2`。
+
+所以任何「是否有附件」的判断都必须写成 `v && v !== "无"`，只判非空会导致**每封邮件都亮 📎**。踩过：`FavoriteMailsPage.vue` 新写 `hasAttachment()` 时只判了非空，`GmailPage.vue` 里的老实现是对的。同理，正文/机翻等列如果哪天也加了这种「占位字符串」，前端判空都得跟着改——**别假设「空数据 = 空字符串」，这张表是 Apps Script 写的，占位符由 gs 决定。**
