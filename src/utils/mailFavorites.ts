@@ -7,7 +7,14 @@
 // 一封邮件属于哪个 Gmail 账号由邮件源决定，跟 app 当前登录的 Google 账号无关；
 // 若在这里 scope 一层，切账号后收藏夹会莫名其妙变空。
 
+import { ref } from "vue";
+import { loadMapSafe, saveMapSafe } from "./favoritesStorage";
+
 const FAV_KEY = "mail-fav-v1";
+
+// 最近一次读/写出的问题，供页面显示 banner。写成功即清空。
+// 读到损坏时会一直有值（每次 loadFavorites 都会重新设上），直到数据被处理 + 重启。
+export const favoritesError = ref("");
 
 export interface FavoriteMail {
   messageId: string;
@@ -27,6 +34,10 @@ export interface FavoriteMail {
   _sourceTab?: string; // 源的分页名（同一张表按分页拆成多条源，光看 label 分不出来）
   _profileDir: string;
   favoritedAt: number;
+  // 备注：收藏后自己补的笔记，可空（旧记录没有这两个字段）。
+  // 存在收藏记录内部而非独立表——取消收藏即连带删掉备注，不留孤儿数据。
+  note?: string;
+  noteUpdatedAt?: number;
 }
 
 // 表里少数行可能没有 messageId（脚本旧版本写的行），退回用邮件链接做键。
@@ -35,32 +46,49 @@ export function mailFavKey(m: { messageId?: string; link?: string }): string {
 }
 
 export function loadFavorites(): Record<string, FavoriteMail> {
-  try {
-    const raw = localStorage.getItem(FAV_KEY);
-    if (!raw) return {};
-    const obj = JSON.parse(raw) as unknown;
-    return obj && typeof obj === "object" ? (obj as Record<string, FavoriteMail>) : {};
-  } catch {
-    return {};
-  }
+  const { map, error } = loadMapSafe<FavoriteMail>(FAV_KEY);
+  // 只在有问题时设置：读正常不清空，否则会把刚刚写失败的提示冲掉
+  // （写失败的调用方紧接着就会 loadList() 重刷列表）。
+  if (error) favoritesError.value = error;
+  return map;
 }
 
-function saveFavorites(map: Record<string, FavoriteMail>): void {
-  localStorage.setItem(FAV_KEY, JSON.stringify(map));
+// 返回是否真的写进去了。false 时 favoritesError 已带上原因，调用方应据此
+// 放弃本地状态更新（别让 UI 显示成功而磁盘上没有）。
+function saveFavorites(map: Record<string, FavoriteMail>): boolean {
+  const { ok, error } = saveMapSafe(FAV_KEY, map);
+  favoritesError.value = error;
+  return ok;
 }
 
-export function addFavorite(mail: FavoriteMail): void {
+export function addFavorite(mail: FavoriteMail): boolean {
   const key = mailFavKey(mail);
-  if (!key) return;
+  if (!key) return false;
   const map = loadFavorites();
   map[key] = mail;
-  saveFavorites(map);
+  return saveFavorites(map);
 }
 
-export function removeFavorite(key: string): void {
+export function removeFavorite(key: string): boolean {
   const map = loadFavorites();
-  if (key in map) {
-    delete map[key];
-    saveFavorites(map);
+  if (!(key in map)) return true; // 本来就不在，视作已达成
+  delete map[key];
+  return saveFavorites(map);
+}
+
+// 备注的增/改/删都走这一个入口：传空串（或全空白）即删除备注。
+// 未收藏时 map 里没有该 key，直接跳过。
+export function setFavoriteNote(key: string, note: string): boolean {
+  const map = loadFavorites();
+  const hit = map[key];
+  if (!hit) return false;
+  const text = note.trim();
+  if (text) {
+    hit.note = text;
+    hit.noteUpdatedAt = Date.now();
+  } else {
+    delete hit.note;
+    delete hit.noteUpdatedAt;
   }
+  return saveFavorites(map);
 }

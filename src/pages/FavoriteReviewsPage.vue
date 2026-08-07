@@ -2,7 +2,13 @@
 import { ref, computed, onMounted, watch } from "vue";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { scopedKey } from "../utils/accountScopedKey";
-import { loadFavorites, removeFavorite, type FavoriteReview } from "../utils/reviewFavorites";
+import {
+  loadFavorites,
+  removeFavorite,
+  setFavoriteNote,
+  favoritesError,
+  type FavoriteReview,
+} from "../utils/reviewFavorites";
 
 const props = defineProps<{ activeOption?: string }>();
 
@@ -73,8 +79,34 @@ watch(
   }
 );
 
+// 写失败时不刷新列表（数据没变，刷了反而像是成功了）——原因由 favoritesError banner 说明
 function unfavorite(r: FavoriteReview) {
-  removeFavorite(r.review_id);
+  if (!removeFavorite(r.review_id)) return;
+  loadList();
+}
+
+// ── 备注：同一时刻只允许编辑一条，用 review_id 标记当前编辑项 ──────────────
+const editingNoteId = ref<string | null>(null);
+const noteDraft = ref("");
+
+function startEditNote(r: FavoriteReview) {
+  editingNoteId.value = r.review_id;
+  noteDraft.value = r.note || "";
+}
+function cancelEditNote() {
+  editingNoteId.value = null;
+  noteDraft.value = "";
+}
+// 保存失败时保持编辑态不关（用户刚写的内容还在 noteDraft 里，别让它凭空消失）
+function saveNote(r: FavoriteReview) {
+  if (!setFavoriteNote(r.review_id, noteDraft.value)) return;
+  cancelEditNote();
+  loadList();
+}
+function deleteNote(r: FavoriteReview) {
+  if (!confirm("确定删除这条备注？")) return;
+  if (!setFavoriteNote(r.review_id, "")) return;
+  if (editingNoteId.value === r.review_id) cancelEditNote();
   loadList();
 }
 
@@ -115,6 +147,14 @@ function formatTs(ts: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// noteUpdatedAt 是毫秒（Date.now()），与评论时间戳的秒不同口径，单独一个格式化函数
+function formatMsTs(ts: number): string {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function starsDisplay(n: number): string {
   return "★".repeat(n) + "☆".repeat(5 - n);
 }
@@ -126,8 +166,11 @@ function starsDisplay(n: number): string {
       <h3>收藏评论</h3>
       <p class="subtitle">
         在「Play Console」评论列表里点 ☆ 收藏的评论会出现在这里，星标本身即收藏状态，再点一次取消收藏。
+        每条可在卡片下方加备注，取消收藏时备注一并删除。
       </p>
     </header>
+
+    <div v-if="favoritesError" class="banner banner-error">{{ favoritesError }}</div>
 
     <div v-if="favorites.length === 0" class="empty-state">
       还没有收藏任何评论。去「Play Console」评论列表点评论右下角的 ☆ 收藏。
@@ -192,6 +235,35 @@ function starsDisplay(n: number): string {
               🌐 在网页中打开
             </button>
           </div>
+
+          <!-- 备注：卡片最下方，未填时只留一个「＋ 添加备注」按钮，不占版面 -->
+          <div class="note-zone">
+            <div v-if="editingNoteId === r.review_id" class="note-editor">
+              <textarea
+                v-model="noteDraft"
+                class="note-input"
+                rows="3"
+                placeholder="写点备注……（例如：已同步给开发 / 等 2.3.6 验证）"
+              ></textarea>
+              <div class="note-editor-actions">
+                <button class="note-btn primary" @click="saveNote(r)">保存</button>
+                <button class="note-btn" @click="cancelEditNote">取消</button>
+                <button v-if="r.note" class="note-btn danger" @click="deleteNote(r)">删除备注</button>
+              </div>
+            </div>
+            <div v-else-if="r.note" class="note-block">
+              <div class="note-head">
+                <span class="note-label">📝 备注</span>
+                <span v-if="r.noteUpdatedAt" class="note-ts">{{ formatMsTs(r.noteUpdatedAt) }}</span>
+                <div class="note-head-actions">
+                  <button class="note-btn" @click="startEditNote(r)">编辑</button>
+                  <button class="note-btn danger" @click="deleteNote(r)">删除</button>
+                </div>
+              </div>
+              <div class="note-text">{{ r.note }}</div>
+            </div>
+            <button v-else class="note-add-btn" @click="startEditNote(r)">＋ 添加备注</button>
+          </div>
         </article>
       </div>
     </template>
@@ -214,6 +286,18 @@ function starsDisplay(n: number): string {
   margin: 4px 0 16px 0;
   font-size: 12px;
   color: #888;
+}
+.banner {
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+.banner-error {
+  background: #fff5f5;
+  color: #9b2c2c;
+  border: 1px solid #fed7d7;
 }
 .empty-state {
   padding: 30px 16px;
@@ -405,5 +489,114 @@ function starsDisplay(n: number): string {
   background: #f5f5fa;
   border-color: #cbd5e0;
   color: #2d3748;
+}
+
+/* ── 备注区 ─────────────────────────────────────────────────────────── */
+.note-zone {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #edf2f7;
+}
+.note-add-btn {
+  border: 1px dashed #cbd5e0;
+  background: transparent;
+  color: #a0aec0;
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.note-add-btn:hover {
+  border-color: #d69e2e;
+  color: #b7791f;
+  background: #fffdf5;
+}
+.note-block {
+  background: #fffdf5;
+  border-left: 3px solid #ecc94b;
+  border-radius: 0 6px 6px 0;
+  padding: 8px 12px;
+}
+.note-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.note-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #b7791f;
+}
+.note-ts {
+  font-size: 11px;
+  color: #bbb;
+}
+.note-head-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.note-text {
+  font-size: 12px;
+  color: #4a5568;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.note-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.note-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: inherit;
+  color: #2d3748;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  resize: vertical;
+}
+.note-input:focus {
+  outline: none;
+  border-color: #ecc94b;
+  background: #fffdf5;
+}
+.note-editor-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.note-btn {
+  padding: 3px 12px;
+  font-size: 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #4a5568;
+  cursor: pointer;
+}
+.note-btn:hover {
+  background: #f5f5fa;
+  border-color: #cbd5e0;
+}
+.note-btn.primary {
+  border-color: #667eea;
+  background: #667eea;
+  color: white;
+}
+.note-btn.primary:hover {
+  background: #5a67d8;
+}
+.note-btn.danger {
+  color: #c53030;
+}
+.note-btn.danger:hover {
+  background: #fff5f5;
+  border-color: #feb2b2;
 }
 </style>

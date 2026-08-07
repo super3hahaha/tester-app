@@ -2,7 +2,14 @@
 import { ref, computed, onMounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { loadFavorites, removeFavorite, mailFavKey, type FavoriteMail } from "../utils/mailFavorites";
+import {
+  loadFavorites,
+  removeFavorite,
+  setFavoriteNote,
+  mailFavKey,
+  favoritesError,
+  type FavoriteMail,
+} from "../utils/mailFavorites";
 
 const props = defineProps<{ activeOption?: string }>();
 
@@ -56,8 +63,9 @@ watch(
   }
 );
 
+// 写失败时不刷新列表（数据没变，刷了反而像是成功了）——原因由 favoritesError banner 说明
 function unfavorite(m: FavoriteMail) {
-  removeFavorite(mailFavKey(m));
+  if (!removeFavorite(mailFavKey(m))) return;
   loadList();
 }
 
@@ -95,10 +103,48 @@ function closeDetail() {
 }
 // 在详情里取消收藏就直接关掉弹窗（这封已经不在列表里了）
 function unfavoriteFromDetail(m: FavoriteMail) {
-  unfavorite(m);
+  if (!removeFavorite(mailFavKey(m))) return; // 没删成就别关，banner 在底下的列表页上
+  loadList();
   selectedMail.value = null;
 }
 
+// ── 备注：同一时刻只允许编辑一条，用收藏键标记当前编辑项 ────────────────
+// 列表卡片和详情弹窗共用这套状态，两处都能编辑。
+const editingNoteKey = ref<string | null>(null);
+const noteDraft = ref("");
+
+function startEditNote(m: FavoriteMail) {
+  editingNoteKey.value = mailFavKey(m);
+  noteDraft.value = m.note || "";
+}
+function cancelEditNote() {
+  editingNoteKey.value = null;
+  noteDraft.value = "";
+}
+// loadList() 会重建 favorites 里的对象，详情弹窗持有的是旧引用 → 按 key 重新指过去，
+// 否则在弹窗里改完备注，弹窗仍显示旧内容。
+function afterNoteChanged(key: string) {
+  loadList();
+  if (selectedMail.value && mailFavKey(selectedMail.value) === key) {
+    selectedMail.value = favorites.value.find((x) => mailFavKey(x) === key) || null;
+  }
+}
+// 保存失败时保持编辑态不关（用户刚写的内容还在 noteDraft 里，别让它凭空消失）
+function saveNote(m: FavoriteMail) {
+  const key = mailFavKey(m);
+  if (!setFavoriteNote(key, noteDraft.value)) return;
+  cancelEditNote();
+  afterNoteChanged(key);
+}
+function deleteNote(m: FavoriteMail) {
+  if (!confirm("确定删除这条备注？")) return;
+  const key = mailFavKey(m);
+  if (!setFavoriteNote(key, "")) return;
+  if (editingNoteKey.value === key) cancelEditNote();
+  afterNoteChanged(key);
+}
+
+// noteUpdatedAt 与 favoritedAt 同为毫秒，复用同一个格式化
 function formatFavTs(ts: number): string {
   if (!ts) return "";
   const d = new Date(ts);
@@ -114,9 +160,11 @@ function formatFavTs(ts: number): string {
       <p class="subtitle">
         在「Gmail」邮件列表里点 ☆ 收藏的邮件会出现在这里，星标本身即收藏状态，再点一次取消收藏。
         收藏的是整封快照，标为已读隐藏后依然能在这里回看。
+        每封可在卡片下方（或详情弹窗里）加备注，取消收藏时备注一并删除。
       </p>
     </header>
 
+    <div v-if="favoritesError" class="banner banner-error">{{ favoritesError }}</div>
     <div v-if="errorMsg" class="banner banner-error">{{ errorMsg }}</div>
 
     <div v-if="favorites.length === 0" class="empty-state">
@@ -164,6 +212,35 @@ function formatFavTs(ts: number): string {
           </div>
           <div class="mi-subject">{{ m.subject || "(无主题)" }}</div>
           <div class="mi-trans">{{ m.translated || "(无机翻中文)" }}</div>
+
+          <!-- 备注：卡片最下方，未填时只留一个「＋ 添加备注」按钮，不破坏三行紧凑感 -->
+          <div class="note-zone">
+            <div v-if="editingNoteKey === mailFavKey(m)" class="note-editor">
+              <textarea
+                v-model="noteDraft"
+                class="note-input"
+                rows="3"
+                placeholder="写点备注……（例如：已转给客服 / 待确认退款）"
+              ></textarea>
+              <div class="note-editor-actions">
+                <button class="note-btn primary" @click="saveNote(m)">保存</button>
+                <button class="note-btn" @click="cancelEditNote">取消</button>
+                <button v-if="m.note" class="note-btn danger" @click="deleteNote(m)">删除备注</button>
+              </div>
+            </div>
+            <div v-else-if="m.note" class="note-block">
+              <div class="note-head">
+                <span class="note-label">📝 备注</span>
+                <span v-if="m.noteUpdatedAt" class="note-ts">{{ formatFavTs(m.noteUpdatedAt) }}</span>
+                <div class="note-head-actions">
+                  <button class="note-btn" @click="startEditNote(m)">编辑</button>
+                  <button class="note-btn danger" @click="deleteNote(m)">删除</button>
+                </div>
+              </div>
+              <div class="note-text">{{ m.note }}</div>
+            </div>
+            <button v-else class="note-add-btn" @click="startEditNote(m)">＋ 添加备注</button>
+          </div>
         </article>
       </div>
     </template>
@@ -204,6 +281,36 @@ function formatFavTs(ts: number): string {
         <div class="detail-section">
           <div class="detail-label">原文</div>
           <div class="detail-text orig">{{ selectedMail.body || "(无正文)" }}</div>
+        </div>
+
+        <!-- 备注：与列表卡片共用同一套编辑状态，改哪边都同步 -->
+        <div class="detail-section">
+          <div class="detail-label">备注</div>
+          <div v-if="editingNoteKey === mailFavKey(selectedMail)" class="note-editor">
+            <textarea
+              v-model="noteDraft"
+              class="note-input"
+              rows="3"
+              placeholder="写点备注……（例如：已转给客服 / 待确认退款）"
+            ></textarea>
+            <div class="note-editor-actions">
+              <button class="note-btn primary" @click="saveNote(selectedMail)">保存</button>
+              <button class="note-btn" @click="cancelEditNote">取消</button>
+              <button v-if="selectedMail.note" class="note-btn danger" @click="deleteNote(selectedMail)">删除备注</button>
+            </div>
+          </div>
+          <div v-else-if="selectedMail.note" class="note-block">
+            <div class="note-head">
+              <span class="note-label">📝 备注</span>
+              <span v-if="selectedMail.noteUpdatedAt" class="note-ts">{{ formatFavTs(selectedMail.noteUpdatedAt) }}</span>
+              <div class="note-head-actions">
+                <button class="note-btn" @click="startEditNote(selectedMail)">编辑</button>
+                <button class="note-btn danger" @click="deleteNote(selectedMail)">删除</button>
+              </div>
+            </div>
+            <div class="note-text">{{ selectedMail.note }}</div>
+          </div>
+          <button v-else class="note-add-btn" @click="startEditNote(selectedMail)">＋ 添加备注</button>
         </div>
       </div>
     </div>
@@ -503,5 +610,114 @@ function formatFavTs(ts: number): string {
   background: #f5f5fa;
   border-color: #cbd5e0;
   color: #2d3748;
+}
+
+/* ── 备注区（列表卡片 + 详情弹窗共用） ────────────────────────────────── */
+.note-zone {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed #edf2f7;
+}
+.note-add-btn {
+  border: 1px dashed #cbd5e0;
+  background: transparent;
+  color: #a0aec0;
+  font-size: 12px;
+  padding: 3px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.note-add-btn:hover {
+  border-color: #d69e2e;
+  color: #b7791f;
+  background: #fffdf5;
+}
+.note-block {
+  background: #fffdf5;
+  border-left: 3px solid #ecc94b;
+  border-radius: 0 6px 6px 0;
+  padding: 6px 12px;
+}
+.note-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 3px;
+}
+.note-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #b7791f;
+}
+.note-ts {
+  font-size: 11px;
+  color: #bbb;
+}
+.note-head-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.note-text {
+  font-size: 12px;
+  color: #4a5568;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.note-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.note-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: inherit;
+  color: #2d3748;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  resize: vertical;
+}
+.note-input:focus {
+  outline: none;
+  border-color: #ecc94b;
+  background: #fffdf5;
+}
+.note-editor-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.note-btn {
+  padding: 3px 12px;
+  font-size: 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #4a5568;
+  cursor: pointer;
+}
+.note-btn:hover {
+  background: #f5f5fa;
+  border-color: #cbd5e0;
+}
+.note-btn.primary {
+  border-color: #667eea;
+  background: #667eea;
+  color: white;
+}
+.note-btn.primary:hover {
+  background: #5a67d8;
+}
+.note-btn.danger {
+  color: #c53030;
+}
+.note-btn.danger:hover {
+  background: #fff5f5;
+  border-color: #feb2b2;
 }
 </style>

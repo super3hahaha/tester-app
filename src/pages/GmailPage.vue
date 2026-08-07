@@ -8,6 +8,7 @@ import {
   addFavorite as addMailFavorite,
   removeFavorite as removeMailFavorite,
   mailFavKey,
+  favoritesError as mailFavoritesError,
 } from "../utils/mailFavorites";
 
 // app 读的是 Apps Script（gmail-sync.gs）同步出来的 Google Sheet。
@@ -393,11 +394,16 @@ function isFavorited(m: Mail): boolean {
 function toggleFavorite(m: Mail) {
   const key = mailFavKey(m);
   if (!key) return;
+  // 写失败（存储损坏保护 / 配额满）时不动本地 favKeys，否则星星亮了但磁盘上没有。
+  // 原因走已有的 errorMsg banner 显示。
   if (favKeys.value.has(key)) {
-    removeMailFavorite(key);
+    if (!removeMailFavorite(key)) {
+      errorMsg.value = mailFavoritesError.value;
+      return;
+    }
     favKeys.value.delete(key);
   } else {
-    addMailFavorite({
+    const ok = addMailFavorite({
       ...m,
       _sourceKey: currentSource.value?.key || "",
       _sourceLabel: currentLabel.value,
@@ -405,6 +411,10 @@ function toggleFavorite(m: Mail) {
       _profileDir: currentSource.value?.profileDir || "",
       favoritedAt: Date.now(),
     });
+    if (!ok) {
+      errorMsg.value = mailFavoritesError.value;
+      return;
+    }
     favKeys.value.add(key);
   }
   // Set 原地增删不触发模板重算，换个引用强制刷新星标

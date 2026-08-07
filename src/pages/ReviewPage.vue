@@ -6,7 +6,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { lastWorkdayBefore, toIso, computeRange } from "../utils/batchReplyDates";
 import { loadPlayConfig } from "../utils/playConsoleConfig";
 import { loadFavIds } from "../utils/templateFavorites";
-import { loadFavorites, addFavorite, removeFavorite, updateFavoriteReply } from "../utils/reviewFavorites";
+import { loadFavorites, addFavorite, removeFavorite, updateFavoriteReply, favoritesError } from "../utils/reviewFavorites";
 import { scopedKey } from "../utils/accountScopedKey";
 import { getActiveAccountId } from "../utils/activeAccount";
 
@@ -627,11 +627,19 @@ function isFavorited(r: TaggedReview): boolean {
 }
 
 function toggleFavorite(r: TaggedReview) {
+  // 写失败（存储损坏保护 / 配额满）时不动本地 favIds，否则星星亮了但磁盘上没有。
+  // 原因走已有的 errorMsg banner 显示。
   if (favIds.value.has(r.review_id)) {
-    removeFavorite(r.review_id);
+    if (!removeFavorite(r.review_id)) {
+      errorMsg.value = favoritesError.value;
+      return;
+    }
     favIds.value.delete(r.review_id);
   } else {
-    addFavorite({ ...r, favoritedAt: Date.now() });
+    if (!addFavorite({ ...r, favoritedAt: Date.now() })) {
+      errorMsg.value = favoritesError.value;
+      return;
+    }
     favIds.value.add(r.review_id);
   }
 }
