@@ -12,12 +12,21 @@
  *     SYNC_JOBS 数组即可；以后再加标签也只需加一行配置，不用复制整套逻辑。
  *
  * 同步策略（重要）：
- *   - 每个标签只同步该标签下的「未读」邮件；
- *   - 写表成功后把这些邮件「标记为已读」，以此作为「已同步」标志——
- *     未读因此成为一个待同步队列：处理一封出队一封，队列始终很小，
- *     不会每次重复扫描历史邮件，新邮件也不会被 MAX_THREADS 挤到拉不到。
- *   - ⚠️ 副作用：同步过的邮件在 Gmail 里会变成已读。不想改已读状态可把
- *     MARK_READ_AFTER_SYNC 设为 false（但那样未读会持续堆积，见配置区说明）。
+ *   - 「有没有同步过」以【表里有没有这个 messageId】为准，不看邮件的已读状态。
+ *   - 为什么不用「未读」当队列（2026-08 踩坑，勿改回去）：
+ *     Gmail 的「标记为已读」是按【整条会话】生效的，而且网页端点开会话就会自动标已读。
+ *     所以只要一封新邮件在脚本跑之前被人看过一眼（回复完顺手标已读、或纯粹点开瞄了下），
+ *     它就会被 is:unread 永久跳过，【这封邮件再也不会进表】。实测确认过：同一次运行里，
+ *     未读的那封正常入表，被手动点开过的那封（用户对我方回复的追问）永久丢失。
+ *     换成 messageId 判重后，谁怎么点已读都不影响同步的正确性。
+ *   - 扫描范围：标签下最近 MAX_THREADS 个会话中，最后活动在 SYNC_WINDOW_DAYS 天内的；
+ *     窗口外的老会话直接跳过，避免历史积压（如 gmail-clear-backlog.gs 处理过的）被翻出来重灌。
+ *   - 自己发出的邮件不入表（按发件人排除）。原先靠「自己发的天然已读」顺带过滤，
+ *     不再依赖已读状态后必须显式排除，否则我方回复会被当成用户来信写进表。
+ *   - 追回复识别：会话里在我方回复【之后】才到的用户来信，标记为「追回复」写入末列，
+ *     并给会话打上 FOLLOWUP_LABEL 标签、且【不】标已读——这类邮件最容易被淹没在
+ *     新反馈里，Gmail 侧和 app 侧都要能一眼认出来。
+ *   - 标记已读现在只是「已同步」的视觉提示（未读列表 ≈ 还没入表的），不再影响正确性。
  *
  * 部署步骤：
  *   1. 用「该 Gmail 账号本人」打开 https://script.google.com 新建项目，粘贴本文件。
@@ -46,8 +55,18 @@ const SYNC_JOBS = [
   { label: "⭐VideoToMP3(50字+)", sheetName: "Mail" },
   { label: "⭐mp3cutter(50字+)", sheetName: "Mail_MP3Cutter" },
 ];
-// 单次同步每个标签最多处理的会话（线程）数，防止单次执行超时；积压多时靠多次触发器逐步消化
-const MAX_THREADS = 50;
+// 单次同步每个标签最多扫描的会话（线程）数。注意是「会话」不是「邮件」——一个会话里
+// 的所有邮件都会被遍历，且会话按「最近活动时间」排序（老会话被回复会冒到最前）。
+//
+// 这个值的真实含义是【容错期】：它决定脚本能往回看多少天。第 MAX_THREADS+1 名开外的
+// 会话，脚本根本不知道其存在——平时无所谓（每天都跑，新邮件永远在前排），但脚本一旦
+// 连续停跑超过这个天数（触发器失效 / 授权过期 / 放假撞上 bug），更早的邮件就永久看不见了。
+//
+// 定值依据（2026-08 实测，mp3cutter 标签）：约 8.3 个会话/天，高峰期（发版后）约 9.8/天。
+// 按「最多离开 14 天」的需求：14 × 8.3 ≈ 116，取 150 留余量 → 常态覆盖 ~18 天、高峰 ~14 天。
+// 成本很低：会话不足时 getThreads 返回实际数量（稀疏标签零代价），遍历约 18 秒/标签。
+// 想知道当前实际覆盖多少天，跑 gmail-audit-missing.gs 看「⏳ 容错期」那行。
+const MAX_THREADS = 150;
 // 正文截断上限，避免超出单元格 5 万字符上限
 const BODY_MAX_CHARS = 45000;
 // 每天定时同步的小时（24 小时制，按脚本项目时区）。例：9 = 每天早上 9 点附近跑一次。
@@ -55,15 +74,27 @@ const BODY_MAX_CHARS = 45000;
 const SYNC_HOUR = 8;
 // 机翻单封最多翻译的字符数（翻译服务单次有上限，过长会失败；超出部分不翻）
 const TRANSLATE_MAX_CHARS = 5000;
-// 同步成功后是否把邮件标记为已读（作为「已同步」标志，避免重复处理 + 未读堆积）。
-// 设 false 则不改已读状态，但每次都会重新扫描全部未读、数量持续累积，不推荐。
+// 只处理最后活动在多少天内的会话。作用有二：
+//   1) 防止历史已读邮件被一次性翻出来重灌（换判重方式后，老邮件不再被已读状态挡住）；
+//   2) 限制每次扫描量。日常增量用不到这么大，30 天很宽裕。
+// ⚠️ 首次改用本版本时，最近 SYNC_WINDOW_DAYS 天内「已读但从没入表」的邮件会被补写进来，
+//    这是预期行为（就是在捞回之前被已读吞掉的那些），补完一次之后就稳定了。
+const SYNC_WINDOW_DAYS = 30;
+// 给「用户追回复」的会话打的 Gmail 标签名（不存在会自动创建）；留空则不打标签。
+// 这类会话不会被标已读，配合标签在 Gmail 侧一眼可见。
+const FOLLOWUP_LABEL = "🔁待跟进";
+// 同步成功后是否把邮件标记为已读。现在仅作为「已同步」的视觉提示（未读列表 ≈ 还没入表的），
+// 不再是判重依据——设成 false 也不会导致重复写入或漏同步，只是未读会堆着。
+// 注意：追回复不受此开关影响，永远保持未读，避免它在 Gmail 里消失。
 const MARK_READ_AFTER_SYNC = true;
 // ================================================
 
 // 表头（顺序固定，外部 app 按列读取）
 // 前两列 messageId/threadId 为机器字段（去重 + 拼会话链接），其余为人可读列。
 // 机翻中文列(G)在写入时由 LanguageApp 翻译为静态值（非公式，避免打开表反复重算）；正文列(F)为原文。
-var HEADERS = ["messageId", "threadId", "日期", "发件人", "主题", "正文", "机翻中文", "附件", "邮件链接"];
+// 末列「追回复」为后加的列：app 侧按表头名取列（GmailPage.vue 的 colIndex），
+// 加在末尾对老数据和老版本 app 都兼容——老行读出来是空串，等价于「否」。
+var HEADERS = ["messageId", "threadId", "日期", "发件人", "主题", "正文", "机翻中文", "附件", "邮件链接", "追回复"];
 var COL_BODY = 6;   // 正文列(F)，正文/机翻两列自动换行起点
 // PropertiesService 中记录自动新建表格 ID 的 key
 var PROP_SPREADSHEET_ID = "SPREADSHEET_ID";
@@ -130,56 +161,158 @@ function syncOneLabel_(label, sheetName) {
     return;
   }
 
-  var existing = getExistingMessageIds_(sheet);
+  var existing = getExistingMessageIds_(sheet);   // 判重游标：表里已有的 messageId
   var account = getAccountEmail_();
   var rows = [];
-  var toMarkRead = []; // 本次处理到的未读邮件，写表后统一标记已读（出队）
+  var toMarkRead = [];        // 已入表且当前未读的普通来信，写表后统一标已读（视觉提示）
+  var followUpThreads = [];   // 含追回复的会话，写表后打 FOLLOWUP_LABEL
+  var followUpCount = 0;
+  var cutoff = new Date(Date.now() - SYNC_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  var skippedOld = 0;
+  var failedThreads = 0;
 
   for (var i = 0; i < threads.length; i++) {
     var thread = threads[i];
-    var threadId = thread.getId();
-    var messages = thread.getMessages();
-    for (var j = 0; j < messages.length; j++) {
-      var msg = messages[j];
-      if (!msg.isUnread()) continue; // 同一会话里只处理未读的那几封
-      toMarkRead.push(msg);          // 未读的都要出队（含已在表里的，确保不再被扫到）
 
-      var mid = msg.getId();
-      if (existing[mid]) continue;   // 已写过，不重复写（但上面已加入待标记）
-      existing[mid] = true;
+    // 会话级容错：单个会话读不了不能拖垮整个标签（旧版只有标签级 try/catch，
+    // 一封坏邮件 = 这个标签当次 150 个会话全废）。
+    // 踩坑：Gmail 里偶尔混着读不了的消息（Chat 消息、已删但标签还挂着的邮件等），
+    // 会抛 "Gmail operation not allowed"。旧版靠 isUnread 把老邮件全跳过了，
+    // 从没碰过它们，所以从没暴露；改成按 messageId 判重后第一次真正去读就炸了。
+    try {
+      // 剪枝：整条会话最后活动都在窗口外 → 不看。老会话被新回复激活时
+      // getLastMessageDate 会变成新时间，所以不会漏掉「隔很久才来的追回复」。
+      if (thread.getLastMessageDate() < cutoff) {
+        skippedOld++;
+        continue;
+      }
 
-      var body = extractBody_(msg);
-      var attachments = extractAttachments_(msg);
-      var link = "https://mail.google.com/mail/u/?authuser=" + encodeURIComponent(account) + "#all/" + threadId;
+      var threadId = thread.getId();
+      var messages = thread.getMessages();
+      var iRepliedBefore = false; // 沿会话时间轴前进，记录「在这封之前我方是否已回复过」
+      var threadHasFollowUp = false;
 
-      rows.push([
-        mid,
-        threadId,
-        getReceivedDate_(msg),
-        msg.getFrom(),
-        msg.getSubject(),
-        body,
-        translateZh_(body),   // 机翻中文：写入时翻成静态值（非公式）
-        attachments,
-        link
-      ]);
+      for (var j = 0; j < messages.length; j++) {
+        var msg = messages[j];
+
+        // 我方发出的：不入表，只用来把 iRepliedBefore 置位。
+        // （不再依赖已读状态过滤后，这一步是必需的，否则我方回复会被当成用户来信写进表。）
+        if (isFromMe_(msg, account)) {
+          iRepliedBefore = true;
+          continue;
+        }
+
+        var isFollowUp = iRepliedBefore; // 我方回复之后才到的用户来信 = 追回复
+        var mid = msg.getId();
+
+        if (existing[mid]) {
+          // 已同步过：不重复写，只做已读收尾。追回复永远保持未读。
+          if (msg.isUnread() && !isFollowUp) toMarkRead.push(msg);
+          continue;
+        }
+
+        // 逐封再按可靠时间（internalDate）卡一次窗口：老会话被激活时，
+        // 只补写窗口内的新消息，不把同会话里几个月前的历史一起灌进来。
+        var received = getReceivedDate_(msg);
+        if (received < cutoff) continue;
+
+        existing[mid] = true;
+
+        var body = extractBody_(msg);
+        var attachments = extractAttachments_(msg);
+        var link = "https://mail.google.com/mail/u/?authuser=" + encodeURIComponent(account) + "#all/" + threadId;
+
+        rows.push([
+          mid,
+          threadId,
+          received,
+          msg.getFrom(),
+          msg.getSubject(),
+          body,
+          translateZh_(body),   // 机翻中文：写入时翻成静态值（非公式）
+          attachments,
+          link,
+          isFollowUp ? "是" : ""
+        ]);
+
+        if (isFollowUp) {
+          followUpCount++;
+          threadHasFollowUp = true;
+        } else if (msg.isUnread()) {
+          toMarkRead.push(msg);
+        }
+      }
+
+      if (threadHasFollowUp) followUpThreads.push(thread);
+    } catch (e) {
+      failedThreads++;
+      var badId = "";
+      try { badId = thread.getId(); } catch (e2) { badId = "(连 threadId 都读不出来)"; }
+      console.log("⚠️ 第 " + (i + 1) + " 个会话读取失败，已跳过（不影响其他会话）：" + e
+        + " ｜ https://mail.google.com/mail/u/?authuser=" + encodeURIComponent(account) + "#all/" + badId);
     }
   }
 
-  // 先写表，确保数据落地后再标记已读，避免「标了已读却没入表」丢邮件
+  if (skippedOld > 0) {
+    console.log("⏭️ 跳过 " + skippedOld + " 个最后活动早于 " + SYNC_WINDOW_DAYS + " 天的老会话。");
+  }
+  if (failedThreads > 0) {
+    console.log("⚠️ 有 " + failedThreads + " 个会话读取失败被跳过（详见上方，逐条带链接）。");
+  }
+
+  // 先写表，确保数据落地后再动邮件状态，避免「改了状态却没入表」
   if (rows.length > 0) {
     var startRow = sheet.getLastRow() + 1;
     sheet.getRange(startRow, 1, rows.length, HEADERS.length).setValues(rows);
-    console.log("📦 新写入 " + rows.length + " 封邮件（从第 " + startRow + " 行）。");
+    SpreadsheetApp.flush();
+    console.log("📦 新写入 " + rows.length + " 封邮件（从第 " + startRow + " 行）"
+      + (followUpCount > 0 ? "，其中 🔁 用户追回复 " + followUpCount + " 封。" : "。"));
   } else {
-    console.log("📦 命中未读但均已在表中（不重复写）。");
+    console.log("📦 窗口内没有新邮件（表里都有了）。");
   }
 
-  // 标记已读 = 出队，下次 is:unread 不再返回这些邮件
-  if (MARK_READ_AFTER_SYNC && toMarkRead.length > 0) {
-    GmailApp.markMessagesRead(toMarkRead);
-    console.log("✅ 已把 " + toMarkRead.length + " 封标记为已读（出队）。");
+  // 下面两步都是「锦上添花」：数据此时已经落表，判重也不依赖它们，
+  // 所以各自 try/catch——打标签/标已读失败不该把整次同步判成失败。
+  // 给追回复的会话打标签，方便在 Gmail 侧直接筛出来跟进
+  if (FOLLOWUP_LABEL && followUpThreads.length > 0) {
+    try {
+      var fl = getOrCreateLabel_(FOLLOWUP_LABEL);
+      for (var f = 0; f < followUpThreads.length; f++) {
+        followUpThreads[f].addLabel(fl);
+      }
+      console.log("🔁 已给 " + followUpThreads.length + " 个会话打上「" + FOLLOWUP_LABEL + "」标签（保持未读）。");
+    } catch (e) {
+      console.log("⚠️ 打「" + FOLLOWUP_LABEL + "」标签失败（数据已入表，不影响同步）：" + e);
+    }
   }
+
+  // 标已读：现在只是「已入表」的视觉提示，不影响判重；追回复不在其中
+  if (MARK_READ_AFTER_SYNC && toMarkRead.length > 0) {
+    try {
+      GmailApp.markMessagesRead(toMarkRead);
+      console.log("✅ 已把 " + toMarkRead.length + " 封标记为已读（已入表标记）。");
+    } catch (e) {
+      console.log("⚠️ 标记已读失败（数据已入表，不影响同步）：" + e);
+    }
+  }
+}
+
+/**
+ * 判断是不是我方（脚本所有者）发出的邮件。
+ * getFrom() 形如 "Name <a@b.com>"，用邮箱地址子串匹配即可。
+ */
+function isFromMe_(msg, account) {
+  if (!account || account === "me") return false;
+  var from = msg.getFrom() || "";
+  return from.toLowerCase().indexOf(account.toLowerCase()) >= 0;
+}
+
+/**
+ * 取标签，不存在则创建。
+ */
+function getOrCreateLabel_(name) {
+  var l = GmailApp.getUserLabelByName(name);
+  return l ? l : GmailApp.createLabel(name);
 }
 
 /**
@@ -323,11 +456,20 @@ function getSheet_(sheetName) {
 }
 
 /**
- * 确保表头存在且正确；首行为空则写入表头并格式化。
+ * 确保表头存在且正确；缺失或与 HEADERS 不一致（含「老表少了后加的列」）时重写表头。
+ * 不能只看第一格是不是 messageId——那样往 HEADERS 末尾加列时，老表永远补不上新列头，
+ * app 侧按表头名取列就会一直找不到（GmailPage.vue 的 colIndex 返回 -1）。
  */
 function ensureHeader_(sheet) {
-  var firstCell = sheet.getRange(1, 1).getValue();
-  if (firstCell === HEADERS[0]) return;
+  var lastCol = sheet.getLastColumn();
+  var current = lastCol > 0 ? sheet.getRange(1, 1, 1, lastCol).getValues()[0] : [];
+  var ok = current.length >= HEADERS.length;
+  if (ok) {
+    for (var i = 0; i < HEADERS.length; i++) {
+      if (String(current[i]).trim() !== HEADERS[i]) { ok = false; break; }
+    }
+  }
+  if (ok) return;
   sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
   sheet.setFrozenRows(1);
   sheet.getRange(1, 1, 1, HEADERS.length).setFontWeight("bold");

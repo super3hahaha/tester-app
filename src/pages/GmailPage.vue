@@ -65,6 +65,9 @@ interface Mail {
   translated: string;
   attachments: string;
   link: string;
+  // 用户在我方回复之后又追来的信（gmail-sync.gs 的「追回复」列）。
+  // 这类最容易被淹没在新反馈里，列表里置顶 + 徽章。老数据没这列，读出来是空 = false。
+  isFollowUp: boolean;
 }
 
 // MainPage 传当前二级导航项，用来在切回本页时刷新收藏星标（见下面 favKeys 的 watch）
@@ -322,6 +325,7 @@ async function loadMails() {
     const iTrans = colIndex(h, "机翻中文");
     const iAtt = colIndex(h, "附件");
     const iLink = colIndex(h, "邮件链接");
+    const iFollowUp = colIndex(h, "追回复"); // 后加的末列；老表没有 → -1 → 全部 false
     const g = (row: string[], i: number) => (i >= 0 && i < row.length ? row[i] : "");
     // 脚本是 append 到表底部，最新在最后 → 反转让最新排在最上
     const all = data.rows
@@ -335,9 +339,13 @@ async function loadMails() {
         translated: g(r, iTrans),
         attachments: g(r, iAtt),
         link: g(r, iLink),
+        isFollowUp: g(r, iFollowUp) === "是",
       }))
       .filter((m) => m.messageId || m.subject || m.from)
-      .reverse();
+      .reverse()
+      // 追回复置顶：用户已经等过我们一轮了，不能让它排在一堆新反馈后面。
+      // sort 在 ES2019+ 是稳定的，所以两组各自保持上面 reverse 后的时间倒序。
+      .sort((a, b) => Number(b.isFollowUp) - Number(a.isFollowUp));
     rawCount.value = all.length;
     const readSet = new Set(readIds.value);
     mails.value = all.filter((m) => !readSet.has(m.messageId));
@@ -857,7 +865,12 @@ async function copyAndJumpAi(task: AiMailTask) {
     </div>
 
     <div v-else-if="mails.length > 0" class="mail-list">
-      <article v-for="m in mails" :key="m.messageId || m.link" class="mail-item">
+      <article
+        v-for="m in mails"
+        :key="m.messageId || m.link"
+        class="mail-item"
+        :class="{ 'is-followup': m.isFollowUp }"
+      >
         <div class="mi-row1">
           <span class="from">{{ m.from || "(未知发件人)" }}</span>
           <span class="ts">{{ m.date }}</span>
@@ -881,7 +894,9 @@ async function copyAndJumpAi(task: AiMailTask) {
             <button class="read-btn" @click="markRead(m)" title="标为已读，下次拉取不再显示">已读</button>
           </div>
         </div>
-        <div class="mi-subject">{{ m.subject || "(无主题)" }}</div>
+        <div class="mi-subject">
+          <span v-if="m.isFollowUp" class="followup-badge" title="用户在你回复之后又追来的信">🔁 追回复</span>{{ m.subject || "(无主题)" }}
+        </div>
         <div class="mi-trans">{{ m.translated || "(无机翻中文)" }}</div>
       </article>
     </div>
@@ -1260,6 +1275,11 @@ async function copyAndJumpAi(task: AiMailTask) {
   flex-direction: column;
   gap: 3px;
 }
+/* 追回复：用户已经等过我们一轮了，列表里除了置顶还要一眼能认出来 */
+.mail-item.is-followup {
+  border-color: #fc8181;
+  background: #fff5f5;
+}
 .mi-row1 {
   display: flex;
   align-items: center;
@@ -1353,6 +1373,17 @@ async function copyAndJumpAi(task: AiMailTask) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.followup-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #e53e3e;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  vertical-align: 1px;
 }
 .mi-trans {
   font-size: 12px;
