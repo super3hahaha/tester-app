@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   loadFavorites,
   removeFavorite,
@@ -151,6 +152,240 @@ function formatFavTs(ts: number): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
+
+// ── AI 回复（与 GmailPage 同一套逻辑，逻辑/样式都照搬过来） ──────────────────────
+interface MailReplyResult {
+  language: string;
+  text: string;
+  text_zh: string;
+  char_count: number;
+  usage: { input_tokens?: number; output_tokens?: number; total_cost_usd?: number } | null;
+}
+
+type AiMailStatus = "idle" | "queued" | "generating" | "done" | "error";
+interface AiMailTask {
+  id: string;
+  mail: FavoriteMail;
+  instruction: string;
+  language: string;
+  status: AiMailStatus;
+  log: string;
+  result: MailReplyResult | null;
+  editText: string;
+  error: string;
+  copied: boolean;
+}
+
+const AI_LANG_OPTIONS = [
+  { value: "auto", label: "跟随邮件语言" },
+  { value: "en", label: "English" },
+  { value: "zh", label: "中文" },
+  { value: "ar", label: "العربية" },
+  { value: "fa", label: "فارسی" },
+  { value: "ru", label: "Русский" },
+  { value: "ko", label: "한국어" },
+  { value: "ja", label: "日本語" },
+  { value: "de", label: "Deutsch" },
+  { value: "fr", label: "Français" },
+  { value: "es", label: "Español" },
+  { value: "pt", label: "Português" },
+  { value: "tr", label: "Türkçe" },
+  { value: "id", label: "Indonesia" },
+];
+
+function detectLang(text: string): string {
+  if (!text) return "en";
+  const counts: Record<string, number> = {};
+  const inc = (k: string) => { counts[k] = (counts[k] || 0) + 1; };
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (cp >= 0x0600 && cp <= 0x06FF) inc("fa");
+    else if (cp >= 0x4E00 && cp <= 0x9FFF) inc("zh");
+    else if (cp >= 0x3040 && cp <= 0x30FF) inc("ja");
+    else if (cp >= 0xAC00 && cp <= 0xD7A3) inc("ko");
+    else if (cp >= 0x0400 && cp <= 0x04FF) inc("ru");
+    else if (cp >= 0x0E00 && cp <= 0x0E7F) inc("th");
+  }
+  const winner = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+  return winner ? winner[0] : "en";
+}
+
+const aiTasks = ref<AiMailTask[]>([]);
+const activeAiId = ref<string | null>(null);
+let aiTaskSeq = 0;
+let aiGenBusy = false;
+
+// 收藏夹没有「当前选中的邮件源」这个概念（收藏可能来自任意源），
+// 按每条收藏记的 _sourceKey 回查 gmail-sources-v1 找对应模板产品。
+const GMAIL_SOURCES_KEY = "gmail-sources-v1";
+function templateProductFor(m: FavoriteMail): string | undefined {
+  try {
+    const list = JSON.parse(localStorage.getItem(GMAIL_SOURCES_KEY) || "[]") as Array<{ key: string; templateProduct?: string }>;
+    return list.find((s) => s.key === m._sourceKey)?.templateProduct;
+  } catch {
+    return undefined;
+  }
+}
+
+const addTplOpen = ref(false);
+const addTplCategory = ref("");
+const addTplBusy = ref(false);
+const addTplError = ref("");
+const addTplFlash = ref("");
+
+function tplPayloadForResult(result: MailReplyResult): { text: string; lang: string } {
+  const l = (result.language || "").toLowerCase();
+  if (l.startsWith("en")) return { text: result.text, lang: "en" };
+  if (l.startsWith("zh")) return { text: result.text, lang: "zh-CN" };
+  return { text: result.text_zh && result.text_zh.trim() ? result.text_zh : result.text, lang: "zh-CN" };
+}
+function startAddTpl() {
+  addTplOpen.value = true;
+  addTplCategory.value = "";
+  addTplError.value = "";
+}
+function cancelAddTpl() {
+  addTplOpen.value = false;
+  addTplError.value = "";
+}
+async function confirmAddTpl(task: AiMailTask) {
+  if (addTplBusy.value || !task.result) return;
+  const product = templateProductFor(task.mail);
+  if (!product) {
+    addTplError.value = "该邮件所属邮件表未关联模板产品，无法收录。";
+    return;
+  }
+  addTplBusy.value = true;
+  addTplError.value = "";
+  try {
+    const { text, lang } = tplPayloadForResult(task.result);
+    await invoke<string>("add_template", {
+      product,
+      category: addTplCategory.value,
+      text,
+      lang,
+      namespace: "email",
+    });
+    addTplOpen.value = false;
+    addTplFlash.value = `已收录到「${product}」模板库（${lang === "en" ? "英文" : "中文"}模板）`;
+    window.setTimeout(() => (addTplFlash.value = ""), 2500);
+  } catch (e: any) {
+    addTplError.value = String(e);
+  } finally {
+    addTplBusy.value = false;
+  }
+}
+
+const activeAiTask = computed(
+  () => aiTasks.value.find((t) => t.id === activeAiId.value) ?? null
+);
+const minimizedAiTasks = computed(
+  () => aiTasks.value.filter((t) => t.id !== activeAiId.value)
+);
+
+let unlistenAiLog: UnlistenFn | null = null;
+onMounted(async () => {
+  unlistenAiLog = await listen<{ text: string; kind: string; done: boolean }>(
+    "reply-log",
+    (e) => {
+      const gen = aiTasks.value.find((t) => t.status === "generating");
+      if (gen) gen.log = e.payload.text;
+    }
+  );
+});
+onUnmounted(() => {
+  if (unlistenAiLog) unlistenAiLog();
+});
+
+function openAiDialog(m: FavoriteMail) {
+  addTplOpen.value = false;
+  addTplError.value = "";
+  addTplFlash.value = "";
+  const existing = aiTasks.value.find((t) => mailFavKey(t.mail) === mailFavKey(m));
+  if (existing) { activeAiId.value = existing.id; return; }
+  const task: AiMailTask = {
+    id: `aimail-${++aiTaskSeq}`,
+    mail: m,
+    instruction: "",
+    language: detectLang(m.body || ""),
+    status: "idle",
+    log: "",
+    result: null,
+    editText: "",
+    error: "",
+    copied: false,
+  };
+  aiTasks.value.push(task);
+  activeAiId.value = task.id;
+}
+
+function closeAiTask(task: AiMailTask) {
+  if (task.status === "generating" || task.status === "queued") return;
+  aiTasks.value = aiTasks.value.filter((t) => t.id !== task.id);
+  if (activeAiId.value === task.id) activeAiId.value = null;
+}
+
+function minimizeAiDialog() { activeAiId.value = null; }
+function restoreAiTask(id: string) {
+  activeAiId.value = id;
+  addTplOpen.value = false;
+  addTplError.value = "";
+}
+
+function enqueueAiReply(task: AiMailTask) {
+  if (task.status === "generating" || task.status === "queued") return;
+  task.status = "queued";
+  task.error = "";
+  task.log = "";
+  task.result = null;
+  task.editText = "";
+  task.copied = false;
+  addTplOpen.value = false;
+  addTplError.value = "";
+  processAiQueue();
+}
+
+async function processAiQueue() {
+  if (aiGenBusy) return;
+  const next = aiTasks.value.find((t) => t.status === "queued");
+  if (!next) return;
+  aiGenBusy = true;
+  next.status = "generating";
+  try {
+    const lang = next.language === "auto" ? detectLang(next.mail.body || "") : next.language;
+    const result = await invoke<MailReplyResult>("generate_mail_reply", {
+      body: next.mail.body || "",
+      instruction: next.instruction,
+      language: lang,
+      model: null,
+    });
+    next.result = result;
+    next.editText = result.text;
+    next.status = "done";
+  } catch (e: any) {
+    const msg = String(e);
+    next.error = msg === "CANCELLED" ? "已取消生成。" : msg;
+    next.status = "error";
+  } finally {
+    aiGenBusy = false;
+    processAiQueue();
+  }
+}
+
+async function copyAiReply(task: AiMailTask) {
+  if (!task.editText) return;
+  try {
+    await navigator.clipboard.writeText(task.editText);
+    task.copied = true;
+    setTimeout(() => { task.copied = false; }, 2000);
+  } catch { /* 复制失败静默 */ }
+}
+
+async function copyAndJumpAi(task: AiMailTask) {
+  await copyAiReply(task);
+  await openInGmail(task.mail);
+  closeAiTask(task);
+}
 </script>
 
 <template>
@@ -201,6 +436,7 @@ function formatFavTs(ts: number): string {
             <span class="fav-ts">收藏于 {{ formatFavTs(m.favoritedAt) }}</span>
             <div class="mi-actions">
               <button class="fav-star-btn active" @click="unfavorite(m)" title="取消收藏">★</button>
+              <button class="ai-btn" @click="openAiDialog(m)" title="AI 生成回复草稿">✨ AI</button>
               <button class="detail-btn" @click="openDetail(m)">详情</button>
               <button
                 v-if="m.link"
@@ -260,6 +496,9 @@ function formatFavTs(ts: number): string {
               @click="unfavoriteFromDetail(selectedMail)"
               title="取消收藏"
             >★</button>
+            <button class="web-btn ai-web-btn" @click="openAiDialog(selectedMail)">
+              ✨ AI 回复
+            </button>
             <button
               v-if="selectedMail.link"
               class="web-btn"
@@ -312,6 +551,113 @@ function formatFavTs(ts: number): string {
           </div>
           <button v-else class="note-add-btn" @click="startEditNote(selectedMail)">＋ 添加备注</button>
         </div>
+      </div>
+    </div>
+
+    <!-- AI 回复对话框（与 GmailPage 同款） -->
+    <div v-if="activeAiTask" class="detail-overlay ai-overlay" @click.self="minimizeAiDialog">
+      <div class="ai-dialog">
+        <div class="ai-dialog-head">
+          <span class="ai-dialog-title">✨ AI 回复草稿</span>
+          <div class="ai-head-btns">
+            <button class="ai-min" title="缩小（生成继续）" @click="minimizeAiDialog">—</button>
+            <button class="detail-close" @click="closeAiTask(activeAiTask)" :disabled="activeAiTask.status === 'generating' || activeAiTask.status === 'queued'">✕</button>
+          </div>
+        </div>
+        <div class="ai-mail-quote">
+          <div class="ai-quote-subj">{{ activeAiTask.mail.subject || "(无主题)" }}</div>
+          <div class="ai-quote-from">{{ activeAiTask.mail.from }}</div>
+        </div>
+
+        <div class="ai-form-row">
+          <label class="ai-form-label">语言</label>
+          <select class="ai-lang-select" v-model="activeAiTask.language" :disabled="activeAiTask.status === 'generating' || activeAiTask.status === 'queued'">
+            <option v-for="opt in AI_LANG_OPTIONS" :key="opt.value" :value="opt.value">
+              {{ opt.label }}
+            </option>
+          </select>
+        </div>
+
+        <div class="ai-form-row">
+          <label class="ai-form-label">回复方向</label>
+          <textarea
+            class="ai-instruction"
+            v-model="activeAiTask.instruction"
+            placeholder="（选填）告诉 AI 要怎么回，例如「道歉并引导排查」；留空由 AI 根据正文自行判断"
+            rows="2"
+            :disabled="activeAiTask.status === 'generating' || activeAiTask.status === 'queued'"
+          ></textarea>
+        </div>
+
+        <div class="ai-btn-row">
+          <button class="ai-generate-btn" @click="enqueueAiReply(activeAiTask)" :disabled="activeAiTask.status === 'generating' || activeAiTask.status === 'queued'">
+            {{ activeAiTask.status === 'generating' ? "生成中…" : activeAiTask.status === 'queued' ? "排队中…" : (activeAiTask.result ? "重新生成" : "生成回复") }}
+          </button>
+        </div>
+
+        <div v-if="(activeAiTask.status === 'generating' || activeAiTask.status === 'queued') && activeAiTask.log" class="ai-log">{{ activeAiTask.log }}</div>
+        <div v-if="activeAiTask.error" class="ai-error">{{ activeAiTask.error }}</div>
+
+        <template v-if="activeAiTask.result">
+          <div class="ai-result-label-row">
+            <span class="ai-result-label">回复草稿</span>
+            <span class="ai-char-count">{{ activeAiTask.result.char_count }} 字符</span>
+          </div>
+          <textarea class="ai-result-text" v-model="activeAiTask.editText" rows="6"></textarea>
+          <div v-if="activeAiTask.result.text_zh" class="ai-result-zh">{{ activeAiTask.result.text_zh }}</div>
+
+          <div v-if="addTplFlash" class="ai-tpl-flash">✓ {{ addTplFlash }}</div>
+          <div v-if="!addTplOpen" class="ai-result-foot">
+            <button class="ai-copy-btn secondary" @click="copyAiReply(activeAiTask)">
+              {{ activeAiTask.copied ? "已复制 ✓" : "仅复制" }}
+            </button>
+            <button class="ai-copy-btn" @click="copyAndJumpAi(activeAiTask)">
+              复制并跳转 ↗
+            </button>
+            <button
+              class="ai-addtpl-btn"
+              :disabled="!templateProductFor(activeAiTask.mail)"
+              :title="templateProductFor(activeAiTask.mail) ? '收录为模板（英文/中文草稿存对应源；其它语言用机翻中文入库）' : '该邮件所属邮件表未关联模板产品'"
+              @click="startAddTpl"
+            >
+              ➕ 添加模板
+            </button>
+          </div>
+          <div v-else class="ai-addtpl-panel">
+            <input
+              v-model="addTplCategory"
+              class="ai-addtpl-category"
+              placeholder="类别（如：售后道歉 / 排查引导；可留空=未分类）"
+              @keyup.enter="confirmAddTpl(activeAiTask)"
+            />
+            <button class="ai-addtpl-ok" :disabled="addTplBusy" @click="confirmAddTpl(activeAiTask)">
+              {{ addTplBusy ? "收录中…" : "收录" }}
+            </button>
+            <button class="ai-addtpl-cancel" :disabled="addTplBusy" @click="cancelAddTpl">取消</button>
+            <span v-if="addTplError" class="ai-addtpl-err">{{ addTplError }}</span>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- 缩小后的右下角悬浮条 -->
+    <div v-if="minimizedAiTasks.length" class="ai-mini-stack">
+      <div
+        v-for="t in minimizedAiTasks"
+        :key="t.id"
+        class="ai-mini-bar"
+        :class="{ 'is-error': t.status === 'error', 'is-done': t.status === 'done' }"
+        @click="restoreAiTask(t.id)"
+      >
+        <span class="ai-mini-text">
+          ✨ <span class="ai-mini-quote">{{ (t.mail.subject || t.mail.from || "(无主题)").slice(0, 16) }}</span>
+          <template v-if="t.status === 'generating'">· 生成中…</template>
+          <template v-else-if="t.status === 'queued'">· 排队中</template>
+          <template v-else-if="t.status === 'error'">· 失败</template>
+          <template v-else-if="t.result">· 已就绪</template>
+          <template v-else>· 待生成</template>
+        </span>
+        <button class="ai-mini-open" @click.stop="restoreAiTask(t.id)">展开</button>
       </div>
     </div>
   </div>
@@ -719,5 +1065,359 @@ function formatFavTs(ts: number): string {
 .note-btn.danger:hover {
   background: #fff5f5;
   border-color: #feb2b2;
+}
+
+/* ── AI 回复（照搬 GmailPage 同名样式） ────────────────────────────────── */
+.ai-btn {
+  padding: 3px 8px;
+  font-size: 12px;
+  border: 1px solid #ed8936;
+  border-radius: 6px;
+  background: white;
+  color: #c05621;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-btn:hover {
+  background: #fffaf0;
+}
+.ai-web-btn {
+  border-color: #ed8936;
+  color: #c05621;
+}
+.ai-web-btn:hover {
+  background: #ed8936;
+  color: white;
+}
+.ai-overlay {
+  z-index: 1020;
+}
+.ai-dialog {
+  background: white;
+  border-radius: 12px;
+  width: 100%;
+  max-width: min(620px, calc(100vw - 80px));
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 18px 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+.ai-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.ai-dialog-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #2d3748;
+}
+.ai-head-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ai-min {
+  border: none;
+  background: none;
+  color: #999;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ai-min:hover {
+  background: #edf2f7;
+  color: #4a5568;
+}
+.ai-mini-stack {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1050;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  align-items: flex-end;
+}
+.ai-mini-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-left: 3px solid #ed8936;
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  max-width: 360px;
+}
+.ai-mini-bar.is-error {
+  border-left-color: #e53e3e;
+}
+.ai-mini-bar.is-done {
+  border-left-color: #38a169;
+}
+.ai-mini-bar:hover {
+  background: #fffaf0;
+}
+.ai-mini-text {
+  font-size: 12px;
+  color: #4a5568;
+  white-space: nowrap;
+}
+.ai-mini-quote {
+  color: #1a202c;
+  font-weight: 500;
+}
+.ai-mini-open {
+  padding: 4px 12px;
+  font-size: 12px;
+  border: 1px solid #ed8936;
+  border-radius: 6px;
+  background: white;
+  color: #c05621;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-mini-open:hover {
+  background: #ed8936;
+  color: white;
+}
+.ai-mail-quote {
+  background: #fffaf0;
+  border-left: 3px solid #ed8936;
+  border-radius: 0 6px 6px 0;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+}
+.ai-quote-subj {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a202c;
+}
+.ai-quote-from {
+  font-size: 11px;
+  color: #718096;
+  margin-top: 2px;
+}
+.ai-form-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.ai-form-label {
+  width: 64px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a5568;
+  padding-top: 6px;
+}
+.ai-lang-select {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 13px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  outline: none;
+  cursor: pointer;
+}
+.ai-lang-select:focus {
+  border-color: #ed8936;
+}
+.ai-instruction {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 13px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-family: inherit;
+  resize: vertical;
+  outline: none;
+}
+.ai-instruction:focus {
+  border-color: #ed8936;
+}
+.ai-btn-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+.ai-generate-btn {
+  padding: 6px 20px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  border-radius: 6px;
+  background: #ed8936;
+  color: white;
+  cursor: pointer;
+}
+.ai-generate-btn:hover:not(:disabled) {
+  background: #dd6b20;
+}
+.ai-generate-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.ai-log {
+  font-size: 12px;
+  color: #718096;
+  background: #f7fafc;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.ai-error {
+  font-size: 12px;
+  color: #c53030;
+  background: #fff5f5;
+  border: 1px solid #fed7d7;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+.ai-result-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.ai-result-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #4a5568;
+}
+.ai-char-count {
+  font-size: 11px;
+  color: #999;
+}
+.ai-result-text {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  font-family: inherit;
+  resize: vertical;
+  outline: none;
+  color: #2d3748;
+}
+.ai-result-text:focus {
+  border-color: #ed8936;
+}
+.ai-result-zh {
+  font-size: 12px;
+  color: #718096;
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: #f7fafc;
+  border-radius: 6px;
+  line-height: 1.5;
+}
+.ai-result-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+.ai-copy-btn {
+  padding: 6px 20px;
+  font-size: 13px;
+  border: 1px solid #ed8936;
+  background: #ed8936;
+  color: white;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.ai-copy-btn:hover {
+  background: #dd6b20;
+}
+.ai-copy-btn.secondary {
+  background: white;
+  color: #c05621;
+}
+.ai-copy-btn.secondary:hover {
+  background: #fffaf0;
+}
+.ai-addtpl-btn {
+  font-size: 12px;
+  padding: 5px 14px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  background: white;
+  color: #5a67d8;
+  cursor: pointer;
+}
+.ai-addtpl-btn:hover:not(:disabled) {
+  background: #eef0ff;
+}
+.ai-addtpl-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ai-tpl-flash {
+  font-size: 12px;
+  color: #22543d;
+  background: #c6f6d5;
+  border-radius: 6px;
+  padding: 5px 10px;
+  margin-top: 8px;
+}
+.ai-addtpl-panel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.ai-addtpl-category {
+  flex: 1;
+  min-width: 160px;
+  padding: 4px 8px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.ai-addtpl-ok,
+.ai-addtpl-cancel {
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-addtpl-ok {
+  border: 1px solid #ed8936;
+  background: #ed8936;
+  color: white;
+}
+.ai-addtpl-ok:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ai-addtpl-cancel {
+  border: 1px solid #e2e8f0;
+  background: white;
+  color: #718096;
+}
+.ai-addtpl-err {
+  font-size: 11px;
+  color: #c53030;
+  width: 100%;
 }
 </style>

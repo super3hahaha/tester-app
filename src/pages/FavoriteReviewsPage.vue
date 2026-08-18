@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { scopedKey } from "../utils/accountScopedKey";
+import { getActiveAccountId } from "../utils/activeAccount";
 import {
   loadFavorites,
   removeFavorite,
   setFavoriteNote,
+  updateFavoriteReply,
   favoritesError,
   type FavoriteReview,
 } from "../utils/reviewFavorites";
@@ -158,6 +162,316 @@ function formatMsTs(ts: number): string {
 function starsDisplay(n: number): string {
   return "★".repeat(n) + "☆".repeat(5 - n);
 }
+
+// ── AI 回复（与 ReviewPage.vue 的入口保持一致，独立实现避免跨页面耦合）──────
+const SNAP_VERSION = 1;
+
+function snapKey(pkg: string): string {
+  return `${getActiveAccountId() || "_none"}__${pkg}`;
+}
+
+async function saveSnapshot(key: string, list: any[], at: number | null) {
+  try {
+    await invoke("save_reviews_snapshot", {
+      key: snapKey(key),
+      data: { version: SNAP_VERSION, reviews: list, fetchedAt: at },
+    });
+  } catch (e) {
+    console.warn("save reviews snapshot failed:", e);
+  }
+}
+
+async function loadSnapshot(key: string): Promise<{ reviews: any[]; fetchedAt: number | null } | null> {
+  if (!key) return null;
+  try {
+    const data = await invoke<any>("load_reviews_snapshot", { key: snapKey(key) });
+    if (!data || !Array.isArray(data.reviews)) return null;
+    return { reviews: data.reviews, fetchedAt: data.fetchedAt ?? null };
+  } catch (e) {
+    console.warn("load reviews snapshot failed:", e);
+    return null;
+  }
+}
+
+// 回复成功后，按 review_id 改写该 app 快照文件里那一条，让「Play Console」评论列表
+// 回到该 app 时也能看到最新回复状态（读-改-写，与收藏页视图无关）。
+async function persistReplyToSnapshot(pkg: string, reviewId: string, replyText: string, ts: number) {
+  const snap = await loadSnapshot(pkg);
+  if (!snap) return;
+  const hit = snap.reviews.find((r) => r.review_id === reviewId);
+  if (!hit) return;
+  hit.developer_reply = replyText;
+  hit.developer_reply_ts = ts;
+  await saveSnapshot(pkg, snap.reviews, snap.fetchedAt);
+}
+
+interface GenCandidate {
+  style: string;
+  language: string;
+  text: string;
+  text_zh: string;
+  char_count: number;
+}
+interface GenReplyResult {
+  candidates: GenCandidate[];
+  usage: { input_tokens?: number; output_tokens?: number; total_cost_usd?: number } | null;
+}
+
+interface ModelConfig { reply: string; analysis: string; translate: string; }
+const modelConfig = ref<ModelConfig>({ reply: "claude-sonnet-4-6", analysis: "claude-sonnet-4-6", translate: "claude-haiku-4-5" });
+invoke<ModelConfig>("get_model_config").then(c => { modelConfig.value = c; }).catch(() => {});
+
+const LANG_OPTIONS: { value: string; label: string }[] = [
+  { value: "auto", label: "跟随评论语言" },
+  { value: "en", label: "英文 en" },
+  { value: "zh-CN", label: "中文 zh-CN" },
+  { value: "ru", label: "俄文 ru" },
+  { value: "pt", label: "葡萄牙文 pt" },
+  { value: "es", label: "西班牙文 es" },
+  { value: "fr", label: "法文 fr" },
+  { value: "de", label: "德文 de" },
+];
+
+type AiStatus = "idle" | "queued" | "generating" | "done" | "error";
+interface AiTask {
+  id: string;
+  review: FavoriteReview;
+  pkg: string;
+  appLabel: string;
+  instruction: string;
+  language: string;
+  status: AiStatus;
+  submitting: boolean;
+  candidates: GenCandidate[];
+  selectedIdx: number;
+  editText: string;
+  error: string;
+  log: string;
+  usage: GenReplyResult["usage"];
+}
+
+const aiTasks = ref<AiTask[]>([]);
+const activeTaskId = ref<string | null>(null);
+let taskSeq = 0;
+let genBusy = false;
+
+const activeTask = computed(
+  () => aiTasks.value.find((t) => t.id === activeTaskId.value) ?? null
+);
+const minimizedTasks = computed(() =>
+  aiTasks.value.filter((t) => t.id !== activeTaskId.value)
+);
+
+const addTplIdx = ref(-1);
+const addTplCategory = ref("");
+const addTplBusy = ref(false);
+const addTplError = ref("");
+const addTplFlash = ref("");
+
+function tplPayload(c: GenCandidate): { text: string; lang: string } {
+  const l = (c.language || "").toLowerCase();
+  if (l.startsWith("en")) return { text: c.text, lang: "en" };
+  if (l.startsWith("zh")) return { text: c.text, lang: "zh-CN" };
+  return { text: c.text_zh && c.text_zh.trim() ? c.text_zh : c.text, lang: "zh-CN" };
+}
+function startAddTpl(idx: number) {
+  addTplIdx.value = idx;
+  addTplCategory.value = "";
+  addTplError.value = "";
+}
+function cancelAddTpl() {
+  addTplIdx.value = -1;
+  addTplError.value = "";
+}
+async function confirmAddTpl(c: GenCandidate) {
+  if (addTplBusy.value) return;
+  const pkg = activeTask.value?.pkg || "";
+  addTplBusy.value = true;
+  addTplError.value = "";
+  try {
+    const product = await invoke<string | null>("product_for_package", {
+      packageName: pkg,
+    });
+    if (!product) {
+      addTplError.value = "该应用没有对应的模板产品，无法收录。";
+      return;
+    }
+    const { text, lang } = tplPayload(c);
+    await invoke<string>("add_template", {
+      product,
+      category: addTplCategory.value,
+      text,
+      lang,
+    });
+    addTplIdx.value = -1;
+    addTplFlash.value = `已收录到「${product}」模板库（${lang === "en" ? "英文" : "中文"}模板）`;
+    window.setTimeout(() => (addTplFlash.value = ""), 2500);
+  } catch (e: any) {
+    addTplError.value = String(e);
+  } finally {
+    addTplBusy.value = false;
+  }
+}
+
+let unlistenReplyLog: UnlistenFn | null = null;
+onMounted(async () => {
+  unlistenReplyLog = await listen<{ text: string; kind: string; done: boolean }>(
+    "reply-log",
+    (e) => {
+      const gen = aiTasks.value.find((t) => t.status === "generating");
+      if (gen) gen.log = e.payload.text;
+    }
+  );
+});
+onUnmounted(() => {
+  if (unlistenReplyLog) unlistenReplyLog();
+});
+
+function openAiDialog(r: FavoriteReview) {
+  const existing = aiTasks.value.find((t) => t.review.review_id === r.review_id);
+  if (existing) {
+    activeTaskId.value = existing.id;
+    return;
+  }
+  const task: AiTask = {
+    id: `ai-${++taskSeq}`,
+    review: r,
+    pkg: r._pkg,
+    appLabel: r._app,
+    instruction: "",
+    language: "auto",
+    status: "idle",
+    submitting: false,
+    candidates: [],
+    selectedIdx: -1,
+    editText: "",
+    error: "",
+    log: "",
+    usage: null,
+  };
+  aiTasks.value.push(task);
+  activeTaskId.value = task.id;
+}
+
+function closeTask(task: AiTask) {
+  if (task.status === "generating" || task.submitting) return;
+  aiTasks.value = aiTasks.value.filter((t) => t.id !== task.id);
+  if (activeTaskId.value === task.id) activeTaskId.value = null;
+}
+
+function minimizeAiDialog() {
+  activeTaskId.value = null;
+}
+function restoreTask(id: string) {
+  activeTaskId.value = id;
+}
+
+function enqueueGenerate(task: AiTask) {
+  if (task.status === "generating" || task.status === "queued") return;
+  addTplIdx.value = -1;
+  task.status = "queued";
+  task.error = "";
+  task.log = "";
+  task.candidates = [];
+  task.selectedIdx = -1;
+  processQueue();
+}
+
+async function processQueue() {
+  if (genBusy) return;
+  const next = aiTasks.value.find((t) => t.status === "queued");
+  if (!next) return;
+  genBusy = true;
+  next.status = "generating";
+  try {
+    const res = await invoke<GenReplyResult>("generate_single_reply", {
+      review: next.review,
+      product: next.appLabel || next.pkg,
+      packageName: next.pkg,
+      instruction: next.instruction.trim(),
+      language: next.language,
+      model: modelConfig.value.reply,
+    });
+    next.candidates = Array.isArray(res.candidates) ? res.candidates : [];
+    next.usage = res.usage;
+    if (next.candidates.length === 0) {
+      next.status = "error";
+      next.error = "未生成任何候选，请调整方向后重试。";
+    } else {
+      next.status = "done";
+    }
+  } catch (e: any) {
+    const msg = String(e);
+    next.error = msg === "CANCELLED" ? "已取消生成。" : msg;
+    next.status = "error";
+  } finally {
+    genBusy = false;
+    processQueue();
+  }
+}
+
+async function stopTask(task: AiTask) {
+  if (task.status === "queued") {
+    task.status = task.candidates.length ? "done" : "idle";
+    return;
+  }
+  if (task.status === "generating") {
+    try {
+      await invoke("stop_reply");
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function selectCandidate(task: AiTask, idx: number) {
+  task.selectedIdx = idx;
+  task.editText = task.candidates[idx]?.text ?? "";
+}
+
+function onEditInput(task: AiTask) {
+  task.selectedIdx = -1;
+}
+
+function taskEditLen(task: AiTask | null): number {
+  return task ? [...task.editText].length : 0;
+}
+
+async function handleSubmitReply(task: AiTask) {
+  if (!task || task.submitting) return;
+  const text = task.editText.trim();
+  if (!text) {
+    task.error = "回复内容为空。";
+    return;
+  }
+  if ([...text].length > 350) {
+    task.error = `回复超过 350 字符（当前 ${[...text].length}），请精简后再提交。`;
+    return;
+  }
+  task.submitting = true;
+  task.error = "";
+  try {
+    await invoke("reply_to_review", {
+      packageName: task.pkg,
+      reviewId: task.review.review_id,
+      replyText: text,
+    });
+    const replyTs = Math.floor(Date.now() / 1000);
+    task.review.developer_reply = text;
+    task.review.developer_reply_ts = replyTs;
+    persistReplyToSnapshot(task.pkg, task.review.review_id, text, replyTs);
+    updateFavoriteReply(task.review.review_id, text, replyTs);
+    // 收藏列表还会被「备注」编辑等操作用 loadList() 整体重建（新对象），task.review 这份引用
+    // 到那时就和当前渲染的列表脱钩了——直接改它不一定能反映到界面上，重新从存储读一遍最保险。
+    loadList();
+    aiTasks.value = aiTasks.value.filter((t) => t.id !== task.id);
+    if (activeTaskId.value === task.id) activeTaskId.value = null;
+  } catch (e: any) {
+    task.error = String(e);
+  } finally {
+    task.submitting = false;
+  }
+}
 </script>
 
 <template>
@@ -226,6 +540,9 @@ function starsDisplay(n: number): string {
           </div>
           <div class="review-actions">
             <button class="fav-star-btn active" @click="unfavorite(r)" title="取消收藏">★</button>
+            <button class="ai-btn" @click="openAiDialog(r)">
+              🤖 {{ r.developer_reply ? "AI 重新回复" : "AI 回复" }}
+            </button>
             <button
               v-if="reviewConsoleUrl(r)"
               class="web-btn"
@@ -267,6 +584,168 @@ function starsDisplay(n: number): string {
         </article>
       </div>
     </template>
+
+    <!-- AI 回复弹窗（展开中的任务） -->
+    <div v-if="activeTask" class="ai-overlay" @click.self="minimizeAiDialog">
+      <div class="ai-dialog">
+        <div class="ai-dialog-head">
+          <span class="ai-title">🤖 AI 生成回复</span>
+          <div class="ai-head-btns">
+            <button class="ai-min" title="缩小（生成继续）" @click="minimizeAiDialog">—</button>
+            <button
+              class="ai-close"
+              :disabled="activeTask.status === 'generating' || activeTask.submitting"
+              @click="closeTask(activeTask)"
+            >✕</button>
+          </div>
+        </div>
+
+        <div class="ai-review-quote">
+          <span class="stars" :class="`stars-${activeTask.review.star_rating}`">{{ starsDisplay(activeTask.review.star_rating) }}</span>
+          <div class="ai-quote-body">
+            <div class="ai-quote-text">{{ activeTask.review.text || "(无文字)" }}</div>
+            <div v-if="activeTask.review.original_text" class="ai-quote-orig">
+              <span class="ai-quote-orig-label">原文：</span>{{ activeTask.review.original_text }}
+            </div>
+          </div>
+        </div>
+
+        <div class="ai-input-row">
+          <label class="ai-label">回复方向</label>
+          <textarea
+            v-model="activeTask.instruction"
+            class="ai-instruction"
+            rows="2"
+            placeholder="可留空——留空则由 AI 根据评论自行判断方向。也可指定，例如：询问用户具体想兼容哪些格式，态度诚恳，表示会反馈给团队"
+            :disabled="activeTask.status === 'generating' || activeTask.status === 'queued'"
+          ></textarea>
+        </div>
+        <div class="ai-input-row">
+          <label class="ai-label">回复语言</label>
+          <select
+            v-model="activeTask.language"
+            class="ai-lang-select"
+            :disabled="activeTask.status === 'generating' || activeTask.status === 'queued'"
+          >
+            <option v-for="o in LANG_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+          </select>
+          <button
+            v-if="activeTask.status === 'generating'"
+            class="ai-stop-btn"
+            @click="stopTask(activeTask)"
+          >■ 停止</button>
+          <button
+            v-else-if="activeTask.status === 'queued'"
+            class="ai-stop-btn"
+            @click="stopTask(activeTask)"
+          >排队中…取消</button>
+          <button
+            v-else
+            class="ai-gen-btn"
+            @click="enqueueGenerate(activeTask)"
+          >
+            {{ activeTask.candidates.length ? "重新生成" : "生成 3 条候选" }}
+          </button>
+        </div>
+
+        <div v-if="activeTask.status === 'generating'" class="ai-generating">
+          <span class="ai-spinner">⏳</span> 生成中…
+          <span v-if="activeTask.log" class="ai-log">{{ activeTask.log }}</span>
+        </div>
+        <div v-else-if="activeTask.status === 'queued'" class="ai-generating">
+          <span class="ai-spinner">⏳</span> 排队等待中…（前面还有任务在生成）
+        </div>
+
+        <div v-if="activeTask.error" class="ai-error">{{ activeTask.error }}</div>
+
+        <div v-if="addTplFlash" class="ai-tpl-flash">✓ {{ addTplFlash }}</div>
+        <div v-if="activeTask.candidates.length" class="ai-candidates">
+          <div
+            v-for="(c, idx) in activeTask.candidates"
+            :key="idx"
+            class="ai-cand"
+            :class="{ active: activeTask.selectedIdx === idx }"
+            @click="selectCandidate(activeTask, idx)"
+          >
+            <div class="ai-cand-head">
+              <span class="ai-cand-style">{{ c.style || `候选 ${idx + 1}` }}</span>
+              <span class="ai-cand-meta">{{ c.language }} · {{ c.char_count }} 字符</span>
+              <div class="ai-cand-head-spacer"></div>
+              <button
+                class="ai-addtpl-btn"
+                title="收录为模板（英文候选存英文模板，其它语言用中文预览存中文模板）"
+                @click.stop="startAddTpl(idx)"
+              >
+                ➕ 添加模板
+              </button>
+            </div>
+            <div class="ai-cand-text">{{ c.text }}</div>
+            <div v-if="c.text_zh" class="ai-cand-zh">{{ c.text_zh }}</div>
+
+            <!-- 收录面板（内联，填类别） -->
+            <div v-if="addTplIdx === idx" class="ai-addtpl-panel" @click.stop>
+              <input
+                v-model="addTplCategory"
+                class="ai-addtpl-category"
+                placeholder="类别（如：要五星 / 无法更新；可留空=未分类）"
+                @keyup.enter="confirmAddTpl(c)"
+              />
+              <button class="ai-addtpl-ok" :disabled="addTplBusy" @click="confirmAddTpl(c)">
+                {{ addTplBusy ? "收录中…" : "收录" }}
+              </button>
+              <button class="ai-addtpl-cancel" :disabled="addTplBusy" @click="cancelAddTpl">取消</button>
+              <span v-if="addTplError" class="ai-addtpl-err">{{ addTplError }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="activeTask.selectedIdx >= 0 || activeTask.editText" class="ai-final">
+          <label class="ai-label">最终回复（可手动微调）</label>
+          <textarea
+            v-model="activeTask.editText"
+            class="ai-final-text"
+            rows="4"
+            @input="onEditInput(activeTask)"
+          ></textarea>
+          <div class="ai-final-foot">
+            <span class="ai-charcount" :class="{ over: taskEditLen(activeTask) > 350 }">{{ taskEditLen(activeTask) }} / 350</span>
+            <button
+              class="ai-submit-btn"
+              :disabled="activeTask.submitting || !activeTask.editText.trim() || taskEditLen(activeTask) > 350"
+              @click="handleSubmitReply(activeTask)"
+            >
+              {{ activeTask.submitting ? "提交中…" : "确认提交到 Play" }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="activeTask.usage" class="ai-usage">
+          💰 本次用量：输入 {{ activeTask.usage.input_tokens ?? 0 }} · 输出 {{ activeTask.usage.output_tokens ?? 0 }} tokens
+          <span v-if="activeTask.usage.total_cost_usd"> · 约 ${{ activeTask.usage.total_cost_usd.toFixed(4) }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 缩小后的右下角悬浮条 -->
+    <div v-if="minimizedTasks.length" class="ai-mini-stack">
+      <div
+        v-for="t in minimizedTasks"
+        :key="t.id"
+        class="ai-mini-bar"
+        :class="{ 'is-error': t.status === 'error', 'is-done': t.status === 'done' }"
+        @click="restoreTask(t.id)"
+      >
+        <span class="ai-mini-text">
+          🤖 <span class="ai-mini-quote">{{ (t.review.text || t.review.original_text || "(无文字)").slice(0, 16) }}</span>
+          <template v-if="t.status === 'generating'">· 生成中…</template>
+          <template v-else-if="t.status === 'queued'">· 排队中</template>
+          <template v-else-if="t.status === 'error'">· 失败</template>
+          <template v-else-if="t.candidates.length">· {{ t.candidates.length }} 条已就绪</template>
+          <template v-else>· 待生成</template>
+        </span>
+        <button class="ai-mini-open" @click.stop="restoreTask(t.id)">展开</button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -460,6 +939,7 @@ function starsDisplay(n: number): string {
   display: flex;
   justify-content: flex-end;
   align-items: center;
+  gap: 6px;
 }
 .fav-star-btn {
   border: none;
@@ -598,5 +1078,429 @@ function starsDisplay(n: number): string {
 .note-btn.danger:hover {
   background: #fff5f5;
   border-color: #feb2b2;
+}
+
+/* ── AI 回复（与 ReviewPage.vue 的入口样式保持一致）───────────────────── */
+.ai-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  border: 1px solid #667eea;
+  border-radius: 6px;
+  background: white;
+  color: #667eea;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-btn:hover {
+  background: #667eea;
+  color: white;
+}
+.ai-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+.ai-dialog {
+  background: white;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 640px;
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 18px 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+.ai-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.ai-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #2d3748;
+}
+.ai-head-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.ai-min,
+.ai-close {
+  border: none;
+  background: none;
+  color: #999;
+  cursor: pointer;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.ai-min {
+  font-size: 18px;
+  line-height: 1;
+}
+.ai-close {
+  font-size: 16px;
+}
+.ai-min:hover,
+.ai-close:hover:not(:disabled) {
+  background: #edf2f7;
+  color: #4a5568;
+}
+.ai-close:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ai-mini-stack {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  align-items: flex-end;
+}
+.ai-mini-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-left: 3px solid #667eea;
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  max-width: 360px;
+}
+.ai-mini-bar.is-error {
+  border-left-color: #e53e3e;
+}
+.ai-mini-bar.is-done {
+  border-left-color: #38a169;
+}
+.ai-mini-bar:hover {
+  background: #f5f6ff;
+}
+.ai-mini-text {
+  font-size: 12px;
+  color: #4a5568;
+  white-space: nowrap;
+}
+.ai-mini-quote {
+  color: #1a202c;
+  font-weight: 500;
+}
+.ai-mini-open {
+  padding: 4px 12px;
+  font-size: 12px;
+  border: 1px solid #667eea;
+  border-radius: 6px;
+  background: white;
+  color: #667eea;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-mini-open:hover {
+  background: #667eea;
+  color: white;
+}
+.ai-review-quote {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  background: #fafafa;
+  border-left: 3px solid #ddd;
+  border-radius: 0 6px 6px 0;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+}
+.ai-quote-body {
+  flex: 1;
+  min-width: 0;
+}
+.ai-quote-text {
+  font-size: 13px;
+  color: #2d3748;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ai-quote-orig {
+  margin-top: 5px;
+  font-size: 12px;
+  color: #777;
+  line-height: 1.5;
+}
+.ai-quote-orig-label {
+  color: #999;
+  font-size: 11px;
+}
+.ai-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.ai-label {
+  width: 72px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a5568;
+  align-self: flex-start;
+  padding-top: 6px;
+}
+.ai-instruction,
+.ai-final-text {
+  flex: 1;
+  padding: 8px 10px;
+  font-size: 13px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  outline: none;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.5;
+}
+.ai-instruction:focus,
+.ai-final-text:focus {
+  border-color: #667eea;
+}
+.ai-lang-select {
+  padding: 6px 10px;
+  font-size: 13px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+}
+.ai-gen-btn {
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  border-radius: 6px;
+  background: #667eea;
+  color: white;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-gen-btn:hover:not(:disabled) {
+  background: #5a67d8;
+}
+.ai-gen-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+.ai-stop-btn {
+  padding: 6px 14px;
+  font-size: 13px;
+  border: 1px solid #e53e3e;
+  border-radius: 6px;
+  background: white;
+  color: #e53e3e;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-generating {
+  font-size: 13px;
+  color: #667eea;
+  margin: 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ai-log {
+  font-size: 11px;
+  color: #999;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ai-error {
+  color: #e53e3e;
+  font-size: 12px;
+  margin: 8px 0;
+  word-break: break-word;
+}
+.ai-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+.ai-cand {
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.ai-cand:hover {
+  border-color: #b3bcf5;
+}
+.ai-cand.active {
+  border-color: #667eea;
+  background: #f5f6ff;
+}
+.ai-cand-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.ai-cand-style {
+  font-size: 12px;
+  font-weight: 600;
+  color: #5a67d8;
+}
+.ai-cand-meta {
+  font-size: 11px;
+  color: #999;
+}
+.ai-cand-head-spacer {
+  flex: 1;
+}
+.ai-addtpl-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  background: white;
+  color: #5a67d8;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-addtpl-btn:hover:not(:disabled) {
+  background: #eef0ff;
+}
+.ai-addtpl-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.ai-tpl-flash {
+  font-size: 12px;
+  color: #22543d;
+  background: #c6f6d5;
+  border-radius: 6px;
+  padding: 5px 10px;
+  margin-bottom: 8px;
+}
+.ai-addtpl-panel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.ai-addtpl-category {
+  flex: 1;
+  min-width: 160px;
+  padding: 4px 8px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.ai-addtpl-ok,
+.ai-addtpl-cancel {
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.ai-addtpl-ok {
+  border: 1px solid #667eea;
+  background: #667eea;
+  color: white;
+}
+.ai-addtpl-ok:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ai-addtpl-cancel {
+  border: 1px solid #e2e8f0;
+  background: white;
+  color: #718096;
+}
+.ai-addtpl-err {
+  font-size: 11px;
+  color: #c53030;
+  width: 100%;
+}
+.ai-cand-text {
+  font-size: 13px;
+  color: #2d3748;
+  line-height: 1.5;
+}
+.ai-cand-zh {
+  font-size: 12px;
+  color: #888;
+  line-height: 1.5;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed #eee;
+}
+.ai-final {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ai-final .ai-label {
+  width: auto;
+  padding-top: 0;
+}
+.ai-final-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ai-charcount {
+  font-size: 12px;
+  color: #888;
+}
+.ai-charcount.over {
+  color: #e53e3e;
+  font-weight: 600;
+}
+.ai-submit-btn {
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  border-radius: 6px;
+  background: #38a169;
+  color: white;
+  cursor: pointer;
+}
+.ai-submit-btn:hover:not(:disabled) {
+  background: #2f855a;
+}
+.ai-submit-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+.ai-usage {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #eee;
+  font-size: 11px;
+  color: #999;
 }
 </style>
