@@ -84,6 +84,14 @@
 - **package_map 第一期不在 app 管**：包名↔产品映射沿用现有（拷过来只读），skill 仍读它；产品/映射的增改留作后续。
 - **xlsx 仍可批量导入**：保留「从 xlsx 导入」入口（calamine 读，复刻原解析口径），覆盖式灌某产品；日常增删改则在 app 里直接做。
 
+## review-reply skill 改回「模板命中或自拟」，彻底不读 `~/.tester-app/templates/`（本节是对上面那条的部分反转）
+
+- **背景**：224 条模板的匹配库越养越大，匹配阶段本身（判断"值不值得用模板"）变慢；没命中的评论只能标 `unmatched` 交给用户逐条走「AI 单条回复」现生成，来回慢。用户在 `play-console-review-triage` skill（差评巡检，独立项目）里验证过「小模板（2 条）命中就用，没命中就按知识库最小限度自拟 1 条」这套思路又快质量又够，要求把这套思路搬进 review-reply。
+- **选择**：review-reply 不再读 `<模板目录>`（`index.json`/`templates.json`/`package_map.json`），改成 2 条内置模板直接写在 SKILL.md 正文里；`reply.rs::run_reply_skill_inner` 不再 `--add-dir` 模板目录，改成给每个 group 塞一个 `app_knowledge` 字段（按 `package_name` 解出的产品知识块全文，复用 `knowledge_for_package`，与「AI 单条回复」同一套知识库路由）。**每条评论必须恰好给 1 条候选**——命中内置模板 `source:"template"`；没命中 `source:"generated"`，自拟要贴内置模板的措辞/长度、不扩写、不加新承诺/新邮箱/促销（比「AI 单条回复」那套更自由的生成标准更保守），≤350 字硬上限、写长了压缩不允许跳过。不再有 `unmatched` 这个终点。
+- **`~/.tester-app/templates/` 224 条模板没有被删**：这份数据和「模板管理」页原样保留，只是 review-reply skill 不再是它的消费者——现在唯一还在读它的是 `ReviewPage.vue` 的手动「选模板回复」弹窗（`list_templates`），以及 `product_for_package`（package_map.json 的包名↔产品映射，被知识库路由复用，跟模板全文无关）。两条路径（批量自动回复 vs 手动模板回复）就此彻底解耦，互不影响。
+- **为什么不把 2 条模板也塞进 app 管理的模板库**：用户明确要求"不用归入现有模板体系，直接写进 skill 里"——这 2 条模板体量小、通用（不分产品），维护成本上不值得为它们走一遍模板管理的 CRUD/索引流程，硬编码在 SKILL.md 里更直接。
+- **自拟不复用 `prompt_config.rs::default_gen()` 那套硬标准**：`default_gen`（AI 单条回复用）鼓励语气丰富、可邀五星、可展开说明，是"认真写一条好回复"的路线；这里的自拟哲学不同——是**模板的影子**，只在没有模板可用时才顶上，措辞长度要贴着模板走，宁可平淡也不能加戏，两套标准分别独立维护、不强求同步。
+
 ## 模板库改为中英双源（模板加 lang 字段）
 
 - **背景**：原本模板库约定纯英文源，skill 命中后翻到目标语言；但运营有时想收录一条好的中文回复、或直接写中文模板。

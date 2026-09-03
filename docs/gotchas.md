@@ -56,10 +56,9 @@ Tauri 的 webview（WKWebView / WebView2）对同步对话框 `window.confirm()`
 
 ## 模板预翻译：app 原生语言码 vs ISO 码必须归一
 
-模板 `translations` 的 key 用 **app 原生码**（`in` / `zh-rCN` / `zh-rTW`），而 review-reply 的回复语言来自 `target_language` / `reviewer_language`，是 **ISO 码**（`id` / `zh-CN` / `zh-TW`）。两套码不归一就永远命中不到预存译文、白白实时翻译。
+`~/.tester-app/templates/` 那 224 条模板库的 `translations` 字段 key 用 **app 原生码**（`in` / `zh-rCN` / `zh-rTW`），跟 ISO 码（`id` / `zh-CN` / `zh-TW`）是两套体系。两套码不归一就永远命中不到预存译文、白白实时翻译。**这份模板库现在只给 `ReviewPage.vue` 手动模板回复用**（review-reply skill 已改用内置的 2 条模板 + 批量自拟，不再查这份 `translations` 表，见 decisions.md「review-reply skill 改回「模板命中或自拟」」）。
 
-- skill 端（review-reply SKILL.md 第 5 步）查 `translations` 前先归一：`zh-CN`/`zh-Hans`→`zh-rCN`、`zh-TW`/`zh-Hant`→`zh-rTW`、`id`→`in`、`pt-BR`→`pt`。
-- 后端（`translate.rs` 经 `templates::is_source_lang`）同样处理：源 `zh-CN` 时目标 `zh-rCN` 视为同源，不翻不存（查询时归一到源直接用 text）。
+- 后端（`translate.rs` 经 `templates::is_source_lang`）处理归一：源 `zh-CN` 时目标 `zh-rCN` 视为同源，不翻不存（查询时归一到源直接用 text）。`ReviewPage.vue` 手动选模板回复时同样要按这套映射（`zh-CN`/`zh-Hans`→`zh-rCN`、`zh-TW`/`zh-Hant`→`zh-rTW`、`id`→`in`、`pt-BR`→`pt`）查 `translations`，否则命中不到预存译文。
 
 ## 模板翻译分批：每批必须立刻写盘
 
