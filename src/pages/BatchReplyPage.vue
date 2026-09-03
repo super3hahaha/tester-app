@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   type DatePreset,
@@ -66,7 +67,7 @@ interface Candidate {
   selectedIdx: number; // index into options that's currently filled; -1 = manually edited
   showMore: boolean; // whether the alternative-options panel is expanded
   unmatched: boolean; // true once matching ran and found no template (user handles manually)
-  manual: boolean; // 用户标记「人工处理」：只排除「匹配模板并填充」，仍可手动填写/提交
+  manual: boolean; // 用户标记「人工处理」：只排除「匹配 / AI 生成回复」，仍可手动填写/提交
   status: CandidateStatus;
   errorMsg: string;
 }
@@ -88,7 +89,7 @@ const APPS_CACHE_KEY = "batch-reply-apps-cache-v1";
 // 「人工处理」标记按 review_id 持久化：人工先筛一遍、不走 AI 模板批量的评论（有的
 // 不用回复，有的需要但模板不合适 → 手动写 / 用 AI 单条回复）。这些评论在 Play 上仍
 // 是未回复态，每次拉取都会重现，不落盘标记就会丢。只存 id 列表，拉取时回填到
-// candidate.manual。注意：标记只排除「匹配模板并填充」，不影响手动填写/逐条/一键提交。
+// candidate.manual。注意：标记只排除「匹配 / AI 生成回复」，不影响手动填写/逐条/一键提交。
 const MANUAL_KEY = "batch-reply-manual-ids-v1";
 
 function loadManualIds(): Set<string> {
@@ -236,6 +237,46 @@ function loadConfig(): { config: MultiConfig | null; appsCache: PlayApp[] } {
   return { config, appsCache };
 }
 
+// Play Console 深链所需的 developerId / 每个 app 的数字 App ID：这两个只在
+// ReviewPage.vue 里维护（用户手填一次后记住），这里只读它写的那份 localStorage，
+// 不重新做一套配置 UI。读不到就退化成 Console 的 app 列表页。
+const REVIEW_PAGE_CONFIG_KEY = "review-page-config-v3";
+const consoleDeveloperId = ref("");
+const consoleAppIdByPkg = ref<Record<string, string>>({});
+
+function loadConsoleIds() {
+  try {
+    const raw = localStorage.getItem(scopedKey(REVIEW_PAGE_CONFIG_KEY));
+    if (!raw) return;
+    const cfg = JSON.parse(raw);
+    if (cfg?.developerId) consoleDeveloperId.value = cfg.developerId;
+    if (cfg?.appIdByPkg && typeof cfg.appIdByPkg === "object") {
+      consoleAppIdByPkg.value = cfg.appIdByPkg;
+    }
+  } catch {
+    // ignore corrupt/missing config — falls back to the generic app-list URL
+  }
+}
+
+// 跳转到 Play Console 里这条评论的详情页；developerId/该 app 的数字 App ID 没配过
+// 就退化成 Console 的 app 列表页（用户从那边自己找）。
+function reviewConsoleUrl(g: AppGroup, c: Candidate): string {
+  const appId = consoleAppIdByPkg.value[g.packageName];
+  if (!consoleDeveloperId.value || !appId) {
+    return `https://play.google.com/console/u/0/developers/${consoleDeveloperId.value || "-"}/app-list`;
+  }
+  const base = `https://play.google.com/console/u/0/developers/${consoleDeveloperId.value}/app/${appId}/user-feedback/review-details`;
+  return `${base}?reviewId=${encodeURIComponent(c.review.review_id)}&corpus=PUBLIC_REVIEWS`;
+}
+
+async function openReviewInConsole(g: AppGroup, c: Candidate) {
+  try {
+    await openUrl(reviewConsoleUrl(g, c));
+  } catch (e: any) {
+    overallError.value = String(e);
+  }
+}
+
 function rebuildGroups() {
   const { config, appsCache } = loadConfig();
   if (!config || !config.perApp) {
@@ -270,6 +311,7 @@ let unlistenReply: UnlistenFn | null = null;
 
 onMounted(async () => {
   rebuildGroups();
+  loadConsoleIds();
   // Live skill output during AI generation. The awaited invoke() resolves with
   // the final candidates, so this log is purely for showing progress.
   unlistenReply = await listen<{ text: string; kind: string; done: boolean }>(
@@ -478,30 +520,38 @@ async function generateReplies() {
       byId.set(r.review_id, r);
     }
 
-    let matched = 0;
-    let unmatched = 0;
+    // The skill now always returns exactly 1 candidate per review — either a
+    // template hit (source "template") or a minimal self-drafted one (source
+    // "generated"). `opts.length === 0` is the rare failure case (skill error /
+    // malformed output for that review_id), which still falls back to unmatched.
+    let templated = 0;
+    let selfDrafted = 0;
+    let failed = 0;
     for (const [reviewId, c] of pendingByReview) {
       const r = byId.get(reviewId);
       const opts = r && Array.isArray(r.candidates) ? r.candidates : [];
-      if (r && r.matched !== false && opts.length > 0) {
+      if (opts.length > 0) {
         c.options = opts;
         c.selectedIdx = 0;
         c.replyText = opts[0].text || "";
         c.unmatched = false;
         c.errorMsg = "";
         if (c.status === "error") c.status = "pending";
-        matched += 1;
+        if (opts[0].source === "template") templated += 1;
+        else selfDrafted += 1;
       } else {
-        // No matching template — skip; user handles this review manually.
         c.unmatched = true;
         c.options = [];
         c.errorMsg = "";
-        unmatched += 1;
+        failed += 1;
       }
     }
 
-    const parts: string[] = [`命中模板 ${matched} 条（已填入译文）`];
-    if (unmatched > 0) parts.push(`未匹配 ${unmatched} 条（请在下方手动处理）`);
+    const parts: string[] = [
+      `命中模板 ${templated} 条`,
+      `AI 自拟 ${selfDrafted} 条（请逐条核对后再提交）`,
+    ];
+    if (failed > 0) parts.push(`异常 ${failed} 条（请在下方手动处理）`);
     if (lastUsage.value) parts.push(usageText.value);
     if (out.warnings && out.warnings.length > 0) {
       parts.push(`warnings: ${out.warnings.join("；")}`);
@@ -544,7 +594,14 @@ function optionLabel(o: ReplyOption): string {
     return `模板${cat}${conf}`;
   }
   const dir = o.direction ? `·${o.direction}` : "";
-  return `原创${dir}`;
+  return `AI 自拟${dir}`;
+}
+
+// 顶部 opt-chip 的配色：手动编辑过 → custom(灰)；AI 自拟且未编辑 → generated(黄，
+// 提醒需要核对)；模板命中 → active(紫)。
+function optChipClass(c: Candidate): string {
+  if (c.selectedIdx === -1) return "custom";
+  return c.options[c.selectedIdx]?.source === "generated" ? "generated" : "active";
 }
 
 function overLimit(text: string): boolean {
@@ -581,12 +638,21 @@ async function handleSubmitOne(g: AppGroup, idx: number) {
   await submitOne(g, idx);
 }
 
+// 一键提交全部要不要带上这条：完成的/空文本的不带；AI 自拟且用户还没碰过的也不带——
+// 自拟内容默认要求逐条人工看一眼再提交（单条「提交」按钮不受此限制，用户随时可以单条发）。
+// 一旦用户编辑过文本，onReplyInput 会把 selectedIdx 置 -1，这条就自然计入可提交了。
+function canBulkSubmit(c: Candidate): boolean {
+  if (c.status === "done" || !c.replyText.trim()) return false;
+  const opt = c.selectedIdx >= 0 ? c.options[c.selectedIdx] : null;
+  return !(opt && opt.source === "generated");
+}
+
 async function handleSubmitAll() {
   const tasks: Array<{ g: AppGroup; idx: number }> = [];
   for (const g of groups.value) {
     g.candidates.forEach((c, idx) => {
       // 「人工处理」标记的评论照样能一键提交（只要用户填了内容）——标记只挡模板匹配。
-      if (c.status !== "done" && c.replyText.trim()) {
+      if (canBulkSubmit(c)) {
         tasks.push({ g, idx });
       }
     });
@@ -633,11 +699,7 @@ const totalCandidates = computed(() =>
 );
 
 const totalSubmittable = computed(() =>
-  groups.value.reduce(
-    (sum, g) =>
-      sum + g.candidates.filter((c) => c.status !== "done" && c.replyText.trim()).length,
-    0
-  )
+  groups.value.reduce((sum, g) => sum + g.candidates.filter(canBulkSubmit).length, 0)
 );
 
 const totalDone = computed(() =>
@@ -924,7 +986,7 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
         @click="generateReplies"
       >
         <span v-if="aiGenerating" class="btn-spinner"></span>
-        {{ aiGenerating ? `匹配中… ${fmtElapsed(genElapsed)}` : "🔎 匹配模板并填充" }}
+        {{ aiGenerating ? `生成中… ${fmtElapsed(genElapsed)}` : "🔎 匹配 / AI 生成回复" }}
       </button>
       <button v-if="aiGenerating" class="stop-btn" @click="handleStopReply">停止</button>
       <button
@@ -932,7 +994,7 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
         :class="{ armed: submitAllArmed }"
         :disabled="fetching || bulkSubmitting || totalSubmittable === 0"
         @click="handleSubmitAll"
-        :title="totalSubmittable === 0 ? '请先填写回复内容' : ''"
+        :title="totalSubmittable === 0 ? '请先填写回复内容；AI 自拟的候选默认不参与一键提交，需编辑或逐条提交' : ''"
       >
         {{ bulkSubmitting
             ? `提交中 ${bulkProgress.done}/${bulkProgress.total}`
@@ -955,9 +1017,9 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
         <span class="group-caret">{{ genLogOpen ? "▼" : "▶" }}</span>
         <span v-if="aiGenerating" class="tag-spinner"></span>
         <span class="gen-log-title">
-          {{ aiGenerating ? `正在匹配模板… ${fmtElapsed(genElapsed)}` : "匹配日志" }}
+          {{ aiGenerating ? `正在生成… ${fmtElapsed(genElapsed)}` : "生成日志" }}
         </span>
-        <span v-if="aiGenerating" class="gen-hint">逐条匹配模板并翻译命中项，请耐心等待</span>
+        <span v-if="aiGenerating" class="gen-hint">逐条匹配内置模板，没命中的自拟一条，请耐心等待</span>
         <span v-else-if="genLog.length > 0" class="gen-log-last">{{ genLog[genLog.length - 1] }}</span>
       </div>
       <pre v-if="genLogOpen" class="gen-log-body">{{ genLog.join("\n") }}</pre>
@@ -1018,6 +1080,13 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
               <span class="author">{{ c.review.author_name || "(匿名)" }}</span>
               <span class="ts">{{ formatTs(c.review.user_comment_ts) }}</span>
               <button
+                class="web-btn"
+                @click="openReviewInConsole(g, c)"
+                title="在 Play Console 中打开该评论"
+              >
+                🌐 在网页中打开
+              </button>
+              <button
                 class="ai-one-btn"
                 :disabled="c.status === 'done' || c.status === 'submitting' || bulkSubmitting"
                 @click="openAiDlg(g, c)"
@@ -1028,14 +1097,14 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
                 class="manual-btn"
                 :class="{ active: c.manual }"
                 :disabled="c.status === 'done' || c.status === 'submitting' || bulkSubmitting"
-                :title="c.manual ? '取消后将重新参与「匹配模板并填充」' : '标记后不参与「匹配模板并填充」，仍可手动填写 / AI 单条回复 / 提交'"
+                :title="c.manual ? '取消后将重新参与「匹配 / AI 生成回复」' : '标记后不参与「匹配 / AI 生成回复」，仍可手动填写 / AI 单条回复 / 提交'"
                 @click="toggleManual(c)"
               >
                 {{ c.manual ? "↩ 取消人工" : "✋ 人工处理" }}
               </button>
               <span v-if="c.manual" class="status-tag status-manual">✋ 人工处理</span>
               <span v-if="c.unmatched && c.status === 'pending'" class="unmatched-tag">
-                未匹配 · 需手动处理
+                生成异常 · 需手动处理
               </span>
               <span class="status-tag" :class="`status-${c.status}`">
                 {{
@@ -1064,7 +1133,7 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
               <!-- AI option picker: selected chip + char count + 更多. Shown only
                    once the skill has returned candidates for this review. -->
               <div v-if="c.options.length > 0" class="opt-bar">
-                <span class="opt-chip" :class="c.selectedIdx === -1 ? 'custom' : 'active'">
+                <span class="opt-chip" :class="optChipClass(c)">
                   {{
                     c.selectedIdx === -1
                       ? "已手动编辑"
@@ -1110,7 +1179,7 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
               <textarea
                 v-model="c.replyText"
                 class="reply-textarea"
-                :placeholder="c.unmatched ? '未匹配到模板，请在此手动填写回复' : '在此填写回复内容（点「🔎 匹配模板并填充」后命中的会自动填入）'"
+                :placeholder="c.unmatched ? '本条生成异常，请在此手动填写回复' : '在此填写回复内容（点「🔎 匹配 / AI 生成回复」后会自动填入）'"
                 rows="3"
                 :disabled="c.status === 'done' || c.status === 'submitting' || bulkSubmitting"
                 @input="onReplyInput(c)"
@@ -1554,6 +1623,10 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
   background: #edf2f7;
   color: #4a5568;
 }
+.opt-chip.generated {
+  background: #fefcbf;
+  color: #744210;
+}
 .opt-count {
   font-size: 11px;
   color: #888;
@@ -1992,6 +2065,24 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
   cursor: not-allowed;
 }
 
+/* 在 Play Console 中打开该评论（卡片右上角操作簇的第一个，把整簇推到最右） */
+.web-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: white;
+  color: #4a5568;
+  cursor: pointer;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.web-btn:hover {
+  background: #f5f5fa;
+  border-color: #cbd5e0;
+  color: #2d3748;
+}
+
 /* 单条 AI 回复按钮（卡片右上角，紧邻状态标） */
 .ai-one-btn {
   padding: 3px 10px;
@@ -2003,7 +2094,6 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
   background: white;
   color: #6b46c1;
   cursor: pointer;
-  margin-left: auto;
   flex-shrink: 0;
 }
 .ai-one-btn:hover:not(:disabled) {

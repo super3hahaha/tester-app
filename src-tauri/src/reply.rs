@@ -331,6 +331,16 @@ pub async fn generate_single_reply(
     result
 }
 
+/// 读某 app 的产品知识块，按 `package_name` 解析模板产品（不能用 app 显示名，如
+/// "File Manager"——知识块文件按产品名存，如 xfolder.md，用显示名会读空）。产品未映射
+/// 或知识块不存在都返回空字符串，调用方据此决定要不要把知识块塞进 prompt。
+fn knowledge_for_package(package_name: &str) -> String {
+    match crate::templates::product_for_package(package_name.to_string()) {
+        Ok(Some(prod)) => crate::analysis::read_knowledge(prod).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
 async fn generate_single_reply_inner(
     review: serde_json::Value,
     product: String,
@@ -340,13 +350,8 @@ async fn generate_single_reply_inner(
     model: Option<String>,
     app: AppHandle,
 ) -> Result<GenReplyResult, String> {
-    // 读该产品知识块注入提示词，与「🔍 分析」完全一致：**按 package_name 解析模板产品**。
-    // 注意不能用前端传来的 `product`——那是 app 显示名（如 "File Manager"），不是模板产品名
-    // （如 "XFolder"），知识块文件按产品名存（xfolder.md），用显示名会读空。
-    let knowledge = match crate::templates::product_for_package(package_name.clone()) {
-        Ok(Some(prod)) => crate::analysis::read_knowledge(prod).unwrap_or_default(),
-        _ => String::new(),
-    };
+    // 读该产品知识块注入提示词，与「🔍 分析」完全一致。
+    let knowledge = knowledge_for_package(&package_name);
 
     // 回复方向允许为空——空时 build_gen_prompt 会让模型据评论自行判断方向。
     let prompt =
@@ -491,17 +496,19 @@ async fn generate_single_reply_inner(
 }
 
 async fn run_reply_skill_inner(
-    groups: serde_json::Value,
+    mut groups: serde_json::Value,
     target_language: String,
     channel: String,
     model: Option<String>,
     app: AppHandle,
 ) -> Result<ReplyResult, String> {
-    let groups_arr = groups
-        .as_array()
-        .ok_or("groups must be an array")?;
-    if groups_arr.is_empty() {
-        return Err("没有可处理的评论（groups 为空）。".into());
+    {
+        let groups_arr = groups
+            .as_array()
+            .ok_or("groups must be an array")?;
+        if groups_arr.is_empty() {
+            return Err("没有可处理的评论（groups 为空）。".into());
+        }
     }
 
     let channel = if channel.trim().is_empty() {
@@ -514,6 +521,22 @@ async fn run_reply_skill_inner(
     } else {
         target_language
     };
+
+    // 给每个 group 按 package_name 塞入该 app 的知识库全文——skill 现在只靠输入
+    // JSON 自拟没命中内置模板的评论，不再读 tester-app 的模板管理目录。
+    if let Some(arr) = groups.as_array_mut() {
+        for g in arr.iter_mut() {
+            let pkg = g
+                .get("package_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let knowledge = knowledge_for_package(&pkg);
+            if let Some(obj) = g.as_object_mut() {
+                obj.insert("app_knowledge".to_string(), serde_json::Value::String(knowledge));
+            }
+        }
+    }
 
     let input = serde_json::json!({
         "target_language": target_language,
@@ -550,11 +573,6 @@ async fn run_reply_skill_inner(
     let input_path_str = input_path.to_string_lossy().to_string();
     let dir_str = dir.to_string_lossy().to_string();
 
-    // 模板数据目录（app 管理）：skill 从这里读 index.json / templates.json /
-    // package_map.json。--add-dir 授权访问，路径也写进 prompt 显式告诉 skill。
-    let templates_dir = crate::templates::ensure_templates_dir()?;
-    let templates_dir_str = templates_dir.to_string_lossy().to_string();
-
     let mut args = vec![
         "--print".to_string(),
         "--verbose".to_string(),
@@ -564,18 +582,14 @@ async fn run_reply_skill_inner(
         "bypassPermissions".to_string(),
         "--add-dir".to_string(),
         dir_str.clone(),
-        "--add-dir".to_string(),
-        templates_dir_str.clone(),
     ];
     if let Some(m) = model.as_ref().filter(|s| !s.is_empty()) {
         args.push("--model".to_string());
         args.push(m.clone());
     }
 
-    let prompt = format!(
-        "/review-reply {}\n模板数据目录（从这里读 index.json / templates.json / package_map.json）：{}\n",
-        input_path_str, templates_dir_str
-    );
+    // 输入 JSON 已经自带每个 group 的 app_knowledge，skill 不用再读任何外部目录。
+    let prompt = format!("/review-reply {}\n", input_path_str);
 
     emit_log(&app, &format!("$ claude {} '{}'", args.join(" "), prompt.trim()), "info", false);
 
