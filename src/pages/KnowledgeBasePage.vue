@@ -113,7 +113,7 @@ const error = ref("");
 // 预览模式（渲染后的 md，不可编辑）—— 按文档 id 各自记住，切换文档不互相影响
 const previewModeByDoc = ref<Record<string, boolean>>({});
 const previewMode = computed({
-  get: () => (activeDocId.value ? !!previewModeByDoc.value[activeDocId.value] : false),
+  get: () => (activeDocId.value ? previewModeByDoc.value[activeDocId.value] !== false : true),
   set: (v: boolean) => {
     if (activeDocId.value) previewModeByDoc.value[activeDocId.value] = v;
   },
@@ -298,7 +298,7 @@ const skillSaving = ref(false);
 // 预览模式按文件 path 各自记住
 const skillPreviewModeByDoc = ref<Record<string, boolean>>({});
 const skillPreviewMode = computed({
-  get: () => (activeSkillDocPath.value ? !!skillPreviewModeByDoc.value[activeSkillDocPath.value] : false),
+  get: () => (activeSkillDocPath.value ? skillPreviewModeByDoc.value[activeSkillDocPath.value] !== false : true),
   set: (v: boolean) => {
     if (activeSkillDocPath.value) skillPreviewModeByDoc.value[activeSkillDocPath.value] = v;
   },
