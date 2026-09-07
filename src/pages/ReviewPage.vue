@@ -4,7 +4,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { lastWorkdayBefore, toIso, computeRange } from "../utils/batchReplyDates";
-import { loadPlayConfig } from "../utils/playConsoleConfig";
+import { loadPlayConfig, type ReplyState } from "../utils/playConsoleConfig";
+import {
+  type TaggedReview,
+  getReviews,
+  getFetchedAt,
+  ensureLoaded,
+  reloadFromSnapshot,
+  refreshFromApi,
+  markReplied,
+  matchesReplyState as replyStateMatches,
+} from "../utils/reviewsStore";
 import { loadFavIds } from "../utils/templateFavorites";
 import { loadFavorites, addFavorite, removeFavorite, updateFavoriteReply, favoritesError } from "../utils/reviewFavorites";
 import { scopedKey } from "../utils/accountScopedKey";
@@ -17,29 +27,8 @@ interface PlayApp {
   display_name: string;
 }
 
-interface Review {
-  review_id: string;
-  author_name: string;
-  text: string;
-  original_text: string | null;
-  star_rating: number;
-  reviewer_language: string | null;
-  device: string | null;
-  android_os_version: number | null;
-  app_version_name: string | null;
-  app_version_code: number | null;
-  thumbs_up_count: number;
-  thumbs_down_count: number;
-  user_comment_ts: number;
-  developer_reply: string | null;
-  developer_reply_ts: number | null;
-}
-
-// 每条评论带上来源应用标签 —— 单应用拉取也带（同一个 app），批量拉取时区分各 app。
-type TaggedReview = Review & { _pkg: string; _app: string };
-
-// UPDATED = 开发者已回复，但用户在回复之后又更新了评论（回复可能已过时，需重回）
-type ReplyState = "ANY" | "ABSENT" | "REPLIED" | "UPDATED";
+// Review / TaggedReview 类型与 ReplyState（UPDATED = 开发者已回复但用户之后又改了评论）
+// 都从共享数据层取，避免两个评论页各存一份定义后跑偏。
 
 interface PersistedConfig {
   packageName: string;
@@ -54,7 +43,6 @@ interface PersistedConfig {
 const STORAGE_KEY = "review-page-config-v3";
 // 上次视图指针：进页面据此恢复（"single" = 恢复当前 app 快照 / "batch" = 拼装批量视图）
 const LAST_VIEW_KEY = "review-last-view-v1";
-const SNAP_VERSION = 1;
 // 挂载期间抑制「切换应用自动加载快照」的 watch，避免与 restoreLastView 抢状态。
 let booting = true;
 
@@ -191,9 +179,10 @@ watch(packageName, async (pkg, old) => {
   localStorage.setItem(scopedKey(LAST_VIEW_KEY), "single");
   // App ID 是按包名记忆的，切换应用要跟着切，不能把上一个 app 的 ID 带过去。
   appId.value = appIdByPkg.value[pkg.trim()] ?? "";
-  const snap = await loadSnapshot(pkg.trim());
-  reviews.value = snap?.reviews ?? [];
-  fetchedAt.value = snap?.fetchedAt ?? null;
+  const next = pkg.trim();
+  await ensureLoaded(next);
+  reviews.value = getReviews(next).value;
+  fetchedAt.value = getFetchedAt(next);
 });
 
 // 用户在设置区手填/改了 App ID → 记到当前包名名下，供其它入口（比如批量视图里
@@ -204,60 +193,10 @@ watch(appId, (val) => {
   if (pkg) appIdByPkg.value[pkg] = val;
 });
 
-// ── 评论快照持久化（per-app 文件，批量视图派生）────────────────────────────
-interface Snapshot {
-  reviews: TaggedReview[];
-  fetchedAt: number | null;
-}
+// ── 评论数据（共享 store：与 Batch Reply 页同一份内存 + 同一份 per-app 快照文件）──
+// 快照读写、按 review_id 回填已回复状态都在 utils/reviewsStore.ts 里，两页共用。
 
-// 快照按账号隔离：给后端的 key 加账号前缀。reviews.rs 不认识账号，隔离靠这里拼 key 完成
-// （snapshot_path 会 sanitize，同账号每次前缀一致 → 稳定命中同一文件）。
-function snapKey(pkg: string): string {
-  return `${getActiveAccountId() || "_none"}__${pkg}`;
-}
-
-async function saveSnapshot(key: string, list: TaggedReview[], at: number | null) {
-  try {
-    await invoke("save_reviews_snapshot", {
-      key: snapKey(key),
-      data: { version: SNAP_VERSION, reviews: list, fetchedAt: at },
-    });
-  } catch (e) {
-    // 持久化失败不阻塞主流程
-    console.warn("save reviews snapshot failed:", e);
-  }
-}
-
-async function loadSnapshot(key: string): Promise<Snapshot | null> {
-  if (!key) return null;
-  try {
-    const data = await invoke<any>("load_reviews_snapshot", { key: snapKey(key) });
-    if (!data || !Array.isArray(data.reviews)) return null;
-    return { reviews: data.reviews as TaggedReview[], fetchedAt: data.fetchedAt ?? null };
-  } catch (e) {
-    console.warn("load reviews snapshot failed:", e);
-    return null;
-  }
-}
-
-// 回复成功后，按 review_id 改写该 app 快照文件里那一条（读-改-写，与当前视图无关，
-// 单视图/批量视图都保持一致；该 app 无快照则跳过）。
-async function persistReplyToSnapshot(
-  pkg: string,
-  reviewId: string,
-  replyText: string,
-  ts: number
-) {
-  const snap = await loadSnapshot(pkg);
-  if (!snap) return;
-  const hit = snap.reviews.find((r) => r.review_id === reviewId);
-  if (!hit) return;
-  hit.developer_reply = replyText;
-  hit.developer_reply_ts = ts;
-  await saveSnapshot(pkg, snap.reviews, snap.fetchedAt);
-}
-
-// 用各启用 app 的 per-app 快照拼装批量视图（不打 API）。无任何可用快照返回 false。
+// 用各启用 app 的共享缓存/快照拼装批量视图（不打 API）。无任何可用数据返回 false。
 async function restoreBatch(): Promise<boolean> {
   const config = loadPlayConfig();
   const enabled = config
@@ -269,10 +208,10 @@ async function restoreBatch(): Promise<boolean> {
   let any = false;
   let latest = 0;
   for (const [pkg, cfg] of enabled) {
-    const snap = await loadSnapshot(pkg);
-    if (!snap) continue;
+    if (!(await ensureLoaded(pkg))) continue;
     any = true;
-    if (snap.fetchedAt && snap.fetchedAt > latest) latest = snap.fetchedAt;
+    const at = getFetchedAt(pkg);
+    if (at && at > latest) latest = at;
     const range = computeRange(cfg.datePreset, {
       fromDate: cfg.customFromDate,
       toDate: cfg.customToDate,
@@ -284,7 +223,7 @@ async function restoreBatch(): Promise<boolean> {
       ? Math.floor(new Date(range.toDate + "T23:59:59").getTime() / 1000)
       : Number.MAX_SAFE_INTEGER;
     batchStarsByPkg.value[pkg] = [...cfg.stars];
-    for (const r of snap.reviews) {
+    for (const r of getReviews(pkg).value) {
       if (r.user_comment_ts >= from && r.user_comment_ts <= to) all.push(r);
     }
   }
@@ -302,10 +241,10 @@ async function restoreLastView() {
   if (localStorage.getItem(scopedKey(LAST_VIEW_KEY)) === "batch") {
     if (await restoreBatch()) return;
   }
-  const snap = await loadSnapshot(packageName.value.trim());
-  if (snap) {
-    reviews.value = snap.reviews;
-    fetchedAt.value = snap.fetchedAt;
+  const pkg = packageName.value.trim();
+  if (await ensureLoaded(pkg)) {
+    reviews.value = getReviews(pkg).value;
+    fetchedAt.value = getFetchedAt(pkg);
     mode.value = "single";
   }
 }
@@ -380,17 +319,11 @@ async function handleFetch() {
   const pkg = packageName.value.trim();
   const appName = selectedAppLabel.value || pkg;
   try {
-    const list = await invoke<Review[]>("list_play_reviews", {
-      packageName: pkg,
-      maxPages: 5,
-      translationLanguage: "zh-CN",
-    });
-    reviews.value = list.map((r) => ({ ...r, _pkg: pkg, _app: appName }));
+    reviews.value = await refreshFromApi(pkg, appName);
     mode.value = "single";
     batchSummary.value = "";
-    fetchedAt.value = Date.now();
+    fetchedAt.value = getFetchedAt(pkg);
     localStorage.setItem(scopedKey(LAST_VIEW_KEY), "single");
-    saveSnapshot(pkg, reviews.value, fetchedAt.value);
   } catch (e: any) {
     const msg = String(e);
     if (msg.startsWith("NEED_RELOGIN_SCOPE")) {
@@ -435,11 +368,8 @@ async function handleBatchFetch() {
     enabled.map(async ([pkg, cfg]) => {
       const appName = nameMap.get(pkg) || pkg;
       try {
-        const list = await invoke<Review[]>("list_play_reviews", {
-          packageName: pkg,
-          maxPages: 5,
-          translationLanguage: "zh-CN",
-        });
+        // 拉取 + 并进共享缓存 + 落盘（Batch Reply 页读的是同一份数据）
+        const list = await refreshFromApi(pkg, appName);
         const range = computeRange(cfg.datePreset, {
           fromDate: cfg.customFromDate,
           toDate: cfg.customToDate,
@@ -453,14 +383,11 @@ async function handleBatchFetch() {
         // 只按日期界定窗口，保留全部星级（供「回复后又更新」忽略星级时显示）；
         // 各 app 的 Config 星级记到 map，展示时再过滤（见 filtered）。
         batchStarsByPkg.value[pkg] = [...cfg.stars];
-        // 把该 app 的**全量**列表（日期筛选之前）落一份 per-app 快照，与单 app 拉取
-        // 写的格式一致、可互换；批量视图重进时由这些快照派生（见 restoreBatch）。
-        const taggedFull = list.map((r) => ({ ...r, _pkg: pkg, _app: appName }));
-        saveSnapshot(pkg, taggedFull, Date.now());
         const dated = list.filter(
           (r) => r.user_comment_ts >= from && r.user_comment_ts <= to
         );
-        for (const r of dated) all.push({ ...r, _pkg: pkg, _app: appName });
+        // 放共享缓存里的对象引用（不是副本）：另一页回复后这里能立刻看到状态变化。
+        for (const r of dated) all.push(r);
         // 摘要里的条数按 Config 星级算（即默认（非 UPDATED）会显示的数量）。
         const matched = dated.filter((r) => cfg.stars.includes(r.star_rating)).length;
         matchedTotal += matched;
@@ -495,16 +422,10 @@ const toTs = computed(() => {
   return Math.floor(new Date(toDate.value + "T23:59:59").getTime() / 1000);
 });
 
-// 回复状态筛选（两种模式共用，跟随页面上方控件）。
+// 回复状态筛选（两种模式共用，跟随页面上方控件）。口径实现在共享 store 里，
+// Batch Reply 页用的是同一份，保证两页展示的评论完全一致。
 function matchesReplyState(r: TaggedReview): boolean {
-  if (replyState.value === "ABSENT" && r.developer_reply) return false;
-  if (replyState.value === "REPLIED" && !r.developer_reply) return false;
-  if (
-    replyState.value === "UPDATED" &&
-    !(r.developer_reply && r.developer_reply_ts && r.user_comment_ts > r.developer_reply_ts)
-  )
-    return false;
-  return true;
+  return replyStateMatches(r, replyState.value);
 }
 
 const filtered = computed(() => {
@@ -914,10 +835,11 @@ async function handleSubmitReply(task: AiTask) {
       reviewId: task.review.review_id,
       replyText: text,
     });
-    // 本地回填，UI 立即反映为「已回复」
+    // 本地回填，UI 立即反映为「已回复」；markReplied 同步改共享缓存 + 落盘，
+    // Batch Reply 页会立刻把这条从待回复列表里去掉。
     task.review.developer_reply = text;
     task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
-    persistReplyToSnapshot(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
+    markReplied(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
     updateFavoriteReply(task.review.review_id, text, task.review.developer_reply_ts);
     aiTasks.value = aiTasks.value.filter((t) => t.id !== task.id);
     if (activeTaskId.value === task.id) activeTaskId.value = null;
@@ -1098,7 +1020,7 @@ async function submitTplReply() {
     });
     r.developer_reply = text;
     r.developer_reply_ts = Math.floor(Date.now() / 1000);
-    persistReplyToSnapshot(r._pkg, r.review_id, text, r.developer_reply_ts);
+    markReplied(r._pkg, r.review_id, text, r.developer_reply_ts);
     updateFavoriteReply(r.review_id, text, r.developer_reply_ts);
     tplDlgReview.value = null;
   } catch (e: any) {
@@ -1180,6 +1102,12 @@ onMounted(async () => {
   unlistenScheduled = await listen<{ account: string }>("scheduled-fetch-done", async (e) => {
     if (loading.value || batchLoading.value) return;
     if (e.payload?.account && e.payload.account !== getActiveAccountId()) return;
+    // 后端刚把新评论写进快照文件 → 先把磁盘内容并进共享缓存，再重建视图。
+    const cfg = loadPlayConfig();
+    const pkgs = cfg ? Object.keys(cfg.perApp).filter((p) => cfg.perApp[p].enabled) : [];
+    for (const p of new Set([...pkgs, packageName.value.trim()])) {
+      if (p) await reloadFromSnapshot(p);
+    }
     // 定时拉的是批量那一组（Config 启用的 app）→ 直接落到批量视图，让这页一次看到全部；
     // 无可用批量快照才退回上次视图。并把上次视图指针置为 batch，下次进来也保持一致。
     if (await restoreBatch()) {
@@ -1312,7 +1240,7 @@ async function submitAnReply(task: AnTask) {
     });
     task.review.developer_reply = text;
     task.review.developer_reply_ts = Math.floor(Date.now() / 1000);
-    persistReplyToSnapshot(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
+    markReplied(task.pkg, task.review.review_id, text, task.review.developer_reply_ts);
     updateFavoriteReply(task.review.review_id, text, task.review.developer_reply_ts);
     anTasks.value = anTasks.value.filter((t) => t.id !== task.id);
     if (activeAnId.value === task.id) activeAnId.value = null;

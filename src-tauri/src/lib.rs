@@ -86,6 +86,7 @@ pub fn run() {
             notify::send_telegram_message,
             schedule::save_schedule_runtime,
             schedule::run_schedule_now,
+            schedule::notify_batch_reply_generated,
             skill_sync::check_skill_updates,
             skill_sync::sync_all_skills,
             skill_sync::sync_skill,

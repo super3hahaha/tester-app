@@ -34,7 +34,7 @@ Tauri 的 webview（WKWebView / WebView2）对同步对话框 `window.confirm()`
 
 修复：**别用 `window.confirm`**。
 - 单纯的确认动作（按钮文案已是"确认提交"）→ 直接执行，去掉 confirm。
-- 危险/批量操作 → 用**内联两步确认**：第一次点把按钮置为 armed 态（文案变"再点一次确认"+ 变色），4 秒内再点才执行，超时 `setTimeout` 复位。零依赖，见 `BatchReplyPage.handleSubmitAll` / `BatchReplyConfigPage.resetAll`。
+- 危险/批量操作 → 用**内联两步确认**：第一次点把按钮置为 armed 态（文案变"再点一次确认"+ 变色），4 秒内再点才执行，超时 `setTimeout` 复位。零依赖，见 `BatchReplyPage.handleSubmitAll` / `PlayConsoleConfigPage.resetAll`。
 - 真要原生弹窗 → 装 `@tauri-apps/plugin-dialog` 的 `confirm/ask`（异步），需加依赖 + 权限 + 重新 build。
 
 ## Claude CLI 并发模型：跨模块并行、同模块互斥、无全局上限
@@ -119,7 +119,22 @@ ReviewPage.vue 是 v-show 常驻挂载，`onMounted` 只在首次跑一次读快
 ReviewPage 监听该事件、非手动拉取中就 `restoreLastView()` 重读快照。冷启动本就会在 onMounted
 读盘、无此问题；这个事件专治「app 一直开着、定时在后台刷新」的场景。
 教训：**后端在后台改了前端已加载的持久化数据，必须主动 emit 事件通知前端刷新**，不能指望
-常驻组件自己发现（v-show 不重挂、onMounted 不重跑）。
+常驻组件自己发现（v-show 不重挂、onMounted 不重跑）。BatchReplyPage 现在也监听同一事件。
+
+## 两个页面共享一份数组：upsert 必须原地 splice，不能整体换新数组
+
+`reviewsStore.ts` 让 ReviewPage / BatchReplyPage 共用同一份评论数组。刷新时如果写成
+`e.list.value = next`（换引用），先前把这个数组存进自己 ref 的那一页仍指向旧数组 →
+它看不到本次新拉到的评论，两页展示的评论就又不一致了（回复状态因为对象是同一批还能同步，
+更隐蔽）。所以 upsert 用 `splice(0, len, ...next)` 原地改，引用全程不变。
+同理，`markReplied` 是**原地改对象属性**而不是替换对象——替换会断掉另一页持有的引用。
+
+## 提交列表会自我重排时，别按下标提交
+
+Batch Reply「一键提交全部」原来收集的是 `{group, 下标}`。回复成功后 `markReplied` 会把这条
+标成已回复，候选列表随即被 `syncCandidates` 重排（这条移出/沉底），循环里后续的下标就指向
+了**别的评论** → 会给错误的评论发出回复。改成收集候选对象本身再提交。
+教训：**任何「边遍历边改动同一个响应式列表」的批量操作，都要抓对象不抓下标。**
 
 ## Vue `computed` 会永久缓存 `new Date()` —— 常驻 app 跨天不更新
 

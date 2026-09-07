@@ -37,6 +37,9 @@ pub struct ScheduleCfg {
     // 额外扫「回复后又被用户更新」的评论（开发者回复过、用户又改了评论 → 回复可能过时需复查）。
     #[serde(default)]
     pub check_updated: bool,
+    // 到点后让前端 Batch Reply 页自动把回复草稿生成好（生成完前端自己推 Telegram）。
+    #[serde(default)]
+    pub batch_generate_reply: bool,
 }
 fn default_max_items() -> usize {
     5
@@ -168,6 +171,31 @@ pub fn save_schedule_runtime(
         .active_key()
         .ok_or("未登录，无法保存定时配置".to_string())?;
     write_json_atomic(&runtime_path(&key), &runtime)
+}
+
+/// 定时「批量生成回复」跑完后由前端调用，推一条汇总到 Telegram。
+/// 生成本身在前端（复用 Batch Reply 页现有流程），这里只负责发消息。
+#[tauri::command]
+pub async fn notify_batch_reply_generated(count: usize, apps: Vec<String>) -> Result<(), String> {
+    if count == 0 {
+        return Ok(());
+    }
+    let now = Local::now();
+    let app_list = if apps.is_empty() {
+        String::new()
+    } else {
+        format!("\n应用：{}", apps.join("、"))
+    };
+    let msg = format!(
+        "🤖 已生成 {} 条回复草稿（{:02}-{:02} {:02}:{:02}）{}\n请打开 app 的 Batch Reply 页核对后提交。",
+        count,
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        app_list
+    );
+    crate::notify::send_telegram_message(msg).await
 }
 
 // ---- 日期预设解析（port 自 batchReplyDates.ts，本地时区）----
@@ -499,6 +527,13 @@ async fn execute_and_notify(
 
     // 通知前端：本账号的评论快照已在后台刷新过 → ReviewPage 重读快照，免得用户还得手动拉取。
     let _ = app.emit("scheduled-fetch-done", serde_json::json!({ "account": key }));
+
+    // 勾了「批量生成回复」→ 让 Batch Reply 页（常驻挂载，不要求可见）自动跑一遍生成。
+    // 生成要调 claude CLI、耗时可能几分钟，所以这里只发信号不等待；生成完由前端
+    // 通过 notify_batch_reply_generated 单独推一条 Telegram，不阻塞本次巡检通知。
+    if runtime.schedule.batch_generate_reply {
+        let _ = app.emit("schedule-batch-generate", serde_json::json!({ "account": key }));
+    }
 
     let cfg = &runtime.schedule;
 

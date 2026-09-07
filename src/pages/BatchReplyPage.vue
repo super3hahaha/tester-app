@@ -4,46 +4,32 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
-  type DatePreset,
   type DateRange,
   computeRange,
   PRESET_LABELS,
 } from "../utils/batchReplyDates";
 import { scopedKey } from "../utils/accountScopedKey";
+import { getActiveAccountId } from "../utils/activeAccount";
+import {
+  type PlayAppConfig,
+  loadPlayConfig,
+  APPS_CACHE_KEY,
+  REPLY_STATE_LABELS,
+} from "../utils/playConsoleConfig";
+import {
+  type TaggedReview,
+  getReviews,
+  getFetchedAt,
+  ensureLoaded,
+  reloadFromSnapshot,
+  refreshFromApi,
+  markReplied,
+  matchesReplyState,
+} from "../utils/reviewsStore";
 
 interface PlayApp {
   package_name: string;
   display_name: string;
-}
-
-interface Review {
-  review_id: string;
-  author_name: string;
-  text: string;
-  original_text: string | null;
-  star_rating: number;
-  reviewer_language: string | null;
-  device: string | null;
-  android_os_version: number | null;
-  app_version_name: string | null;
-  app_version_code: number | null;
-  thumbs_up_count: number;
-  thumbs_down_count: number;
-  user_comment_ts: number;
-  developer_reply: string | null;
-  developer_reply_ts: number | null;
-}
-
-interface AppConfig {
-  enabled: boolean;
-  datePreset: DatePreset;
-  customFromDate: string;
-  customToDate: string;
-  stars: number[];
-}
-
-interface MultiConfig {
-  perApp: Record<string, AppConfig>;
 }
 
 type CandidateStatus = "pending" | "submitting" | "done" | "error";
@@ -61,13 +47,13 @@ interface ReplyOption {
 }
 
 interface Candidate {
-  review: Review;
+  review: TaggedReview;
   replyText: string;
   options: ReplyOption[]; // matched-template candidate(s); [0] pre-filled into replyText
   selectedIdx: number; // index into options that's currently filled; -1 = manually edited
   showMore: boolean; // whether the alternative-options panel is expanded
   unmatched: boolean; // true once matching ran and found no template (user handles manually)
-  manual: boolean; // 用户标记「人工处理」：只排除「匹配 / AI 生成回复」，仍可手动填写/提交
+  manual: boolean; // 用户标记「人工处理」：排除「匹配 / AI 生成回复」+ 一键提交全部，仍可手动填写/逐条提交
   status: CandidateStatus;
   errorMsg: string;
 }
@@ -75,8 +61,8 @@ interface Candidate {
 interface AppGroup {
   packageName: string;
   displayName: string;
-  config: AppConfig;
-  effectiveRange: DateRange; // snapshot at fetch time (preset → concrete dates)
+  config: PlayAppConfig;
+  effectiveRange: DateRange; // 预设 → 具体日期，rebuildGroups 时解析
   loading: boolean;
   error: string;
   candidates: Candidate[];
@@ -84,12 +70,11 @@ interface AppGroup {
   collapsed: boolean;
 }
 
-const STORAGE_KEY = "batch-reply-multi-config-v3";
-const APPS_CACHE_KEY = "batch-reply-apps-cache-v1";
 // 「人工处理」标记按 review_id 持久化：人工先筛一遍、不走 AI 模板批量的评论（有的
-// 不用回复，有的需要但模板不合适 → 手动写 / 用 AI 单条回复）。这些评论在 Play 上仍
-// 是未回复态，每次拉取都会重现，不落盘标记就会丢。只存 id 列表，拉取时回填到
-// candidate.manual。注意：标记只排除「匹配 / AI 生成回复」，不影响手动填写/逐条/一键提交。
+// 不用回复，有的需要但模板不合适、或者对 AI 生成的文案不满意想单独盯着看 → 手动写 /
+// 用 AI 单条回复）。这些评论在 Play 上仍是未回复态，每次拉取都会重现，不落盘标记就会
+// 丢。只存 id 列表，拉取时回填到 candidate.manual。标记后排除「匹配 / AI 生成回复」+
+// 「一键提交全部」，仍可手动填写、逐条点「提交」。
 const MANUAL_KEY = "batch-reply-manual-ids-v1";
 
 function loadManualIds(): Set<string> {
@@ -103,29 +88,6 @@ function loadManualIds(): Set<string> {
 const manualIds = loadManualIds();
 function saveManualIds() {
   localStorage.setItem(scopedKey(MANUAL_KEY), JSON.stringify([...manualIds]));
-}
-
-function normalizeConfig(raw: any, resetPreset = false): AppConfig {
-  const stored = raw?.datePreset;
-  const validStored: DatePreset | null =
-    stored === "sinceLastWorkday" ||
-    stored === "yesterday" ||
-    stored === "today" ||
-    stored === "7d" ||
-    stored === "custom"
-      ? stored
-      : null;
-  const preset: DatePreset = resetPreset || !validStored ? "sinceLastWorkday" : validStored;
-  return {
-    enabled: !!raw?.enabled,
-    datePreset: preset,
-    customFromDate: raw?.customFromDate || raw?.fromDate || "",
-    customToDate: raw?.customToDate || raw?.toDate || "",
-    stars:
-      Array.isArray(raw?.stars) && raw.stars.length > 0
-        ? raw.stars.filter((s: any) => Number.isInteger(s) && s >= 1 && s <= 5)
-        : [1, 2],
-  };
 }
 
 const BULK_INTERVAL_MS = 200;
@@ -160,7 +122,6 @@ const overallError = ref("");
 const noticeMsg = ref(""); // non-error info (e.g. skill warnings)
 const needRelogin = ref(false);
 const fetching = ref(false);
-const fetchedAt = ref<number | null>(null);
 const aiGenerating = ref(false);
 const genLog = ref<string[]>([]); // live skill output lines during generation
 const genLogOpen = ref(false);
@@ -207,34 +168,15 @@ const fetchProgress = computed(() => {
   return { done, total: groups.value.length };
 });
 
-function loadConfig(): { config: MultiConfig | null; appsCache: PlayApp[] } {
-  let config: MultiConfig | null = null;
-  let appsCache: PlayApp[] = [];
-  // Scoped v3 only — see BatchReplyConfigPage.vue's onMounted for why the old
-  // unscoped-global LEGACY_KEYS fallback was removed (it leaked one account's
-  // legacy data into every other account with no scoped config yet).
-  const raw = localStorage.getItem(scopedKey(STORAGE_KEY));
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw) as MultiConfig;
-      if (parsed?.perApp) {
-        const normalized: Record<string, AppConfig> = {};
-        for (const [pkg, entry] of Object.entries(parsed.perApp)) {
-          normalized[pkg] = normalizeConfig(entry, false);
-        }
-        config = { perApp: normalized };
-      }
-    } catch {
-      // ignore corrupt
-    }
-  }
+// 应用显示名缓存（与 Play Console 配置页同一份，list_play_apps 的结果）。
+function loadAppsCache(): PlayApp[] {
   try {
     const rawApps = localStorage.getItem(scopedKey(APPS_CACHE_KEY));
-    if (rawApps) appsCache = JSON.parse(rawApps) as PlayApp[];
+    if (rawApps) return JSON.parse(rawApps) as PlayApp[];
   } catch {
     // ignore
   }
-  return { config, appsCache };
+  return [];
 }
 
 // Play Console 深链所需的 developerId / 每个 app 的数字 App ID：这两个只在
@@ -277,41 +219,144 @@ async function openReviewInConsole(g: AppGroup, c: Candidate) {
   }
 }
 
+// 按 Play Console 拉取配置（两页共用的那一份）重建分组。已存在的分组原地更新，
+// 保留其候选（含已填好的 AI 草稿），所以随时重建都安全。
 function rebuildGroups() {
-  const { config, appsCache } = loadConfig();
+  const config = loadPlayConfig();
   if (!config || !config.perApp) {
     groups.value = [];
     return;
   }
-  const nameMap = new Map(appsCache.map((a) => [a.package_name, a.display_name]));
+  const nameMap = new Map(loadAppsCache().map((a) => [a.package_name, a.display_name]));
+  const prev = new Map(groups.value.map((g) => [g.packageName, g]));
   const next: AppGroup[] = [];
   for (const [pkg, cfg] of Object.entries(config.perApp)) {
     if (!cfg.enabled) continue;
-    next.push({
-      packageName: pkg,
-      displayName: nameMap.get(pkg) || pkg,
-      config: cfg,
-      effectiveRange: computeRange(cfg.datePreset, {
-        fromDate: cfg.customFromDate,
-        toDate: cfg.customToDate,
-      }),
-      loading: false,
-      error: "",
-      candidates: [],
-      totalFetched: 0,
-      collapsed: true,
+    const range = computeRange(cfg.datePreset, {
+      fromDate: cfg.customFromDate,
+      toDate: cfg.customToDate,
     });
+    const displayName = nameMap.get(pkg) || pkg;
+    const hit = prev.get(pkg);
+    if (hit) {
+      hit.config = cfg;
+      hit.effectiveRange = range;
+      hit.displayName = displayName;
+      next.push(hit);
+    } else {
+      next.push({
+        packageName: pkg,
+        displayName,
+        config: cfg,
+        effectiveRange: range,
+        loading: false,
+        error: "",
+        candidates: [],
+        totalFetched: 0,
+        collapsed: true,
+      });
+    }
   }
   // Stable order by display name.
   next.sort((a, b) => a.displayName.localeCompare(b.displayName));
   groups.value = next;
 }
 
+// 各应用当前应展示的评论：口径与 Play Console 页完全一致（同一份共享数据 +
+// 同一个 matchesReplyState），差别只在这页把它们包成可编辑的候选卡片。
+const visibleByPkg = computed(() => {
+  const out: Record<string, TaggedReview[]> = {};
+  for (const g of groups.value) {
+    const { from, to } = tsRange(g.effectiveRange);
+    out[g.packageName] = getReviews(g.packageName).value.filter(
+      (r) =>
+        matchesReplyState(r, g.config.replyState) &&
+        // 「回复后又更新」忽略星级（与 Play Console 页同口径）
+        (g.config.replyState === "UPDATED" || g.config.stars.includes(r.star_rating)) &&
+        r.user_comment_ts >= from &&
+        r.user_comment_ts <= to
+    );
+  }
+  return out;
+});
+
+// 把共享评论同步成候选卡片：按 review_id 增量对齐 —— 已有的保留草稿/状态，
+// 新出现的建卡，不再命中条件的（含被 Play Console 页回复掉的）移出列表。
+// 本次会话里刚提交成功的留在末尾，让用户看到「✓ 已回复」的结果。
+function syncCandidates(g: AppGroup, visible: TaggedReview[]) {
+  const prevLen = g.candidates.length;
+  const prev = new Map(g.candidates.map((c) => [c.review.review_id, c]));
+  const visibleIds = new Set(visible.map((r) => r.review_id));
+  const next: Candidate[] = [];
+  for (const r of visible) {
+    const hit = prev.get(r.review_id);
+    if (hit) {
+      hit.review = r;
+      next.push(hit);
+    } else {
+      next.push({
+        review: r,
+        replyText: "",
+        options: [] as ReplyOption[],
+        selectedIdx: -1,
+        showMore: false,
+        unmatched: false,
+        manual: manualIds.has(r.review_id),
+        status: "pending" as CandidateStatus,
+        errorMsg: "",
+      });
+    }
+  }
+  for (const c of g.candidates) {
+    if (c.status === "done" && !visibleIds.has(c.review.review_id)) next.push(c);
+  }
+  g.candidates = next;
+  g.totalFetched = getReviews(g.packageName).value.length;
+  // 从「无候选」变成「有候选」时自动展开，其余情况尊重用户的折叠状态。
+  if (prevLen === 0 && next.length > 0) g.collapsed = false;
+}
+
+watch(
+  visibleByPkg,
+  (map) => {
+    for (const g of groups.value) syncCandidates(g, map[g.packageName] || []);
+  },
+  { immediate: true }
+);
+
+// 各应用共享缓存里最近一次拉取/快照的时间（含后端定时线程写的那次）。
+const fetchedAt = computed<number | null>(() => {
+  let latest = 0;
+  for (const g of groups.value) {
+    const at = getFetchedAt(g.packageName);
+    if (at && at > latest) latest = at;
+  }
+  return latest || null;
+});
+
 let unlistenReply: UnlistenFn | null = null;
+let unlistenScheduledFetch: UnlistenFn | null = null;
+let unlistenScheduledGen: UnlistenFn | null = null;
 
 onMounted(async () => {
   rebuildGroups();
   loadConsoleIds();
+  // 进页面直接展示共享缓存/磁盘快照里的评论（与 Play Console 页同一批），不用先手动拉取。
+  await loadFromCache();
+
+  // 后端定时线程巡检完会刷新快照并 emit 此事件 → 重读快照，候选自动对齐。
+  unlistenScheduledFetch = await listen<{ account: string }>("scheduled-fetch-done", async (e) => {
+    if (e.payload?.account && e.payload.account !== getActiveAccountId()) return;
+    if (fetching.value) return;
+    rebuildGroups();
+    await loadFromCache(true);
+  });
+
+  // 定时通知里勾了「批量生成回复」→ 到点后自动跑一遍生成，全部生成完再推 Telegram。
+  unlistenScheduledGen = await listen<{ account: string }>("schedule-batch-generate", async (e) => {
+    if (e.payload?.account && e.payload.account !== getActiveAccountId()) return;
+    await runScheduledGenerate();
+  });
   // Live skill output during AI generation. The awaited invoke() resolves with
   // the final candidates, so this log is purely for showing progress.
   unlistenReply = await listen<{ text: string; kind: string; done: boolean }>(
@@ -333,6 +378,8 @@ onMounted(async () => {
 });
 onUnmounted(() => {
   unlistenReply?.();
+  unlistenScheduledFetch?.();
+  unlistenScheduledGen?.();
   stopGenTimer();
 });
 // MainPage uses v-show (component stays mounted across tab switches, remounts only
@@ -343,12 +390,11 @@ onUnmounted(() => {
 const props = defineProps<{ activeOption: string }>();
 watch(
   () => props.activeOption,
-  (opt) => {
-    // Only resync the enabled-app list before a session starts. Once candidates are
-    // fetched (fetchedAt set), rebuilding would wipe them, so leave it alone.
-    if (opt === "review-batch-reply" && fetchedAt.value === null && !fetching.value) {
-      rebuildGroups();
-    }
+  async (opt) => {
+    // rebuildGroups 现在会保留已有候选，随时重建都安全。
+    if (opt !== "review-batch-reply" || fetching.value) return;
+    rebuildGroups();
+    await loadFromCache();
   }
 );
 
@@ -362,37 +408,13 @@ function tsRange(r: DateRange): { from: number; to: number } {
   return { from, to };
 }
 
-async function fetchOne(g: AppGroup): Promise<void> {
+// 打 API 刷新该应用的评论 → 并进共享缓存（Play Console 页同步受益）→ 候选由
+// visibleByPkg 的 watch 自动对齐，这里不直接碰 candidates。
+async function refreshOne(g: AppGroup): Promise<void> {
   g.loading = true;
   g.error = "";
-  g.candidates = [];
-  g.totalFetched = 0;
   try {
-    const list = await invoke<Review[]>("list_play_reviews", {
-      packageName: g.packageName,
-      maxPages: 5,
-      translationLanguage: "zh-CN",
-    });
-    g.totalFetched = list.length;
-    const { from, to } = tsRange(g.effectiveRange);
-    g.candidates = list
-      .filter((r) => g.config.stars.includes(r.star_rating))
-      .filter((r) => !r.developer_reply)
-      .filter((r) => r.user_comment_ts >= from && r.user_comment_ts <= to)
-      .map((r) => ({
-        review: r,
-        replyText: "",
-        options: [] as ReplyOption[],
-        selectedIdx: -1,
-        showMore: false,
-        unmatched: false,
-        manual: manualIds.has(r.review_id),
-        status: "pending" as CandidateStatus,
-        errorMsg: "",
-      }));
-    // Auto-expand groups that have something to act on so the user sees them
-    // immediately; otherwise keep collapsed to reduce noise.
-    if (g.candidates.length > 0) g.collapsed = false;
+    await refreshFromApi(g.packageName, g.displayName);
   } catch (e: any) {
     const msg = String(e);
     if (msg.startsWith("NEED_RELOGIN_SCOPE")) {
@@ -417,9 +439,16 @@ async function handleFetch() {
   overallError.value = "";
   needRelogin.value = false;
   // Parallel: independent per-app calls.
-  await Promise.all(groups.value.map((g) => fetchOne(g)));
+  await Promise.all(groups.value.map((g) => refreshOne(g)));
   fetching.value = false;
-  fetchedAt.value = Date.now();
+}
+
+// 从本地共享缓存/磁盘快照载入（不打 API）：进页面、切回本页、后端定时刷新完都走这里。
+async function loadFromCache(force = false) {
+  for (const g of groups.value) {
+    if (force) await reloadFromSnapshot(g.packageName);
+    else await ensureLoaded(g.packageName);
+  }
 }
 
 interface SkillResult {
@@ -483,20 +512,21 @@ function buildSkillGroups(): {
   return { groups: out, pendingByReview };
 }
 
-async function generateReplies() {
-  if (aiGenerating.value) return;
+// 返回本次实际生成/命中的条数（定时自动生成据此决定要不要推 Telegram）。
+async function generateReplies(): Promise<number> {
+  if (aiGenerating.value) return 0;
   // Block while any app is still being fetched: fetchOne() clears candidates at
   // its start, so a half-loaded group would silently drop out of buildSkillGroups
   // (the group vanishes from the batch and never gets matched). See the toolbar
   // buttons' :disabled guards — this is the belt to their suspenders.
   if (fetching.value || groups.value.some((g) => g.loading)) {
     overallError.value = "评论还在拉取中，请等拉取完成后再匹配。";
-    return;
+    return 0;
   }
   const { groups: skillGroups, pendingByReview } = buildSkillGroups();
   if (skillGroups.length === 0) {
     overallError.value = "没有需要匹配的候选（可能都已匹配/处理或已提交）。";
-    return;
+    return 0;
   }
   aiGenerating.value = true;
   overallError.value = "";
@@ -557,6 +587,7 @@ async function generateReplies() {
       parts.push(`warnings: ${out.warnings.join("；")}`);
     }
     noticeMsg.value = parts.join(" · ");
+    return templated + selfDrafted;
   } catch (e: any) {
     const msg = String(e);
     if (msg.includes("CANCELLED")) {
@@ -564,9 +595,30 @@ async function generateReplies() {
     } else {
       overallError.value = `AI 生成回复失败：${msg}`;
     }
+    return 0;
   } finally {
     aiGenerating.value = false;
     stopGenTimer();
+  }
+}
+
+// 定时通知里勾了「批量生成回复」时走这条：刷新评论 → 跑一遍现有的生成流程 →
+// 全部生成完才推 Telegram。只生成草稿，提交仍需人工在页面上点。
+async function runScheduledGenerate() {
+  if (fetching.value || aiGenerating.value || bulkSubmitting.value) return;
+  rebuildGroups();
+  // 后端刚把最新评论写进快照，直接重读即可，不必再打一次 API。
+  await loadFromCache(true);
+  if (totalCandidates.value === 0) return;
+  const generated = await generateReplies();
+  if (generated <= 0) return;
+  try {
+    await invoke("notify_batch_reply_generated", {
+      count: generated,
+      apps: groups.value.filter((g) => g.candidates.length > 0).map((g) => g.displayName),
+    });
+  } catch (e) {
+    console.warn("notify batch reply generated failed:", e);
   }
 }
 
@@ -608,9 +660,9 @@ function overLimit(text: string): boolean {
   return text.length > GP_LIMIT;
 }
 
-async function submitOne(g: AppGroup, idx: number): Promise<boolean> {
-  const c = g.candidates[idx];
-  if (!c) return false;
+// 注意按候选对象提交，不要按下标：提交成功会把这条标成已回复，候选列表随即重排，
+// 之前算出来的下标会指向别的评论（一键提交时会回错人）。
+async function submitCandidate(g: AppGroup, c: Candidate): Promise<boolean> {
   if (c.status === "done" || c.status === "submitting") return false;
   if (!c.replyText.trim()) {
     c.status = "error";
@@ -620,12 +672,20 @@ async function submitOne(g: AppGroup, idx: number): Promise<boolean> {
   c.status = "submitting";
   c.errorMsg = "";
   try {
+    const text = c.replyText.trim();
     await invoke("reply_to_review", {
       packageName: g.packageName,
       reviewId: c.review.review_id,
-      replyText: c.replyText.trim(),
+      replyText: text,
     });
     c.status = "done";
+    // 同步共享缓存 + 落盘：Play Console 页会立刻把这条从未回复列表里去掉。
+    await markReplied(
+      g.packageName,
+      c.review.review_id,
+      text,
+      Math.floor(Date.now() / 1000)
+    );
     return true;
   } catch (e: any) {
     c.status = "error";
@@ -635,27 +695,23 @@ async function submitOne(g: AppGroup, idx: number): Promise<boolean> {
 }
 
 async function handleSubmitOne(g: AppGroup, idx: number) {
-  await submitOne(g, idx);
+  const c = g.candidates[idx];
+  if (c) await submitCandidate(g, c);
 }
 
-// 一键提交全部要不要带上这条：完成的/空文本的不带；AI 自拟且用户还没碰过的也不带——
-// 自拟内容默认要求逐条人工看一眼再提交（单条「提交」按钮不受此限制，用户随时可以单条发）。
-// 一旦用户编辑过文本，onReplyInput 会把 selectedIdx 置 -1，这条就自然计入可提交了。
+// 一键提交全部要不要带上这条：有内容、还没提交过、且没被标记「人工处理」（标记这条
+// 就是用户对当前文案不满意，要单独盯着看，不该被一键提交带走）。模板命中和 AI
+// 自拟一视同仁——自拟的仍在卡片上标黄提示核对，但不再单独因为「是自拟」被排除。
 function canBulkSubmit(c: Candidate): boolean {
-  if (c.status === "done" || !c.replyText.trim()) return false;
-  const opt = c.selectedIdx >= 0 ? c.options[c.selectedIdx] : null;
-  return !(opt && opt.source === "generated");
+  return c.status !== "done" && !c.manual && !!c.replyText.trim();
 }
 
 async function handleSubmitAll() {
-  const tasks: Array<{ g: AppGroup; idx: number }> = [];
+  const tasks: Array<{ g: AppGroup; c: Candidate }> = [];
   for (const g of groups.value) {
-    g.candidates.forEach((c, idx) => {
-      // 「人工处理」标记的评论照样能一键提交（只要用户填了内容）——标记只挡模板匹配。
-      if (canBulkSubmit(c)) {
-        tasks.push({ g, idx });
-      }
-    });
+    for (const c of g.candidates) {
+      if (canBulkSubmit(c)) tasks.push({ g, c });
+    }
   }
   if (tasks.length === 0) {
     overallError.value = "没有可提交的回复（请先填写回复内容）。";
@@ -676,7 +732,7 @@ async function handleSubmitAll() {
   overallError.value = "";
 
   for (const t of tasks) {
-    await submitOne(t.g, t.idx);
+    await submitCandidate(t.g, t.c);
     bulkProgress.value.done += 1;
     await new Promise((r) => setTimeout(r, BULK_INTERVAL_MS));
   }
@@ -742,7 +798,7 @@ function configSummary(g: AppGroup): string {
   const date = r.fromDate === r.toDate ? r.fromDate : `${r.fromDate} → ${r.toDate}`;
   const presetTag = g.config.datePreset === "custom" ? "" : `（${PRESET_LABELS[g.config.datePreset]}）`;
   const stars = [...g.config.stars].sort().map((s) => s + "★").join(" ");
-  return `${date}${presetTag} · ${stars}`;
+  return `${date}${presetTag} · ${stars} · ${REPLY_STATE_LABELS[g.config.replyState]}`;
 }
 
 // ── 单条 AI 回复（freeform 现生成，复用 generate_single_reply） ──────────────
@@ -949,7 +1005,8 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
     <header class="page-header">
       <h3>Batch Reply · Run</h3>
       <p class="subtitle">
-        按 <b>Config</b> 子页保存的配置，从启用的每个应用拉取未回复评论。AI 生成回复后逐条或一键提交。
+        与 <b>Play Console</b> 页共用同一份评论和同一份拉取配置（Config 子页 · Play Console 拉取配置）。
+        AI 生成回复后逐条或一键提交；任一页回复过的评论，两边都会立刻消失。
       </p>
     </header>
 
@@ -994,7 +1051,7 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
         :class="{ armed: submitAllArmed }"
         :disabled="fetching || bulkSubmitting || totalSubmittable === 0"
         @click="handleSubmitAll"
-        :title="totalSubmittable === 0 ? '请先填写回复内容；AI 自拟的候选默认不参与一键提交，需编辑或逐条提交' : ''"
+        :title="totalSubmittable === 0 ? '请先填写回复内容' : ''"
       >
         {{ bulkSubmitting
             ? `提交中 ${bulkProgress.done}/${bulkProgress.total}`
@@ -1027,11 +1084,11 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
 
     <div v-if="groups.length === 0" class="empty-state big">
       还没启用任何应用。<br />
-      请到左侧 <b>Config</b> 子页（Batch Reply 配置）勾选应用并保存。
+      请到左侧 <b>Config</b> 子页（Play Console 拉取配置）勾选应用并保存。
     </div>
 
     <div v-else-if="!fetchedAt && !fetching" class="empty-state">
-      点上方「拉取候选评论」从已启用的 {{ groups.length }} 个应用拉取符合条件的评论。
+      本地还没有该账号的评论缓存。点上方「拉取候选评论」拉一次（Play Console 页拉过就会自动共享）。
     </div>
 
     <div class="groups">
@@ -1097,7 +1154,7 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
                 class="manual-btn"
                 :class="{ active: c.manual }"
                 :disabled="c.status === 'done' || c.status === 'submitting' || bulkSubmitting"
-                :title="c.manual ? '取消后将重新参与「匹配 / AI 生成回复」' : '标记后不参与「匹配 / AI 生成回复」，仍可手动填写 / AI 单条回复 / 提交'"
+                :title="c.manual ? '取消后将重新参与「匹配 / AI 生成回复」和「一键提交全部」' : '标记后不参与「匹配 / AI 生成回复」和「一键提交全部」，仍可手动填写 / AI 单条回复 / 逐条提交'"
                 @click="toggleManual(c)"
               >
                 {{ c.manual ? "↩ 取消人工" : "✋ 人工处理" }}

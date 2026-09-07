@@ -9,6 +9,7 @@ export interface ScheduleConfig {
   notifyOnEmpty: boolean; // 无新增时也发一条心跳消息
   maxItemsInMsg: number; // 消息里最多列出的评论条数
   checkUpdated: boolean; // 额外扫「回复后又被用户更新」的评论并提醒复查
+  batchGenerateReply: boolean; // 到点后在 Batch Reply 页自动生成回复草稿，全部生成完再推 Telegram
 }
 
 const STORAGE_KEY = "review-schedule-v1";
@@ -20,6 +21,7 @@ export function defaultScheduleConfig(): ScheduleConfig {
     notifyOnEmpty: true,
     maxItemsInMsg: 5,
     checkUpdated: false,
+    batchGenerateReply: false,
   };
 }
 
@@ -42,6 +44,10 @@ export function normalizeScheduleConfig(raw: any): ScheduleConfig {
         ? raw.maxItemsInMsg
         : def.maxItemsInMsg,
     checkUpdated: raw.checkUpdated !== undefined ? !!raw.checkUpdated : def.checkUpdated,
+    batchGenerateReply:
+      raw.batchGenerateReply !== undefined
+        ? !!raw.batchGenerateReply
+        : def.batchGenerateReply,
   };
 }
 

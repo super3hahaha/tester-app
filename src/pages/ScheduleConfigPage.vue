@@ -163,6 +163,14 @@ async function handleTestSend() {
       </div>
 
       <div class="row">
+        <label class="row-label">批量生成回复</label>
+        <label class="inline-toggle">
+          <input type="checkbox" v-model="cfg.batchGenerateReply" />
+          <span>到点后自动在 Batch Reply 页把回复草稿生成好（只生成，仍需你核对后手动提交），全部生成完再单独推一条 Telegram</span>
+        </label>
+      </div>
+
+      <div class="row">
         <label class="row-label">消息条数</label>
         <input v-model.number="cfg.maxItemsInMsg" type="number" min="1" max="20" class="num-input" />
         <span class="hint">单条消息里最多列出的评论数，超出会折叠为"其余 N 条见 app"</span>
