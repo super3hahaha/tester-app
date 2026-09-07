@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 /// 默认 CLI 引擎。直出类功能（单条回复 / 评论分析 / 邮件回复 / 模板翻译）按此值
 /// 路由到 Claude CLI 或 Codex CLI；skill 依赖类（测试用例生成、批量模板匹配回复）
-/// 永远走 Claude，与此无关。
+/// 永远走 Claude CLI，不受此项影响——但 `reply`/`testcase` 等模型 id 字段仍然生效
+/// （批量回复复用 `reply` 字段，与单条 AI 回复同一份配置）。
 fn default_cli_engine() -> String {
     "claude".to_string()
 }

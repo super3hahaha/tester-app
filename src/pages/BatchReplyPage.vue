@@ -92,9 +92,12 @@ function saveManualIds() {
 
 const BULK_INTERVAL_MS = 200;
 const GP_LIMIT = 350; // Google Play reply hard limit (chars)
-// Fixed model for reply generation: replies are template-matching + translation,
-// Sonnet is plenty and keeps cost/latency down. Same id as GeneratePage's Sonnet.
-const REPLY_MODEL = "claude-sonnet-4-6";
+
+// 与设置页「模型配置 → 回复生成」同一份配置（ReviewPage/FavoriteReviewsPage 的单条
+// AI 回复也读这份），批量匹配/自拟回复现在也跟着它走，不再写死 Sonnet。
+interface ModelConfig { reply: string; analysis: string; translate: string; }
+const modelConfig = ref<ModelConfig>({ reply: "claude-sonnet-4-6", analysis: "claude-sonnet-4-6", translate: "claude-haiku-4-5" });
+invoke<ModelConfig>("get_model_config").then((c) => { modelConfig.value = c; }).catch(() => {});
 
 // Reply language. "auto" = the skill replies to each review in its own language
 // (per-review), so one run covers a mixed-language batch. Specific codes force
@@ -540,7 +543,7 @@ async function generateReplies(): Promise<number> {
       groups: skillGroups,
       targetLanguage: targetLanguage.value,
       channel: "gp",
-      model: REPLY_MODEL,
+      model: modelConfig.value.reply,
     });
     const out = res.output || {};
     lastUsage.value = res.usage;
@@ -902,7 +905,7 @@ async function processAiDlgQueue() {
       packageName: next.g.packageName,
       instruction: next.instruction.trim(),
       language: next.lang,
-      model: REPLY_MODEL,
+      model: modelConfig.value.reply,
     });
     next.candidates = Array.isArray(res.candidates) ? res.candidates : [];
     next.usage = res.usage;
