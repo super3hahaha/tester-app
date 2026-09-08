@@ -26,6 +26,7 @@ import {
   markReplied,
   matchesReplyState,
 } from "../utils/reviewsStore";
+import { type DraftEntry, loadDrafts, mergeDrafts, removeDraft } from "../utils/draftsStore";
 
 interface PlayApp {
   package_name: string;
@@ -89,6 +90,10 @@ const manualIds = loadManualIds();
 function saveManualIds() {
   localStorage.setItem(scopedKey(MANUAL_KEY), JSON.stringify([...manualIds]));
 }
+
+// 已生成但尚未提交的草稿本地持久化（见 draftsStore.ts）：进页面时读一份内存镜像，
+// 生成/提交时同步写回，避免每次都重新读 localStorage。
+const draftsMap = loadDrafts();
 
 const BULK_INTERVAL_MS = 200;
 const GP_LIMIT = 350; // Google Play reply hard limit (chars)
@@ -297,16 +302,19 @@ function syncCandidates(g: AppGroup, visible: TaggedReview[]) {
       hit.review = r;
       next.push(hit);
     } else {
+      // 新出现的候选先看有没有之前生成、还没提交就中断（如进程重启）的持久化草稿，
+      // 有就直接回填，不用重新调 API 生成。
+      const draft = draftsMap[r.review_id];
       next.push({
         review: r,
-        replyText: "",
-        options: [] as ReplyOption[],
-        selectedIdx: -1,
+        replyText: draft?.replyText ?? "",
+        options: (draft?.options as ReplyOption[]) ?? ([] as ReplyOption[]),
+        selectedIdx: draft?.selectedIdx ?? -1,
         showMore: false,
-        unmatched: false,
+        unmatched: draft?.unmatched ?? false,
         manual: manualIds.has(r.review_id),
         status: "pending" as CandidateStatus,
-        errorMsg: "",
+        errorMsg: draft?.errorMsg ?? "",
       });
     }
   }
@@ -560,6 +568,7 @@ async function generateReplies(): Promise<number> {
     let templated = 0;
     let selfDrafted = 0;
     let failed = 0;
+    const newDrafts: Record<string, DraftEntry> = {};
     for (const [reviewId, c] of pendingByReview) {
       const r = byId.get(reviewId);
       const opts = r && Array.isArray(r.candidates) ? r.candidates : [];
@@ -578,7 +587,17 @@ async function generateReplies(): Promise<number> {
         c.errorMsg = "";
         failed += 1;
       }
+      newDrafts[reviewId] = {
+        replyText: c.replyText,
+        options: c.options,
+        selectedIdx: c.selectedIdx,
+        unmatched: c.unmatched,
+        errorMsg: c.errorMsg,
+      };
     }
+    // 落盘持久化，进程重启后 syncCandidates 能直接回填这批草稿，不用重新调 API。
+    mergeDrafts(newDrafts);
+    Object.assign(draftsMap, newDrafts);
 
     const parts: string[] = [
       `命中模板 ${templated} 条`,
@@ -682,6 +701,9 @@ async function submitCandidate(g: AppGroup, c: Candidate): Promise<boolean> {
       replyText: text,
     });
     c.status = "done";
+    // 提交成功，持久化的草稿也一并清掉，避免堆积/避免评论后续再次出现时被过期草稿污染。
+    removeDraft(c.review.review_id);
+    delete draftsMap[c.review.review_id];
     // 同步共享缓存 + 落盘：Play Console 页会立刻把这条从未回复列表里去掉。
     await markReplied(
       g.packageName,
