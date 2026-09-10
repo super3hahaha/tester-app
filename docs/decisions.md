@@ -200,6 +200,13 @@
 - **定时「批量生成回复」走前端触发，不在 Rust 里重做一遍生成**：`schedule.rs` 到点只 emit `schedule-batch-generate`，由常驻挂载（v-show，不要求可见）的 BatchReplyPage 复用现有 `generateReplies()` 跑完再 invoke `notify_batch_reply_generated` 推 Telegram。这样定时跑的和手动点按钮的是**同一条代码路径**，行为不会分叉；后端方案（Rust 侧自己 spawn claude + 新造一套草稿持久化格式）能力上可行但要多维护一套落盘格式和与手动生成的并发互斥，收益不抵成本。代价：app 进程被完全退出时不会生成——但这与整个定时通知功能的前提一致（定时线程本就跑在 app 进程里）。
 - **只生成草稿、不自动提交**：AI 自拟的回复直接发到 Play 商店不可撤回，保留人工核对这一步；对应地「一键提交全部」放宽为「有内容即可提交」（用户明确要求），自拟标黄提示仍在，但不再挡住按钮。
 
+## 提交成功后立即从候选列表摘除，不做同会话内的临时保留
+
+- **背景**：`syncCandidates` 最初有个「贴心」设计——提交成功的候选（`status:"done"`）哪怕已经不在 `visible`（未回复）列表里，只要 app 进程没重启、这个 Candidate 对象还在内存里，就继续显示，带「✓ 已回复」沉在列表末尾，作为「刚刚提交成功了」的确认。结果是：只要进程不重启（比如长假期间电脑常开配合定时批量生成），这个「确认」会一直挂着，跨天甚至挂一整个假期，用户看到的是「昨天已经回复的评论」还杵在本该只放未回复内容的页面里，容易误以为是 bug；而进程一重启（`g.candidates` 从空数组重建），因为已回复不在 `visible` 里，又会一声不响地消失——同一条数据在「重启前」「重启后」表现不一致。
+- **用户明确要求**：Batch Reply 页面只应该展示未回复的内容，不管进程重不重启，提交成功后都应该立刻消失，不要有这层「确认」。
+- **实现**：`syncCandidates` 去掉了 `for (const c of g.candidates) if (c.status==="done" && !visibleIds.has(...)) next.push(c)` 这段retention 逻辑；`submitCandidate` 提交成功后直接 `g.candidates.splice(idx,1)` 同步摘除（不等 `markReplied` 之后共享缓存的响应式更新才消失——那样中间会有一帧渲染出「✓ 已回复」）。
+- **副作用与对应处理**：原来「本次已提交 N 条」的 `totalDone` 是从 `g.candidates.filter(status==="done")` 数出来的，候选一摘除这个数会归零、统计失效。改成独立的 `totalDoneThisSession` ref，在 `submitCandidate` 成功分支里自增，不依赖候选数组还留没留着这条——这样"本次已提交"的累计数还能正常显示。
+
 ## 已生成未提交的草稿加一层 localStorage 持久化
 
 - **背景**：用户长假期间（如国庆 7 天）会让电脑常开、app 进程不退出，好让定时线程每天正常拉评论 + 自动批量生成草稿，回来再统一核对提交。但草稿此前完全是 `BatchReplyPage.vue` 组件内存态（`groups.value[].candidates`），一旦这几天里进程被系统更新/崩溃重启过一次，攒的草稿会全部清零，得重新调一遍 API 生成，白花钱。

@@ -166,6 +166,10 @@ async function handleStopReply() {
 }
 const bulkSubmitting = ref(false);
 const bulkProgress = ref({ done: 0, total: 0 });
+// 本次会话已提交条数：独立计数，不依赖 g.candidates 里还留没留着这条——提交成功
+// 后评论立刻从「未回复」视图消失（见 syncCandidates），candidates 数组里不会再有
+// status==="done" 的项可数。
+const totalDoneThisSession = ref(0);
 // 内联两步确认（window.confirm 在 Tauri webview 不弹）
 const submitAllArmed = ref(false);
 let submitAllTimer: number | undefined;
@@ -289,12 +293,11 @@ const visibleByPkg = computed(() => {
 });
 
 // 把共享评论同步成候选卡片：按 review_id 增量对齐 —— 已有的保留草稿/状态，
-// 新出现的建卡，不再命中条件的（含被 Play Console 页回复掉的）移出列表。
-// 本次会话里刚提交成功的留在末尾，让用户看到「✓ 已回复」的结果。
+// 新出现的建卡，不再命中条件的（含刚被本页/Play Console 页回复掉的）立刻移出列表。
+// 这页只展示「未回复」，提交成功后不做临时保留——已回复的去 Play Console 页查。
 function syncCandidates(g: AppGroup, visible: TaggedReview[]) {
   const prevLen = g.candidates.length;
   const prev = new Map(g.candidates.map((c) => [c.review.review_id, c]));
-  const visibleIds = new Set(visible.map((r) => r.review_id));
   const next: Candidate[] = [];
   for (const r of visible) {
     const hit = prev.get(r.review_id);
@@ -317,9 +320,6 @@ function syncCandidates(g: AppGroup, visible: TaggedReview[]) {
         errorMsg: draft?.errorMsg ?? "",
       });
     }
-  }
-  for (const c of g.candidates) {
-    if (c.status === "done" && !visibleIds.has(c.review.review_id)) next.push(c);
   }
   g.candidates = next;
   g.totalFetched = getReviews(g.packageName).value.length;
@@ -682,8 +682,8 @@ function overLimit(text: string): boolean {
   return text.length > GP_LIMIT;
 }
 
-// 注意按候选对象提交，不要按下标：提交成功会把这条标成已回复，候选列表随即重排，
-// 之前算出来的下标会指向别的评论（一键提交时会回错人）。
+// 注意按候选对象提交，不要按下标：提交成功会把这条从候选列表里摘掉，之前算出来的
+// 下标会指向别的评论（一键提交时会回错人）。
 async function submitCandidate(g: AppGroup, c: Candidate): Promise<boolean> {
   if (c.status === "done" || c.status === "submitting") return false;
   if (!c.replyText.trim()) {
@@ -701,10 +701,15 @@ async function submitCandidate(g: AppGroup, c: Candidate): Promise<boolean> {
       replyText: text,
     });
     c.status = "done";
+    totalDoneThisSession.value += 1;
+    // 立刻把这条从卡片列表里摘掉——批量回复页只展示未回复内容，不等 markReplied
+    // 之后共享缓存的响应式更新才消失（那样中间会有一帧显示「✓ 已回复」）。
+    const idx = g.candidates.indexOf(c);
+    if (idx >= 0) g.candidates.splice(idx, 1);
     // 提交成功，持久化的草稿也一并清掉，避免堆积/避免评论后续再次出现时被过期草稿污染。
     removeDraft(c.review.review_id);
     delete draftsMap[c.review.review_id];
-    // 同步共享缓存 + 落盘：Play Console 页会立刻把这条从未回复列表里去掉。
+    // 同步共享缓存 + 落盘：Play Console 页的过滤 computed 会立刻把这条从未回复列表里去掉。
     await markReplied(
       g.packageName,
       c.review.review_id,
@@ -783,12 +788,7 @@ const totalSubmittable = computed(() =>
   groups.value.reduce((sum, g) => sum + g.candidates.filter(canBulkSubmit).length, 0)
 );
 
-const totalDone = computed(() =>
-  groups.value.reduce(
-    (sum, g) => sum + g.candidates.filter((c) => c.status === "done").length,
-    0
-  )
-);
+const totalDone = totalDoneThisSession;
 
 const totalManual = computed(() =>
   groups.value.reduce(
