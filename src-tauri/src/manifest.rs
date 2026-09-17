@@ -23,6 +23,10 @@ pub struct GenerateManifest {
     pub uploaded_at: u64,
     pub source_csv_path: Option<String>,
     pub pptx_paths: Vec<String>,
+    // HTML 需求文档来源。serde(default) 是必需的：v1.0.6 之前写的 manifest 没有这个
+    // 字段，缺了 default 会让旧 manifest 全部反序列化失败。
+    #[serde(default)]
+    pub html_path: Option<String>,
     pub slide_pages: Vec<SlidePages>,
     pub model: Option<String>,
     pub skill_version: Option<String>,
@@ -34,6 +38,7 @@ pub fn write_generate_manifest(
     web_url: String,
     source_csv_path: Option<String>,
     pptx_paths: Vec<String>,
+    html_path: Option<String>,
     slide_pages: Vec<SlidePages>,
     model: Option<String>,
     skill_version: Option<String>,
@@ -52,6 +57,7 @@ pub fn write_generate_manifest(
         uploaded_at,
         source_csv_path,
         pptx_paths,
+        html_path,
         slide_pages,
         model,
         skill_version,

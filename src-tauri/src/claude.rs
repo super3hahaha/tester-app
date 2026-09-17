@@ -497,6 +497,7 @@ fn data_dir() -> PathBuf {
 pub async fn run_claude_task(
     csv_path: Option<String>,
     pptx_paths: Vec<String>,
+    html_path: Option<String>,
     model: Option<String>,
     extra_info: Option<String>,
     preference_paths: Option<Vec<String>>,
@@ -519,11 +520,19 @@ pub async fn run_claude_task(
     }
 
     let csv_path = csv_path.filter(|s| !s.is_empty());
+    let html_path = html_path.filter(|s| !s.is_empty());
     let preference_paths = preference_paths.unwrap_or_default();
 
     let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Some(csv) = csv_path.as_ref() {
         if let Some(parent) = std::path::Path::new(csv).parent() {
+            dirs.insert(parent.to_string_lossy().to_string());
+        }
+    }
+    // HTML 需求文档在用户自己选的目录里（多半是 Downloads），要授权父目录，
+    // 且 skill 的 extract_html.py 会把提取产物写到同目录下的 html_output/。
+    if let Some(html) = html_path.as_ref() {
+        if let Some(parent) = std::path::Path::new(html).parent() {
             dirs.insert(parent.to_string_lossy().to_string());
         }
     }
@@ -561,6 +570,19 @@ pub async fn run_claude_task(
     }
     for p in &pptx_paths {
         prompt.push_str(&format!("Image (new requirements): {}\n", p));
+    }
+    if let Some(html) = html_path.as_ref() {
+        // 走 skill 的 Step 0 路径 D。这里显式给 outdir，是因为 claude 进程继承的
+        // 是 app 的工作目录（打包后多半不可写），脚本默认的相对 outdir 会落到未知位置。
+        let html_outdir = exports_dir
+            .join(format!("html_{}", chrono::Local::now().format("%Y%m%d_%H%M%S")))
+            .to_string_lossy()
+            .to_string();
+        prompt.push_str(&format!("HTML (new requirements): {}\n", html));
+        prompt.push_str(&format!(
+            "提取产物请输出到：{}（即 extract_html.py 的 --outdir）\n",
+            html_outdir
+        ));
     }
     if !preference_paths.is_empty() {
         prompt.push_str("\nPreference files (apply these conventions):\n");

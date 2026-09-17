@@ -217,3 +217,49 @@ const maxSelectableDate = computed(() => todayIso());  // ❌ 首次算完就冻
 **必须有会话级 try/catch**：Gmail 会偶发 `Gmail operation not allowed`（读某个会话时抛）。关键是它**是间歇性的，不是某封邮件的固有属性**——实测同一个会话 18:32 那次正常、18:38 那次就炸了。旧版只有标签级 try/catch，一次偶发 = 该标签当次 150 个会话全部作废。现已改成每个会话独立 try/catch，失败的跳过并打印 threadId 链接。同理，写表之后的「打标签」「标已读」也各自 try/catch——它们是锦上添花，数据早已落表、判重也不依赖它们，不该让它们把整次同步判成失败。
 
 **中断是安全的**：换成 messageId 判重后，执行超时/报错被掐断都可以直接重跑——已入表的跳过、没写完的接着写。旧版靠「未读」出队则存在「标了已读却没入表」的丢失窗口（所以旧代码才必须严格保证先写表后标已读）。
+
+---
+
+## skill 目录是同步产物，改了会被覆盖
+
+`~/.claude/skills/<name>/` **不是源头**。`skill_sync.rs` 从 GitHub latest release 下载
+zipball，**备份旧目录后整目录替换**（`sync_one` → `backup_existing_skill` →
+`extract_zipball_to_skill_dir`）。
+
+**直接改 `~/.claude/skills/` 里的文件 = 白改**，下一次同步就没了（2026-09-17 实测：
+新增的 `extract_html.py` 连同 SKILL.md 改动在一次同步里被整体还原成 v1.9.6）。
+
+源头在各自的 repo（`SKILLS` 常量里写死）：
+
+| skill | repo |
+|---|---|
+| test-case-generator | super3hahaha/test-case-generator |
+| review-reply | super3hahaha/review-reply |
+| prd-risk-profiler | super3hahaha/prd-risk-profiler |
+
+正确流程：改 repo → push + tag `vX.Y.Z` → GitHub Actions 打 `.skill` 包发 release →
+app 里同步。
+
+**本地试跑技巧**：想在发 release 前先验证效果，可以把改动直接 cp 到
+`~/.claude/skills/<name>/`，但 **`.tester-app-version` 要保持远端那个旧版本号**。
+`sync_one` 在 `local == remote` 时判定 up_to_date 直接返回，不会覆盖；
+一旦把版本文件改成新号（本地 v1.10.0 ≠ 远端 v1.9.6），反而会触发下载覆盖，
+把本地改动冲掉。测试期间也别在 app 里点强制同步。
+
+## HTML 需求文档不能直接 Read
+
+需求文档改出 HTML 格式后，单文件通常几 MB，但 **95%+ 是 CSS 和内嵌 base64 图片**。
+实测 `MP3 Cutter 2.3.7 需求.html`：2,715,822 字符原文件 → 正文只有 1.7 万字符 + 24 张内嵌图。
+
+直接 Read 会一次性撑爆上下文。skill 侧已加硬规则（关键规则 6）和 `scripts/extract_html.py`：
+正文转 Markdown（表格数值无损）、base64 图片还原成独立文件、正文留 `[[IMAGE: ...]]` 锚点按需读。
+
+**HTML 没有页码，用 `--sections` 按章节分批**（等价于 PPT 的 `--slides`）。分节依据逐级降级：
+`<section>` 标签 → `div[id]` 锚点 → hN 标题。
+
+⚠️ **节标题不能取「节内第一个 h 标签」**：需求 HTML 的章节标题常做成带 class 的 div
+（`<span class="num">§2</span> 全局宽布局框架`），而节内正文里反倒有 `<h4>▸ 布局规则</h4>`
+这种小标题——按 h 标签取会把每节都标成「▸ 布局规则」。改成取节内开头的前几行文本。
+
+⚠️ **图片编号必须全文全局**，且在分节之前完成编号。否则分批提取（先 §3 再 §5）时
+编号会各自从 1 开始，第二批把第一批的图覆盖掉。

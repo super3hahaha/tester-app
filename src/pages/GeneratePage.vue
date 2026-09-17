@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 
 // 模块级单例，防止组件重建时产生多个监听
 let _claudeLogUnlisten: UnlistenFn | null = null;
@@ -132,6 +133,7 @@ const generationStartMs = ref<number | null>(null);
 interface GenContext {
   csvPath: string | null;
   pptxPaths: string[];
+  htmlPath: string | null;
   slidePages: { name: string; pages: number[] }[];
   model: string;
 }
@@ -253,6 +255,7 @@ async function handleUploadToDrive() {
           webUrl: uploadResult.value.web_url,
           sourceCsvPath: lastGenContext.value.csvPath,
           pptxPaths: lastGenContext.value.pptxPaths,
+          htmlPath: lastGenContext.value.htmlPath,
           slidePages: lastGenContext.value.slidePages,
           model: lastGenContext.value.model,
           skillVersion,
@@ -268,8 +271,34 @@ async function handleUploadToDrive() {
   }
 }
 
+// ── HTML 需求文档（本地导入）──────────────────────────────────────────────────
+// 需求文档从 Slides 改出 HTML 格式后新增的来源。与 Slides 并列、可共存：
+// 两者任选其一或同时给，都算「有需求来源」。
+const htmlPath = ref<string | null>(null);
+
+const htmlFileName = computed(() =>
+  htmlPath.value ? htmlPath.value.split(/[/\\]/).pop() || htmlPath.value : ""
+);
+
+async function pickHtmlFile() {
+  try {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "HTML 需求文档", extensions: ["html", "htm"] }],
+    });
+    if (!selected) return;
+    htmlPath.value = Array.isArray(selected) ? selected[0] : selected;
+  } catch (e: any) {
+    error.value = String(e);
+  }
+}
+
+function clearHtmlFile() {
+  htmlPath.value = null;
+}
+
 const canGenerate = computed(
-  () => props.slidesSelection.length > 0
+  () => props.slidesSelection.length > 0 || !!htmlPath.value
 );
 
 const canSendInput = computed(
@@ -317,7 +346,7 @@ function pastedImageName(path: string): string {
 }
 
 async function handleGenerate() {
-  if (props.slidesSelection.length === 0) return;
+  if (!canGenerate.value) return;
 
   generating.value = true;
   cancelRequested.value = false;
@@ -373,10 +402,15 @@ async function handleGenerate() {
     pushLog("[3/3] Launching Claude CLI with /test-case-generator skill", "info");
     if (csvPath) pushLog(`  CSV: ${csvPath}`);
     pushLog(`  Images: ${imgPaths.length} page(s)`);
+    if (htmlPath.value) {
+      pushLog(`  HTML: ${htmlPath.value}`);
+      pushLog("  (skill 会先提取正文与原型图，并询问这次要分析哪几个章节)", "info");
+    }
 
     lastGenContext.value = {
       csvPath,
       pptxPaths: imgPaths,
+      htmlPath: htmlPath.value,
       slidePages: [],
       model: selectedModel.value,
     };
@@ -394,6 +428,7 @@ async function handleGenerate() {
     await invoke("run_claude_task", {
       csvPath,
       pptxPaths: imgPaths,
+      htmlPath: htmlPath.value,
       model: selectedModel.value,
       extraInfo: extra || null,
       preferencePaths,
@@ -575,6 +610,20 @@ watch(
           <span v-for="s in slidesSelection" :key="s.id">{{ s.name }} · pages {{ s.pages.join(", ") }}</span>
         </span>
         <span v-else class="sel-empty">No slides selected</span>
+      </div>
+
+      <div class="sel-card html-card" :class="{ empty: !htmlPath }">
+        <span class="sel-title">HTML</span>
+        <span v-if="htmlPath" class="sel-meta html-meta" :title="htmlPath">{{ htmlFileName }}</span>
+        <span v-else class="sel-empty">No HTML selected</span>
+        <div class="html-actions">
+          <button class="html-btn" :disabled="generating" @click="pickHtmlFile">
+            {{ htmlPath ? "Change" : "Import" }}
+          </button>
+          <button v-if="htmlPath" class="html-btn clear" :disabled="generating" @click="clearHtmlFile">
+            Clear
+          </button>
+        </div>
       </div>
 
       <div class="action-group">
@@ -807,6 +856,70 @@ h3 {
 .sel-empty {
   font-size: 12px;
   color: #bbb;
+}
+
+/* HTML 需求文档卡片：比 Sheet/Slides 卡窄，按钮贴右 */
+.html-card {
+  /* 300 而非 260：Change + Clear 比「更换 + 清除」宽，不放宽的话文件名只剩几十像素，
+     会被 ellipsis 截得只看得见开头。 */
+  flex: 0 1 300px;
+}
+.html-card:not(.empty) {
+  border-color: #667eea;
+  background: #f7f9ff;
+}
+.html-meta {
+  color: #5a67d8;
+  flex: 1;
+  min-width: 0;
+}
+/* 中文文案的行盒比拉丁文高（12px 中文 → 17px，"No sheet selected" 只有 14px），
+   不压行高的话这张卡会比旁边的 Sheet / Slides 卡高 2px。锁到 sel-title 的 15px。 */
+.html-card .sel-empty,
+.html-card .sel-meta {
+  line-height: 15px;
+}
+.html-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.html-btn {
+  /* 高度锁死 17px = 卡片内文字的内容高度。按钮一旦比文字高，整张卡就会比旁边的
+     Sheet / Slides 卡高出一截（实测不锁时 45px vs 33px）。button 是 border-box，
+     这 17px 已含上下 border，靠 inline-flex 让文字垂直居中。
+     box-sizing 必须显式写：项目没有全局重置，button 默认 content-box，
+     不写的话 border 会再加 2px 出来。 */
+  box-sizing: border-box;
+  height: 15px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  /* 显式行高：不写的话 12px 中文的默认行盒是 15px，会被 13px 的内容区裁掉一截 */
+  line-height: 13px;
+  font-weight: 500;
+  color: #4a5568;
+  background: white;
+  border: 1px solid #d4d4d8;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.html-btn:hover:not(:disabled) {
+  border-color: #667eea;
+  color: #667eea;
+}
+.html-btn.clear:hover:not(:disabled) {
+  border-color: #e53e3e;
+  color: #e53e3e;
+}
+.html-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .action-group {
   display: flex;
