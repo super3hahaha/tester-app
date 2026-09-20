@@ -1,3 +1,4 @@
+use rust_xlsxwriter::{Format, Workbook};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -211,7 +212,7 @@ pub async fn list_mantis_issues(
     Ok(collected)
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MantisNote {
     pub id: i64,
     pub reporter: String,
@@ -219,7 +220,126 @@ pub struct MantisNote {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// 项目自定义字段（如这条团队在用的「附注」——存的是版本号后缀 A/B/C 那种批次
+/// 标识，跟 notes/「备注」评论列表完全是两回事）。字段名不固定，跟着 Mantis
+/// 项目配置走，所以这里存成 name/value 对，不写死某个具体字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MantisCustomField {
+    pub name: String,
+    pub value: String,
+}
+
+/// 自定义字段的 value 在 Mantis REST API 里类型不固定（字符串/数字/布尔/
+/// 复选框数组），统一转成字符串好落地到前端和 xlsx。
+fn custom_field_value(v: Option<&Value>) -> String {
+    match v {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Bool(b)) => b.to_string(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .map(|x| custom_field_value(Some(x)))
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(other) => other.to_string(),
+    }
+}
+
+/// 导出已选 bug 为 xlsx，含完整详情（问题描述/重现步骤/补充信息/备注）——
+/// Mantis 网页版自带的导出只有列表摘要字段，这个按钮存在的意义就是把详情也
+/// 带出来，所以 issues 必须是前端逐条拉好的 MantisIssueDetail，而不是列表页
+/// 那份 summary。
+#[tauri::command]
+pub fn export_mantis_issues_xlsx(
+    issues: Vec<MantisIssueDetail>,
+    path: String,
+    base_url: String,
+) -> Result<usize, String> {
+    let mut wb = Workbook::new();
+    let sheet = wb.add_worksheet();
+
+    // base_url 是各人自己在「Mantis 连接配置」里填的实例地址（不同团队/不同
+    // Mantis 部署域名不一样），链接跟着这个拼，不写死某一个域名。
+    let base = base_url.trim_end_matches('/');
+
+    let bold = Format::new().set_bold();
+    let wrap = Format::new().set_text_wrap();
+
+    // 自定义字段（如「附注」）不是固定列——名字跟着 Mantis 项目配置走，这里从
+    // 实际导出的数据里按第一次出现的顺序收集列名，而不是写死某一个字段。
+    let mut custom_field_names: Vec<String> = Vec::new();
+    for issue in &issues {
+        for cf in &issue.custom_fields {
+            if !custom_field_names.contains(&cf.name) {
+                custom_field_names.push(cf.name.clone());
+            }
+        }
+    }
+
+    let fixed_headers = [
+        "ID", "标题", "状态", "严重程度", "优先级", "分类", "重现率", "版本", "修复于",
+        "报告人", "处理人", "创建时间", "更新时间", "问题描述", "重现步骤", "补充信息", "备注",
+    ];
+    let custom_col_start = fixed_headers.len() as u16;
+    let link_col = custom_col_start + custom_field_names.len() as u16;
+
+    for (col, h) in fixed_headers.iter().enumerate() {
+        sheet.write_with_format(0, col as u16, *h, &bold).map_err(|e| e.to_string())?;
+    }
+    for (i, name) in custom_field_names.iter().enumerate() {
+        sheet.write_with_format(0, custom_col_start + i as u16, name.as_str(), &bold).map_err(|e| e.to_string())?;
+    }
+    sheet.write_with_format(0, link_col, "链接", &bold).map_err(|e| e.to_string())?;
+
+    for (row_idx, issue) in issues.iter().enumerate() {
+        let row = (row_idx + 1) as u32;
+        let notes_text = issue
+            .notes
+            .iter()
+            .map(|n| format!("[{} @ {}] {}", n.reporter, n.created_at, n.text))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        sheet.write(row, 0, issue.id).map_err(|e| e.to_string())?;
+        sheet.write(row, 1, issue.summary.as_str()).map_err(|e| e.to_string())?;
+        sheet.write(row, 2, issue.status.as_str()).map_err(|e| e.to_string())?;
+        sheet.write(row, 3, issue.severity.as_str()).map_err(|e| e.to_string())?;
+        sheet.write(row, 4, issue.priority.as_str()).map_err(|e| e.to_string())?;
+        sheet.write(row, 5, issue.category.as_str()).map_err(|e| e.to_string())?;
+        sheet.write(row, 6, issue.reproducibility.as_str()).map_err(|e| e.to_string())?;
+        sheet.write(row, 7, issue.version.as_str()).map_err(|e| e.to_string())?;
+        sheet.write(row, 8, issue.fixed_in_version.as_str()).map_err(|e| e.to_string())?;
+        sheet.write(row, 9, issue.reporter.as_str()).map_err(|e| e.to_string())?;
+        sheet.write(row, 10, issue.handler.as_str()).map_err(|e| e.to_string())?;
+        sheet.write(row, 11, issue.created_at.as_str()).map_err(|e| e.to_string())?;
+        sheet.write(row, 12, issue.updated_at.as_str()).map_err(|e| e.to_string())?;
+        sheet.write_with_format(row, 13, issue.description.as_str(), &wrap).map_err(|e| e.to_string())?;
+        sheet.write_with_format(row, 14, issue.steps_to_reproduce.as_str(), &wrap).map_err(|e| e.to_string())?;
+        sheet.write_with_format(row, 15, issue.additional_information.as_str(), &wrap).map_err(|e| e.to_string())?;
+        sheet.write_with_format(row, 16, notes_text.as_str(), &wrap).map_err(|e| e.to_string())?;
+        for (i, name) in custom_field_names.iter().enumerate() {
+            if let Some(cf) = issue.custom_fields.iter().find(|cf| &cf.name == name) {
+                sheet.write(row, custom_col_start + i as u16, cf.value.as_str()).map_err(|e| e.to_string())?;
+            }
+        }
+        sheet
+            .write_url(row, link_col, format!("{}/view.php?id={}", base, issue.id).as_str())
+            .map_err(|e| e.to_string())?;
+    }
+
+    sheet.autofit();
+    // autofit 会被前面几列的长详情文本拉得很宽，详情列改成固定宽度更可读，
+    // 换行内容展开靠 Excel 的「自动调整行高」，这里不处理行高。
+    for col in 13..=16u16 {
+        sheet.set_column_width(col, 60).map_err(|e| e.to_string())?;
+    }
+    wb.save(&path).map_err(|e| format!("保存 xlsx 失败：{}", e))?;
+    Ok(issues.len())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MantisIssueDetail {
     pub id: i64,
     pub summary: String,
@@ -239,6 +359,7 @@ pub struct MantisIssueDetail {
     pub created_at: String,
     pub updated_at: String,
     pub notes: Vec<MantisNote>,
+    pub custom_fields: Vec<MantisCustomField>,
 }
 
 #[tauri::command]
@@ -271,6 +392,18 @@ pub async fn get_mantis_issue(
         })
         .collect();
 
+    let custom_fields = issue
+        .get("custom_fields")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|cf| {
+            let name = cf.get("field").and_then(|f| f.get("name")).and_then(|n| n.as_str())?.to_string();
+            Some(MantisCustomField { name, value: custom_field_value(cf.get("value")) })
+        })
+        .collect();
+
     Ok(MantisIssueDetail {
         id: as_id(issue.get("id")).unwrap_or(issue_id),
         summary: as_str(issue.get("summary")),
@@ -290,5 +423,6 @@ pub async fn get_mantis_issue(
         created_at: as_str(issue.get("created_at")),
         updated_at: as_str(issue.get("updated_at")),
         notes,
+        custom_fields,
     })
 }

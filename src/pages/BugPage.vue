@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { save } from "@tauri-apps/plugin-dialog";
 
 // 通过 MantisBT REST API（Base URL + 个人 API Token）拉某个项目的 bug 列表，
 // 按关键字/版本号筛选后点开看详情，勾选后可一键调用 prd-risk-profiler skill
@@ -37,6 +38,10 @@ interface MantisNote {
   text: string;
   created_at: string;
 }
+interface MantisCustomField {
+  name: string;
+  value: string;
+}
 interface IssueDetail extends IssueSummary {
   description: string;
   steps_to_reproduce: string;
@@ -44,6 +49,7 @@ interface IssueDetail extends IssueSummary {
   project: string;
   created_at: string;
   notes: MantisNote[];
+  custom_fields: MantisCustomField[];
 }
 
 // PRD 风险画像：勾选的 bug + 选一份 PRD（Slides）→ 调用 prd-risk-profiler skill
@@ -137,6 +143,111 @@ function clearSelection() {
   selectedIssueIds.value = new Set();
 }
 
+// 按 ID 批量选择——勾选框只能在「当前筛选结果」范围内一条条点或整批全选，
+// 没法一次性选中一份跨版本、不连续的 bug 编号清单（比如从其他地方整理出来
+// 的一批 id）。这里粘贴一段文本，随便什么分隔符（空格/逗号/换行/顿号）都
+// 认，数字前导 0 也直接按 Number() 解析掉；只在 allIssues（当前项目已拉取
+// 的全量列表）里找，不在里面的算「未找到」（多半是项目选错了，或者还没
+// 拉取该项目的列表）。选中结果是追加到已有勾选上，不清空原有的。
+const showBulkSelect = ref(false);
+const bulkIdsText = ref("");
+const bulkSelectMsg = ref("");
+
+function applyBulkSelect() {
+  const rawIds = bulkIdsText.value
+    .split(/[\s,，、;；]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .map((s) => Number(s))
+    .filter((n) => Number.isFinite(n));
+  if (rawIds.length === 0) {
+    bulkSelectMsg.value = "没识别到任何 bug ID";
+    return;
+  }
+  const uniqueIds = Array.from(new Set(rawIds));
+  const knownIds = new Set(allIssues.value.map((i) => i.id));
+  const matched = uniqueIds.filter((id) => knownIds.has(id));
+  const notFound = uniqueIds.filter((id) => !knownIds.has(id));
+
+  const next = new Set(selectedIssueIds.value);
+  for (const id of matched) next.add(id);
+  selectedIssueIds.value = next;
+
+  bulkSelectMsg.value =
+    notFound.length === 0
+      ? `已选中 ${matched.length} 条`
+      : `已选中 ${matched.length} 条，${notFound.length} 条在当前项目列表中未找到：${notFound.slice(0, 10).join(", ")}${notFound.length > 10 ? " …" : ""}`;
+}
+
+// 导出选中 bug 为 xlsx，带完整详情（问题描述/重现步骤/补充信息/备注）——
+// Mantis 网页版自带的导出就只有列表摘要字段，这个按钮存在的价值就是把详情
+// 也带出来，所以要逐条拉详情（有缓存的直接用，如已展开过的 / 刚生成过风险
+// 画像的），不能只用列表页的 summary。数量大时限并发 + 显示进度，避免瞬间
+// 打爆 Mantis 接口，也让用户知道在等什么。
+const EXPORT_CONFIRM_THRESHOLD = 300;
+const exporting = ref(false);
+const exportMsg = ref("");
+
+async function exportSelected() {
+  if (exporting.value || selectedCount.value === 0) return;
+  exportMsg.value = "";
+  const ids = Array.from(selectedIssueIds.value).sort((a, b) => a - b);
+
+  if (ids.length > EXPORT_CONFIRM_THRESHOLD) {
+    const ok = window.confirm(
+      `已选 ${ids.length} 条，需要逐条拉取详情，可能耗时较久，确定继续导出吗？`
+    );
+    if (!ok) return;
+  }
+
+  const project = projects.value.find((p) => p.id === selectedProjectId.value);
+  const defaultName = `${project?.name || "bugs"}-导出${ids.length}条.xlsx`;
+
+  const savePath = await save({
+    defaultPath: defaultName,
+    filters: [{ name: "Excel", extensions: ["xlsx"] }],
+  });
+  if (!savePath) return;
+
+  exporting.value = true;
+  let done = 0;
+  let failCount = 0;
+  exportMsg.value = `正在拉取详情 0/${ids.length}…`;
+  const details = await mapWithConcurrency(ids, 8, async (id) => {
+    const d = await ensureDetail(id, () => failCount++);
+    done++;
+    exportMsg.value = `正在拉取详情 ${done}/${ids.length}…`;
+    return d;
+  });
+  const okDetails = details.filter((d): d is IssueDetail => d != null);
+
+  if (okDetails.length === 0) {
+    exporting.value = false;
+    exportMsg.value = "导出失败：所选 bug 详情全部拉取失败";
+    return;
+  }
+
+  try {
+    exportMsg.value = "正在写入 xlsx…";
+    const count = await invoke<number>("export_mantis_issues_xlsx", {
+      issues: okDetails,
+      path: savePath,
+      baseUrl: effectiveBaseUrl.value,
+    });
+    exportMsg.value =
+      failCount > 0
+        ? `已导出 ${count} 条（${failCount} 条详情拉取失败已跳过） → ${savePath.split(/[\\/]/).pop()}`
+        : `已导出 ${count} 条 → ${savePath.split(/[\\/]/).pop()}`;
+    setTimeout(() => {
+      if (exportMsg.value.startsWith("已导出")) exportMsg.value = "";
+    }, 5000);
+  } catch (e: any) {
+    exportMsg.value = "导出失败：" + String(e);
+  } finally {
+    exporting.value = false;
+  }
+}
+
 const showRiskModal = ref(false);
 const riskMinimized = ref(false);
 const riskPhase = ref<RiskPhase>("config");
@@ -209,7 +320,7 @@ function closeRiskModal() {
 
 /** 勾选但还没展开过详情的补拉——沉淀依据需要完整的问题描述/重现步骤/备注，
  *  不能只用列表里的摘要字段。复用 toggleExpand 里同一套 get_mantis_issue 调用。 */
-async function ensureDetail(id: number): Promise<IssueDetail | null> {
+async function ensureDetail(id: number, onError?: (msg: string) => void): Promise<IssueDetail | null> {
   if (detailCache.value[id]) return detailCache.value[id];
   try {
     const detail = await invoke<IssueDetail>("get_mantis_issue", {
@@ -220,9 +331,30 @@ async function ensureDetail(id: number): Promise<IssueDetail | null> {
     detailCache.value[id] = detail;
     return detail;
   } catch (e: any) {
-    riskError.value = `拉取 #${id} 详情失败：${String(e)}`;
+    const msg = `拉取 #${id} 详情失败：${String(e)}`;
+    if (onError) onError(msg);
+    else riskError.value = msg;
     return null;
   }
+}
+
+/** 限并发地跑一批异步任务——导出勾选可能是「全选筛选结果」，量大到几千条，
+ *  逐条拉详情不能一次性 Promise.all 全撒出去，会瞬间打爆 Mantis 接口。 */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const i = cursor++;
+      results[i] = await fn(items[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 function pushRiskLog(text: string, kind = "text") {
@@ -538,6 +670,7 @@ function formatForCopy(d: IssueDetail): string {
     `版本: ${d.version || "-"} | 修复于: ${d.fixed_in_version || "-"}`,
     `报告人: ${d.reporter || "-"} | 处理人: ${d.handler || "-"}`,
     `创建: ${d.created_at || "-"} | 更新: ${d.updated_at || "-"}`,
+    ...(d.custom_fields || []).map((cf) => `${cf.name}: ${cf.value || "-"}`),
     "",
     "【问题描述】",
     d.description || "(无)",
@@ -644,6 +777,23 @@ function formatForCopy(d: IssueDetail): string {
         />
         全选当前筛选结果（{{ filteredIssues.length }} 条）
       </label>
+      <div class="bulk-select-row" v-if="allIssues.length > 0">
+        <span class="link-btn" @click="showBulkSelect = !showBulkSelect">
+          {{ showBulkSelect ? "▾" : "▸" }} 按 ID 批量选择
+        </span>
+        <div v-if="showBulkSelect" class="bulk-select-panel">
+          <textarea
+            v-model="bulkIdsText"
+            class="bulk-textarea"
+            rows="3"
+            placeholder="粘贴一批 Bug ID，换行/空格/逗号分隔都行（如 201092 0200890 194925）"
+          ></textarea>
+          <div class="bulk-select-foot">
+            <button class="fetch-btn" @click="applyBulkSelect">选中</button>
+            <span v-if="bulkSelectMsg" class="export-msg">{{ bulkSelectMsg }}</span>
+          </div>
+        </div>
+      </div>
     </section>
 
     <div v-if="errorMsg" class="banner banner-error">{{ errorMsg }}</div>
@@ -676,6 +826,9 @@ function formatForCopy(d: IssueDetail): string {
               <span>处理人: {{ detailCache[issue.id].handler || "-" }}</span>
               <span>创建: {{ detailCache[issue.id].created_at || "-" }}</span>
               <span>更新: {{ detailCache[issue.id].updated_at || "-" }}</span>
+              <span v-for="cf in detailCache[issue.id].custom_fields" :key="cf.name">
+                {{ cf.name }}: {{ cf.value || "-" }}
+              </span>
             </div>
             <div class="detail-block">
               <div class="detail-block-title">问题描述</div>
@@ -710,7 +863,11 @@ function formatForCopy(d: IssueDetail): string {
     <div v-if="selectedCount > 0" class="selection-bar">
       <span>已选 {{ selectedCount }} 条</span>
       <button class="link-btn" @click="clearSelection">✕ 清空</button>
+      <span v-if="exportMsg" class="export-msg" :class="{ error: exportMsg.startsWith('导出失败') }">{{ exportMsg }}</span>
       <div class="spacer"></div>
+      <button class="btn-ghost" :disabled="exporting" @click="exportSelected">
+        {{ exporting ? "导出中…" : "⬇ 导出 xlsx" }}
+      </button>
       <button class="fetch-btn" @click="openRiskModal">🧭 生成风险画像 →</button>
     </div>
 
@@ -1138,6 +1295,37 @@ function formatForCopy(d: IssueDetail): string {
   cursor: pointer;
 }
 
+.bulk-select-row {
+  margin-top: 8px;
+}
+.bulk-select-row .link-btn {
+  font-size: 12px;
+  cursor: pointer;
+}
+.bulk-select-panel {
+  margin-top: 6px;
+}
+.bulk-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  resize: vertical;
+  outline: none;
+}
+.bulk-textarea:focus {
+  border-color: #667eea;
+}
+.bulk-select-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
 .selection-bar {
   position: sticky;
   bottom: 0;
@@ -1163,6 +1351,13 @@ function formatForCopy(d: IssueDetail): string {
 }
 .link-btn:hover {
   color: #667eea;
+}
+.export-msg {
+  font-size: 12px;
+  color: #718096;
+}
+.export-msg.error {
+  color: #c53030;
 }
 
 .banner-success {

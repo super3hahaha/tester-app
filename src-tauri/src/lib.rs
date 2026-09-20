@@ -150,6 +150,7 @@ pub fn run() {
             mantis::list_mantis_projects,
             mantis::list_mantis_issues,
             mantis::get_mantis_issue,
+            mantis::export_mantis_issues_xlsx,
             prd_risk::run_prd_risk_profiler,
             prd_risk::stop_prd_risk_profiler,
             knowledge_base::kb_list_skill_risk_docs,
