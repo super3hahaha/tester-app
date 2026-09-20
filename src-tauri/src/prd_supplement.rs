@@ -106,6 +106,7 @@ pub async fn run_prd_supplement_reuse(
     app_name: String,
     version: String,
     prd_image_paths: Vec<String>,
+    html_path: Option<String>,
     model: Option<String>,
     app: AppHandle,
     state: State<'_, PrdSupplementState>,
@@ -118,7 +119,7 @@ pub async fn run_prd_supplement_reuse(
         *running = true;
     }
 
-    let result = run_inner(app_name, version, prd_image_paths, model, app.clone()).await;
+    let result = run_inner(app_name, version, prd_image_paths, html_path, model, app.clone()).await;
     *state.running.lock().unwrap() = false;
     *state.child_pid.lock().unwrap() = None;
     match &result {
@@ -133,6 +134,7 @@ async fn run_inner(
     app_name: String,
     version: String,
     prd_image_paths: Vec<String>,
+    html_path: Option<String>,
     model: Option<String>,
     app: AppHandle,
 ) -> Result<String, String> {
@@ -140,8 +142,9 @@ async fn run_inner(
     let version = version.trim().to_string();
     validate_segment(&app_name, "APP 名称")?;
     validate_segment(&version, "版本号")?;
-    if prd_image_paths.is_empty() {
-        return Err("没有 PRD 图片（导出失败或没选 Slides）".into());
+    let html_path = html_path.filter(|s| !s.trim().is_empty());
+    if prd_image_paths.is_empty() && html_path.is_none() {
+        return Err("没有 PRD（没选 Slides、也没导入 HTML 需求文档）".into());
     }
 
     let ts = SystemTime::now()
@@ -162,7 +165,15 @@ async fn run_inner(
             dirs.insert(parent.to_string_lossy().to_string());
         }
     }
-    dirs.insert(skill_dir().to_string_lossy().to_string());
+    // HTML 需求文档在用户自己选的目录里（多半是 Downloads），要授权父目录才读得到；
+    // 提取产物落到 gen_dir 下，gen_dir 已经在上面授权过了。
+    if let Some(html) = html_path.as_ref() {
+        if let Some(parent) = Path::new(html).parent() {
+            dirs.insert(parent.to_string_lossy().to_string());
+        }
+    }
+    let skill_dir_str = skill_dir().to_string_lossy().to_string();
+    dirs.insert(skill_dir_str.clone());
 
     let mut args = vec![
         "--print".to_string(),
@@ -185,11 +196,30 @@ async fn run_inner(
     }
 
     let mut prompt = format!(
-        "/prd-risk-profiler\nAPP名称：{}\n版本号：{}\nPRD（按页截图，逐张 Read 查看）：\n",
+        "/prd-risk-profiler\nAPP名称：{}\n版本号：{}\n",
         app_name, version
     );
-    for p in &prd_image_paths {
-        prompt.push_str(&format!("- {}\n", p));
+    if !prd_image_paths.is_empty() {
+        prompt.push_str("PRD（按页截图，逐张 Read 查看）：\n");
+        for p in &prd_image_paths {
+            prompt.push_str(&format!("- {}\n", p));
+        }
+    }
+    // HTML 分支：原文件几 MB（CSS + 内嵌 base64 图），Read 一次就爆上下文，必须
+    // 先跑 skill 自带的提取脚本。--outdir 要显式给绝对路径：claude 子进程继承的是
+    // app 的工作目录，打包后多半不可写，脚本默认的相对目录会落到未知位置。
+    // 路径带空格和括号（"MP3 Cutter 2.3.7 需求 (Target36).html"）很常见，命令里
+    // 必须带引号。
+    if let Some(html) = html_path.as_ref() {
+        let html_outdir = gen_dir.join("html_output").to_string_lossy().to_string();
+        prompt.push_str(&format!(
+            "PRD（HTML 需求文档，**严禁直接 Read 原文件**）：{}\n\
+先跑提取脚本，再 Read 产出的 prd.md（图按 [[IMAGE: ...]] 锚点按需 Read）：\n\
+python3 \"{}/scripts/extract_html.py\" --input \"{}\" --outdir \"{}\"（Windows 上换 python）\n\
+本次是非交互调用（stdin 喂完即关，没有第二轮对话），**不要反问要分析哪几个\
+章节，直接全文提取**。脚本不存在或执行失败就直接报错停下，不要退化成 Read 原 HTML。\n",
+            html, skill_dir_str, html, html_outdir
+        ));
     }
     prompt.push_str(&format!(
         "\n请执行「复用模式」（只给新 PRD，没有 bug/缺陷报告）：读取该 APP 已有知识库\

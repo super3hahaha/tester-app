@@ -1,6 +1,6 @@
 # Handoff：HTML 需求文档导入（补充测试点页 + BugPage 沉淀模式）
 
-状态：**方案已定，待实现**
+状态：**已实现，待验收**（skill 改动已提交但**未 push 未 tag**，`~/.claude/skills/` 下是手工 rsync 的临时副本；app 两端编译通过，UI 未实机验证——见第 6 节）
 日期：2026-09-20
 触发：[handoff-html-prd-import.md](handoff-html-prd-import.md) 的 D5 后续步骤（当时只做了 Generate 页，另两处记在 [todo.md](todo.md#L7)）
 
@@ -119,3 +119,38 @@ list_drive_files(mimeType: application/vnd.google-apps.presentation)   ← 就�
 4. 补充测试点页：两者都给 → prompt 两段都在，skill 两种来源都读
 5. BugPage 沉淀模式：重复 2–4，并确认 `references/apps/<APP>.md` 正常更新
 6. 都不给 → 生成按钮置灰，点不动
+
+---
+
+## 6. 实现记录（2026-09-20）
+
+### 6.1 实际改动
+
+**skill**（repo `~/Projects/prd-risk-profiler`，commit `9ecd16b`，**未 push / 未 tag**）
+- 新增 `scripts/extract_html.py`，与 test-case-generator 那份逐字一致（`diff` 验过）
+- SKILL.md：frontmatter 补 HTML 来源说明；新增《〇、输入格式》一节（两模式共用，含
+  「严禁直接 Read」硬规则 + 提取命令 + 「非交互调用不要反问章节」）；沉淀/复用模式
+  各自的第 2 步各加一句指回该节；参考文件补脚本一行（含「两份要同步」提醒）
+- README.md 加《PRD 输入格式》一节
+- 版本：仓库正文里没有版本号，版本只体现在 git tag（app 同步时写 `.tester-app-version`），
+  所以本次没有「改版本号」这一步，发布时直接打 v1.1.0
+
+**app**（两端编译通过：`cargo check` + `vue-tsc --noEmit`）
+- `prd_supplement.rs` / `prd_risk.rs`：命令与 `run_inner` 各加 `html_path: Option<String>`；
+  空值校验改成「图片和 HTML 都没有才报错」；HTML 父目录进 `--add-dir`；prompt 拆成
+  「截图段（有图才拼）+ HTML 段（有 HTML 才拼）」，HTML 段带完整提取命令、显式
+  `--outdir`（supplement → `<生成记录目录>/html_output`，risk → `exports/prd-risk/html-<ts>`）
+  和「非交互、不要反问章节、脚本失败就报错别退化成 Read」
+- `SupplementPage.vue` / `BugPage.vue`：新增 HTML 一行（导入/更换/清除 + 文件名，
+  `title` 挂全路径）；原「PRD」标签改成「Slides」以区分两行；Slides 导出包进
+  `if (slide)`；生成按钮的 `!selectedSlideId` 换成 `!hasPrdSource`
+- `.claude/launch.json`：新增（vite / 1420），之前没有
+
+### 6.2 未验证的部分
+
+**UI 只做了静态检查，没有实机跑过。** 浏览器里打开 `localhost:1420` 会停在
+「Sign in with Google」——登录态在 Tauri 后端，纯浏览器进不去补充测试点页。
+需要在 `npm run tauri dev` 的桌面窗口里按第 5 节的路径实测。
+
+端到端跑之前，`~/.claude/skills/prd-risk-profiler/` 已手工 rsync 成最新版（带 scripts/）,
+但 `.tester-app-version` 还是 v1.0.1 —— **在 app 里点同步就会被打回去**，正式验收前要发 tag。

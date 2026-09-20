@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { marked } from "marked";
 
 // 补充测试点：只给一份新 PRD（不需要 bug 报告），调用 prd-risk-profiler skill 的
@@ -113,6 +114,31 @@ const genPreparingMsg = ref("");
 const genLogs = ref<{ text: string; kind: string }[]>([]);
 let unlistenSupplementLog: (() => void) | null = null;
 
+// HTML 需求文档（本地导入）。与 Slides 并列、可共存：任选其一或同时给，都算
+// 「有 PRD」。HTML 不在这里解析，交给 skill 的 extract_html.py。
+const htmlPath = ref<string | null>(null);
+const htmlFileName = computed(() =>
+  htmlPath.value ? htmlPath.value.split(/[/\\]/).pop() || htmlPath.value : ""
+);
+const hasPrdSource = computed(() => !!selectedSlideId.value || !!htmlPath.value);
+
+async function pickHtmlFile() {
+  try {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "HTML 需求文档", extensions: ["html", "htm"] }],
+    });
+    if (!selected) return;
+    htmlPath.value = Array.isArray(selected) ? selected[0] : selected;
+  } catch (e: any) {
+    genError.value = String(e);
+  }
+}
+
+function clearHtmlFile() {
+  htmlPath.value = null;
+}
+
 async function loadProductNameSuggestions() {
   try {
     const products = await invoke<Array<{ name: string }>>("list_template_products");
@@ -149,8 +175,8 @@ async function startGenerate() {
     return;
   }
   const slide = slidesFiles.value.find((f) => f.id === selectedSlideId.value);
-  if (!slide) {
-    genError.value = "请先选一份 PRD（Slides）";
+  if (!slide && !htmlPath.value) {
+    genError.value = "请先选一份 PRD（Slides 或 HTML 需求文档）";
     return;
   }
 
@@ -169,18 +195,22 @@ async function startGenerate() {
   }
 
   try {
-    genPreparingMsg.value = "正在导出 PRD 页面为图片…";
-    const imagePaths = await invoke<string[]>("export_slides_pdf", {
-      presentationId: slide.id,
-      name: slide.name,
-      pages: [],
-    });
-    genPreparingMsg.value = "";
+    let imagePaths: string[] = [];
+    if (slide) {
+      genPreparingMsg.value = "正在导出 PRD 页面为图片…";
+      imagePaths = await invoke<string[]>("export_slides_pdf", {
+        presentationId: slide.id,
+        name: slide.name,
+        pages: [],
+      });
+      genPreparingMsg.value = "";
+    }
 
     const generationId = await invoke<string>("run_prd_supplement_reuse", {
       appName: name,
       version: ver,
       prdImagePaths: imagePaths,
+      htmlPath: htmlPath.value,
       model: null,
     });
 
@@ -477,7 +507,7 @@ onUnmounted(() => {
           <input v-model="version" class="text-input" placeholder="如 2.3.6" :disabled="genPhase === 'running'" />
         </div>
         <div class="form-row slides-picker-row">
-          <label class="form-label">PRD</label>
+          <label class="form-label">Slides</label>
           <div class="slides-picker">
             <div v-if="loadingSlides" class="slides-hint">加载 Slides 列表中…</div>
             <div v-else-if="slidesError" class="banner banner-error">{{ slidesError }}</div>
@@ -497,6 +527,25 @@ onUnmounted(() => {
                 {{ f.name }}
               </label>
             </div>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">HTML</label>
+          <div class="html-picker">
+            <span v-if="htmlPath" class="html-name" :title="htmlPath">{{ htmlFileName }}</span>
+            <span v-else class="html-empty">未导入 HTML 需求文档</span>
+            <button class="link-btn" :disabled="genPhase === 'running'" @click="pickHtmlFile">
+              {{ htmlPath ? "更换" : "导入" }}
+            </button>
+            <button
+              v-if="htmlPath"
+              class="link-btn danger-link"
+              :disabled="genPhase === 'running'"
+              @click="clearHtmlFile"
+            >
+              清除
+            </button>
           </div>
         </div>
 
@@ -521,7 +570,7 @@ onUnmounted(() => {
         <div class="form-foot">
           <button
             class="fetch-btn"
-            :disabled="genPhase === 'running' || !appName.trim() || !version.trim() || !selectedSlideId"
+            :disabled="genPhase === 'running' || !appName.trim() || !version.trim() || !hasPrdSource"
             @click="startGenerate"
           >
             {{ genPhase === "running" ? "生成中…" : "生成" }}
@@ -778,6 +827,25 @@ onUnmounted(() => {
   color: #2d3748;
   cursor: pointer;
   padding: 3px 0;
+}
+
+.html-picker {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.html-name {
+  font-size: 13px;
+  color: #2d3748;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.html-empty {
+  font-size: 12px;
+  color: #a0aec0;
 }
 
 .form-foot {

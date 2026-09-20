@@ -70,6 +70,7 @@ pub async fn run_prd_risk_profiler(
     version: String,
     bug_report: String,
     prd_image_paths: Vec<String>,
+    html_path: Option<String>,
     model: Option<String>,
     app: AppHandle,
     state: State<'_, PrdRiskState>,
@@ -82,7 +83,16 @@ pub async fn run_prd_risk_profiler(
         *running = true;
     }
 
-    let result = run_inner(app_name, version, bug_report, prd_image_paths, model, app.clone()).await;
+    let result = run_inner(
+        app_name,
+        version,
+        bug_report,
+        prd_image_paths,
+        html_path,
+        model,
+        app.clone(),
+    )
+    .await;
     *state.running.lock().unwrap() = false;
     *state.child_pid.lock().unwrap() = None;
     match &result {
@@ -98,6 +108,7 @@ async fn run_inner(
     version: String,
     bug_report: String,
     prd_image_paths: Vec<String>,
+    html_path: Option<String>,
     model: Option<String>,
     app: AppHandle,
 ) -> Result<String, String> {
@@ -105,8 +116,9 @@ async fn run_inner(
     if app_name.is_empty() {
         return Err("APP 名称不能为空".into());
     }
-    if prd_image_paths.is_empty() {
-        return Err("没有 PRD 图片（导出失败或没选 Slides）".into());
+    let html_path = html_path.filter(|s| !s.trim().is_empty());
+    if prd_image_paths.is_empty() && html_path.is_none() {
+        return Err("没有 PRD（没选 Slides、也没导入 HTML 需求文档）".into());
     }
 
     let dir = data_dir().join("exports").join("prd-risk");
@@ -130,6 +142,13 @@ async fn run_inner(
     dirs.insert(dir.to_string_lossy().to_string());
     for p in &prd_image_paths {
         if let Some(parent) = std::path::Path::new(p).parent() {
+            dirs.insert(parent.to_string_lossy().to_string());
+        }
+    }
+    // HTML 需求文档在用户自己选的目录里（多半是 Downloads），要授权父目录才读得到；
+    // 提取产物落到 dir 下，dir 已经在上面授权过了。
+    if let Some(html) = html_path.as_ref() {
+        if let Some(parent) = std::path::Path::new(html).parent() {
             dirs.insert(parent.to_string_lossy().to_string());
         }
     }
@@ -167,11 +186,27 @@ async fn run_inner(
     };
 
     let mut prompt = format!(
-        "/prd-risk-profiler\nAPP名称：{}\n版本号：{}\nPRD（按页截图，逐张 Read 查看）：\n",
+        "/prd-risk-profiler\nAPP名称：{}\n版本号：{}\n",
         app_name, version
     );
-    for p in &prd_image_paths {
-        prompt.push_str(&format!("- {}\n", p));
+    if !prd_image_paths.is_empty() {
+        prompt.push_str("PRD（按页截图，逐张 Read 查看）：\n");
+        for p in &prd_image_paths {
+            prompt.push_str(&format!("- {}\n", p));
+        }
+    }
+    // HTML 分支的约束见 prd_supplement.rs 里的同款注释（显式 outdir、命令带引号、
+    // 禁止反问章节），两处保持一致。
+    if let Some(html) = html_path.as_ref() {
+        let html_outdir = dir.join(format!("html-{}", ts)).to_string_lossy().to_string();
+        prompt.push_str(&format!(
+            "PRD（HTML 需求文档，**严禁直接 Read 原文件**）：{}\n\
+先跑提取脚本，再 Read 产出的 prd.md（图按 [[IMAGE: ...]] 锚点按需 Read）：\n\
+python3 \"{}/scripts/extract_html.py\" --input \"{}\" --outdir \"{}\"（Windows 上换 python）\n\
+本次是非交互调用（stdin 喂完即关，没有第二轮对话），**不要反问要分析哪几个\
+章节，直接全文提取**。脚本不存在或执行失败就直接报错停下，不要退化成 Read 原 HTML。\n",
+            html, skill_dir_str, html, html_outdir
+        ));
     }
     prompt.push_str(&format!(
         "\nBug/缺陷报告文件（本轮沉淀依据，内容是勾选的多条 bug 详情拼接）：{}\n\n\

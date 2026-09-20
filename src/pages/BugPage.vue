@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 // 通过 MantisBT REST API（Base URL + 个人 API Token）拉某个项目的 bug 列表，
 // 按关键字/版本号筛选后点开看详情，勾选后可一键调用 prd-risk-profiler skill
@@ -264,6 +264,31 @@ const loadingSlides = ref(false);
 const slidesError = ref("");
 const riskSlideId = ref<string | null>(null);
 
+// HTML 需求文档（本地导入）。与 Slides 并列、可共存：任选其一或同时给，都算
+// 「有 PRD」。HTML 不在这里解析，交给 skill 的 extract_html.py。
+const riskHtmlPath = ref<string | null>(null);
+const riskHtmlFileName = computed(() =>
+  riskHtmlPath.value ? riskHtmlPath.value.split(/[/\\]/).pop() || riskHtmlPath.value : ""
+);
+const hasRiskPrdSource = computed(() => !!riskSlideId.value || !!riskHtmlPath.value);
+
+async function pickRiskHtmlFile() {
+  try {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "HTML 需求文档", extensions: ["html", "htm"] }],
+    });
+    if (!selected) return;
+    riskHtmlPath.value = Array.isArray(selected) ? selected[0] : selected;
+  } catch (e: any) {
+    riskError.value = String(e);
+  }
+}
+
+function clearRiskHtmlFile() {
+  riskHtmlPath.value = null;
+}
+
 const productNameSuggestions = ref<string[]>([]);
 
 let unlistenPrdRiskLog: (() => void) | null = null;
@@ -299,6 +324,7 @@ function openRiskModal() {
   riskLogs.value = [];
   riskResultText.value = "";
   riskSlideId.value = null;
+  riskHtmlPath.value = null;
   const project = projects.value.find((p) => p.id === selectedProjectId.value);
   riskAppName.value = project?.name || "";
   // filterText 命中当前版本 chip 就带过去当默认版本号，否则留空手填
@@ -368,8 +394,8 @@ async function startRiskGeneration() {
     return;
   }
   const slide = slidesFiles.value.find((f) => f.id === riskSlideId.value);
-  if (!slide) {
-    riskError.value = "请先选一份 PRD（Slides）";
+  if (!slide && !riskHtmlPath.value) {
+    riskError.value = "请先选一份 PRD（Slides 或 HTML 需求文档）";
     return;
   }
 
@@ -402,12 +428,15 @@ async function startRiskGeneration() {
       return;
     }
 
-    riskPreparingMsg.value = "正在导出 PRD 页面为图片…";
-    const imagePaths = await invoke<string[]>("export_slides_pdf", {
-      presentationId: slide.id,
-      name: slide.name,
-      pages: [],
-    });
+    let imagePaths: string[] = [];
+    if (slide) {
+      riskPreparingMsg.value = "正在导出 PRD 页面为图片…";
+      imagePaths = await invoke<string[]>("export_slides_pdf", {
+        presentationId: slide.id,
+        name: slide.name,
+        pages: [],
+      });
+    }
 
     riskPreparing.value = false;
 
@@ -423,6 +452,7 @@ async function startRiskGeneration() {
       version: riskVersion.value.trim(),
       bugReport,
       prdImagePaths: imagePaths,
+      htmlPath: riskHtmlPath.value,
       model: null,
     });
     riskResultText.value = result;
@@ -889,8 +919,9 @@ function formatForCopy(d: IssueDetail): string {
 
         <template v-if="riskPhase === 'config'">
           <p class="modal-hint">
-            已选 {{ selectedCount }} 条 bug 作为本轮沉淀依据；选一份 PRD（Slides，全篇导出，不选页码），
-            skill 会更新它自己的知识库（通用层 risk-taxonomy.md + 专属层 apps/&lt;APP名&gt;.md，不存在就新建）。
+            已选 {{ selectedCount }} 条 bug 作为本轮沉淀依据；给一份 PRD（Slides 全篇导出、不选页码，
+            或导入 HTML 需求文档），skill 会更新它自己的知识库（通用层 risk-taxonomy.md + 专属层
+            apps/&lt;APP名&gt;.md，不存在就新建）。
           </p>
           <div class="form-row">
             <label class="form-label">APP 名称</label>
@@ -909,7 +940,7 @@ function formatForCopy(d: IssueDetail): string {
             <input v-model="riskVersion" class="text-input" placeholder="如 2.3.6（可留空）" />
           </div>
           <div class="form-row slides-picker-row">
-            <label class="form-label">PRD</label>
+            <label class="form-label">Slides</label>
             <div class="slides-picker">
               <div v-if="loadingSlides" class="slides-hint">加载 Slides 列表中…</div>
               <div v-else-if="slidesError" class="banner banner-error">{{ slidesError }}</div>
@@ -920,6 +951,15 @@ function formatForCopy(d: IssueDetail): string {
                   {{ f.name }}
                 </label>
               </div>
+            </div>
+          </div>
+          <div class="form-row">
+            <label class="form-label">HTML</label>
+            <div class="html-picker">
+              <span v-if="riskHtmlPath" class="html-name" :title="riskHtmlPath">{{ riskHtmlFileName }}</span>
+              <span v-else class="html-empty">未导入 HTML 需求文档</span>
+              <button class="link-btn" @click="pickRiskHtmlFile">{{ riskHtmlPath ? "更换" : "导入" }}</button>
+              <button v-if="riskHtmlPath" class="link-btn danger-link" @click="clearRiskHtmlFile">清除</button>
             </div>
           </div>
           <div v-if="riskError" class="banner banner-error">{{ riskError }}</div>
@@ -967,7 +1007,7 @@ function formatForCopy(d: IssueDetail): string {
             <button class="btn-ghost" @click="closeRiskModal">取消</button>
             <button
               class="fetch-btn"
-              :disabled="!riskAppName.trim() || !riskSlideId"
+              :disabled="!riskAppName.trim() || !hasRiskPrdSource"
               @click="startRiskGeneration"
             >生成</button>
           </template>
@@ -1492,6 +1532,28 @@ function formatForCopy(d: IssueDetail): string {
   color: #2d3748;
   cursor: pointer;
   padding: 3px 0;
+}
+
+.html-picker {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.html-name {
+  font-size: 13px;
+  color: #2d3748;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.html-empty {
+  font-size: 12px;
+  color: #a0aec0;
+}
+.danger-link {
+  color: #c53030;
 }
 
 .preparing-hint {

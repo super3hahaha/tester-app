@@ -263,3 +263,22 @@ app 里同步。
 
 ⚠️ **图片编号必须全文全局**，且在分节之前完成编号。否则分批提取（先 §3 再 §5）时
 编号会各自从 1 开始，第二批把第一批的图覆盖掉。
+
+## extract_html.py 现在有两份
+
+2026-09-20 起 `test-case-generator` 和 `prd-risk-profiler` 两个 skill 仓库各存一份
+逐字相同的 `scripts/extract_html.py`。选复制而不是跨 skill 引用，是因为 skill 要能
+单独分发（引用别的 skill 目录，等于假设那个 skill 也装了）。
+
+**代价：改一处必须同步另一处。** 改完用 `diff` 确认两份仍然一致。
+
+## 非交互调用的 skill 不能反问
+
+`prd_supplement.rs` / `prd_risk.rs` 都是 `--print` 一次性调用：prompt 从 stdin 喂完就关，
+**没有第二轮**（不像 Generate 页有 `send_claude_input` + `--resume` 能续聊）。
+
+HTML 提取脚本支持 `--info` 列章节目录再挑章节，skill 在真人场景下的习惯就是「先列目录、
+问一句做哪几章」——这套习惯撞上非交互调用会直接把任务卡到超时。所以这两处的 prompt 里
+显式写了「本次是非交互调用，不要反问章节，直接全文提取」，SKILL.md 里也写了同一条规则。
+**两边都要写**：只写 prompt，skill 换个版本可能就忘了；只写 SKILL.md，prompt 里没上下文
+说明它就判断不出自己是不是被非交互调用。
