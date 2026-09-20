@@ -1,6 +1,6 @@
 # Handoff：HTML 需求文档导入（补充测试点页 + BugPage 沉淀模式）
 
-状态：**已实现，待验收**（skill 改动已提交但**未 push 未 tag**，`~/.claude/skills/` 下是手工 rsync 的临时副本；app 两端编译通过，UI 未实机验证——见第 6 节）
+状态：**已完成**（用户实机验收通过；skill 已发 `prd-risk-profiler` v1.1.0）
 日期：2026-09-20
 触发：[handoff-html-prd-import.md](handoff-html-prd-import.md) 的 D5 后续步骤（当时只做了 Generate 页，另两处记在 [todo.md](todo.md#L7)）
 
@@ -146,11 +146,11 @@ list_drive_files(mimeType: application/vnd.google-apps.presentation)   ← 就�
   `if (slide)`；生成按钮的 `!selectedSlideId` 换成 `!hasPrdSource`
 - `.claude/launch.json`：新增（vite / 1420），之前没有
 
-### 6.2 未验证的部分
+### 6.2 验收与发布
 
-**UI 只做了静态检查，没有实机跑过。** 浏览器里打开 `localhost:1420` 会停在
-「Sign in with Google」——登录态在 Tauri 后端，纯浏览器进不去补充测试点页。
-需要在 `npm run tauri dev` 的桌面窗口里按第 5 节的路径实测。
+UI 无法在浏览器里验证（`localhost:1420` 停在 Google 登录页，登录态在 Tauri 后端），
+由用户在 `npm run tauri dev` 窗口里实机跑通补充测试点的 HTML 路径，确认通过。
 
-端到端跑之前，`~/.claude/skills/prd-risk-profiler/` 已手工 rsync 成最新版（带 scripts/）,
-但 `.tester-app-version` 还是 v1.0.1 —— **在 app 里点同步就会被打回去**，正式验收前要发 tag。
+skill 已发 **v1.1.0**（`super3hahaha/prd-risk-profiler`，CI 自动打包，release notes
+走 `--generate-notes`）。该仓库正文里没有版本号，版本只由 git tag 决定，app 同步时
+写进 `.tester-app-version`——所以发版就是打 tag，没有「改版本号」这一步。
