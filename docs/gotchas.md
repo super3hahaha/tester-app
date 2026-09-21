@@ -282,3 +282,19 @@ HTML 提取脚本支持 `--info` 列章节目录再挑章节，skill 在真人�
 显式写了「本次是非交互调用，不要反问章节，直接全文提取」，SKILL.md 里也写了同一条规则。
 **两边都要写**：只写 prompt，skill 换个版本可能就忘了；只写 SKILL.md，prompt 里没上下文
 说明它就判断不出自己是不是被非交互调用。
+
+## Play 评论 API 的 7 天窗口只卡「列表」，不卡「回复」
+
+`androidpublisher` 的 **reviews.list 只返回最近约 7 天**内提交或被修改过的评论，没有任何参数能翻更久。
+
+但 **reviews.reply 不受这个窗口限制** —— 只要手上有 reviewId 就能回。**2026-09-21 用户实测**：收藏评论页里那些早已超出 7 天窗口的评论，走 `reply_to_review` 提交成功。官方 [reply 参考页](https://developers.google.com/android-publisher/api-ref/rest/v3/reviews/reply) 也确实没写任何时限（社区里「超窗口不能回」的说法不准确，别再照抄）。
+
+对我们的意义：
+
+- `reviews-cache/` 快照累积保留 180 天（合并写在 `save_reviews_snapshot`），本地留住的旧评论**既能看也能直接在 app 里回**，不需要「超窗口就跳 Console 网页」这类兜底。
+- 收藏评论（`review-fav-v1`）存的是整条快照、永不过期，同理照常可回。
+- 真正不可逆的只有「本地没拉到」——超过 7 天没拉取的那段，API 再也给不回来，是永久缺口。
+
+## 定时巡检 + 长假：Telegram 报告不是完整存档
+
+`max_items_in_msg` 默认 **5**：每次推送每个区段最多列 5 条正文（还截到 40 字），其余只给「（其余 N 条见 app）」。长假期间要靠 Telegram 回溯全部评论的话，得先把这个值调大 —— 否则真正的完整数据只在本地累积快照里。

@@ -416,6 +416,57 @@ fn snapshot_path(key: &str) -> PathBuf {
     reviews_cache_dir().join(format!("{}.json", safe))
 }
 
+/// 快照里的评论保留多久（天）。Google 的 reviews API 只回最近 ~7 天，本地快照是
+/// 唯一能留住更早评论的地方（长假 10 天回来要能看到全程），但也不能无限涨——
+/// 半年足够覆盖任何假期，又能把文件压在几 MB 内。
+const SNAPSHOT_RETAIN_DAYS: i64 = 180;
+
+/// 把本次拉到的评论并进磁盘上已有的快照，而不是整份覆盖。
+///
+/// 为什么放在这一层：前端 `writeSnapshot` 和后端定时线程 `schedule::save_snapshot`
+/// 都经过这个命令，合并写在这里，两条路径自动都是累积的，不会一条累积一条覆盖。
+///
+/// 合并规则：同 review_id 用**新的**覆盖旧的（回复状态/点赞数会变），旧快照里
+/// 本次没返回的（已超出 API 7 天窗口）原样保留；最后按评论时间倒序，并丢掉
+/// 早于 SNAPSHOT_RETAIN_DAYS 的条目。
+fn merge_reviews(old: Option<&serde_json::Value>, incoming: &serde_json::Value) -> serde_json::Value {
+    let take = |v: Option<&serde_json::Value>| -> Vec<serde_json::Value> {
+        v.and_then(|d| d.get("reviews"))
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let id_of = |r: &serde_json::Value| -> Option<String> {
+        r.get("review_id").and_then(|v| v.as_str()).map(|s| s.to_string())
+    };
+    let ts_of = |r: &serde_json::Value| -> i64 {
+        r.get("user_comment_ts").and_then(|v| v.as_i64()).unwrap_or(0)
+    };
+
+    // 先放旧的，再用新的覆盖同 id —— 顺序决定了「新数据赢」。
+    let mut by_id: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for r in take(old).into_iter().chain(take(Some(incoming)).into_iter()) {
+        let Some(id) = id_of(&r) else { continue };
+        if !by_id.contains_key(&id) {
+            order.push(id.clone());
+        }
+        by_id.insert(id, r);
+    }
+
+    let cutoff = chrono::Utc::now().timestamp() - SNAPSHOT_RETAIN_DAYS * 86_400;
+    let mut merged: Vec<serde_json::Value> = order
+        .into_iter()
+        .filter_map(|id| by_id.remove(&id))
+        // ts 缺失/为 0 的条目一律留着：宁可多留一条来路不明的，也不要因为字段没读到
+        // 就把用户的数据裁掉（裁剪是为了控体积，不是为了正确性）。
+        .filter(|r| ts_of(r) == 0 || ts_of(r) >= cutoff)
+        .collect();
+    merged.sort_by(|a, b| ts_of(b).cmp(&ts_of(a)));
+    serde_json::Value::Array(merged)
+}
+
 #[tauri::command]
 pub fn save_reviews_snapshot(key: String, data: serde_json::Value) -> Result<(), String> {
     if key.trim().is_empty() {
@@ -423,6 +474,17 @@ pub fn save_reviews_snapshot(key: String, data: serde_json::Value) -> Result<(),
     }
     let path = snapshot_path(&key);
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+
+    // 读旧快照做合并。读失败/损坏就当没有旧数据（本次照写，不因为旧文件坏了就丢新数据）。
+    let old: Option<serde_json::Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let mut data = data;
+    let merged = merge_reviews(old.as_ref(), &data);
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("reviews".to_string(), merged);
+    }
+
     let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
     // 先写临时文件再 rename，避免写一半被读到损坏的 JSON。
     let tmp = path.with_extension("json.tmp");
@@ -438,5 +500,67 @@ pub fn load_reviews_snapshot(key: String) -> Result<Option<serde_json::Value>, S
         Ok(s) => serde_json::from_str(&s).map(Some).map_err(|e| e.to_string()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod snapshot_merge_tests {
+    use super::*;
+
+    fn rev(id: &str, ts: i64, reply: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "review_id": id,
+            "user_comment_ts": ts,
+            "developer_reply": reply,
+        })
+    }
+    fn snap(items: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({ "version": 1, "reviews": items })
+    }
+    fn ids(v: &serde_json::Value) -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["review_id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn keeps_old_reviews_missing_from_the_new_fetch() {
+        let now = chrono::Utc::now().timestamp();
+        // 旧快照里有 10 天前那条；本次 API 只回了最近两条（7 天窗口外的拿不到了）
+        let old = snap(vec![rev("old", now - 10 * 86400, None)]);
+        let incoming = snap(vec![rev("a", now - 86400, None), rev("b", now - 2 * 86400, None)]);
+        let merged = merge_reviews(Some(&old), &incoming);
+        // 三条都在，且按评论时间倒序
+        assert_eq!(ids(&merged), vec!["a", "b", "old"]);
+    }
+
+    #[test]
+    fn new_data_wins_for_the_same_review_id() {
+        let now = chrono::Utc::now().timestamp();
+        let old = snap(vec![rev("a", now - 86400, None)]);
+        let incoming = snap(vec![rev("a", now - 86400, Some("thanks"))]);
+        let merged = merge_reviews(Some(&old), &incoming);
+        assert_eq!(merged.as_array().unwrap().len(), 1);
+        assert_eq!(merged[0]["developer_reply"].as_str(), Some("thanks"));
+    }
+
+    #[test]
+    fn drops_entries_older_than_the_retention_window() {
+        let now = chrono::Utc::now().timestamp();
+        let old = snap(vec![
+            rev("ancient", now - (SNAPSHOT_RETAIN_DAYS + 5) * 86400, None),
+            rev("kept", now - (SNAPSHOT_RETAIN_DAYS - 5) * 86400, None),
+        ]);
+        let merged = merge_reviews(Some(&old), &snap(vec![]));
+        assert_eq!(ids(&merged), vec!["kept"]);
+    }
+
+    #[test]
+    fn works_without_an_existing_snapshot() {
+        let now = chrono::Utc::now().timestamp();
+        let incoming = snap(vec![rev("a", now - 86400, None)]);
+        assert_eq!(ids(&merge_reviews(None, &incoming)), vec!["a"]);
     }
 }

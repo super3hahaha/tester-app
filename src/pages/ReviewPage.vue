@@ -17,6 +17,16 @@ import {
 } from "../utils/reviewsStore";
 import { loadFavIds } from "../utils/templateFavorites";
 import { loadFavorites, addFavorite, removeFavorite, updateFavoriteReply, favoritesError } from "../utils/reviewFavorites";
+import {
+  isRead,
+  markRead,
+  unmarkRead,
+  undoLastRead,
+  lastRead,
+  readCount,
+  reloadReadMarks,
+  readMarksError,
+} from "../utils/reviewReadMarks";
 import { scopedKey } from "../utils/accountScopedKey";
 import { getActiveAccountId } from "../utils/activeAccount";
 
@@ -95,7 +105,20 @@ const toDate = ref(todayIso());
 // dayTick，min/max 会在首次求值后被永久缓存——app 常驻几天后 max 仍停在打开那天，
 // 导致「今天」被 <input type=date> 置灰。checkDayRollover() 跨天时 bump 它触发重算。
 const dayTick = ref(0);
-const minSelectableDate = computed(() => (dayTick.value, daysAgoIso(7)));
+// 本地累积的最早一条评论的日期（没有数据时空串）。快照现在是累积的，列表里可能
+// 有远早于 7 天的评论 —— 日期选择器的下限必须跟着放宽，否则那些评论永远筛不出来。
+const earliestLocalDate = computed(() => {
+  let min = Number.MAX_SAFE_INTEGER;
+  for (const r of reviews.value) {
+    if (r.user_comment_ts && r.user_comment_ts < min) min = r.user_comment_ts;
+  }
+  return min === Number.MAX_SAFE_INTEGER ? "" : toIso(new Date(min * 1000));
+});
+const minSelectableDate = computed(() => {
+  const base = (dayTick.value, daysAgoIso(7));
+  const earliest = earliestLocalDate.value;
+  return earliest && earliest < base ? earliest : base;
+});
 const maxSelectableDate = computed(() => (dayTick.value, todayIso()));
 
 const reviews = ref<TaggedReview[]>([]);
@@ -105,6 +128,8 @@ const errorMsg = ref("");
 const needRelogin = ref(false);
 const fetchedAt = ref<number | null>(null);
 const showAdvanced = ref(false);
+// 筛选区默认收起：进页面先看评论列表，要改筛选再点开（不持久化，每次进来都是收起）。
+const filtersCollapsed = ref(true);
 // "single" = 拉取单个应用（用页面上的筛选）；"batch" = 批量拉取（按各应用 Config 配置筛选）
 const mode = ref<"single" | "batch">("single");
 const batchSummary = ref(""); // 批量拉取结果摘要（拉了几个 app、各多少条）
@@ -299,6 +324,17 @@ function toggleStar(s: number) {
   stars.value.sort();
 }
 
+// API 窗口起点（7 天前）。本地累积的评论可能比它更早，模板用它决定要不要显示
+// 「本地全部」这个预设。
+const minWindowDate = computed(() => (dayTick.value, daysAgoIso(7)));
+
+// 把起始日期拉到本地最早一条评论 —— 长假回来一键看全程，不用手点日历翻月份。
+function setAllLocal() {
+  if (!earliestLocalDate.value) return;
+  fromDate.value = earliestLocalDate.value;
+  toDate.value = todayIso();
+}
+
 function setDatePreset(days: number) {
   fromDate.value = daysAgoIso(days - 1);
   toDate.value = todayIso();
@@ -428,11 +464,59 @@ function matchesReplyState(r: TaggedReview): boolean {
   return replyStateMatches(r, replyState.value);
 }
 
+// ── 已读标记（✅ 已读：看过但不打算回复，从列表里消失）─────────────────────
+// 状态在 utils/reviewReadMarks 里按账号隔离持久化，与批量回复页共享同一张表。
+// 「只看已读」是临时视图开关，不写进页面配置 —— 每次进来都回到正常列表。
+const readOnly = ref(false);
+
+function passesReadFilter(r: TaggedReview): boolean {
+  return readOnly.value ? isRead(r.review_id) : !isRead(r.review_id);
+}
+
+// 当前筛选条件下被已读挡掉了多少条（只在正常视图算，用于摘要提示）。
+// 条件与 filtered 相同、只是把已读那一条反过来——刻意重复而不抽公共函数，
+// 免得为了一句提示去动已经跑稳的 filtered。
+const hiddenReadCount = computed(() => {
+  if (readOnly.value) return 0;
+  return reviews.value.filter((r) => {
+    if (!isRead(r.review_id)) return false;
+    if (!matchesReplyState(r)) return false;
+    if (mode.value === "batch") {
+      if (replyState.value === "UPDATED") return true;
+      const cs = batchStarsByPkg.value[r._pkg];
+      return !cs || cs.includes(r.star_rating);
+    }
+    return (
+      (replyState.value === "UPDATED" || stars.value.includes(r.star_rating)) &&
+      r.user_comment_ts >= fromTs.value &&
+      r.user_comment_ts <= toTs.value
+    );
+  }).length;
+});
+
+const lastReadLabel = computed(() => {
+  const last = lastRead();
+  if (!last) return "";
+  const { author, excerpt } = last.mark;
+  return excerpt ? `${author}：${excerpt}` : author;
+});
+
+function toggleRead(r: TaggedReview) {
+  // 写失败（存储损坏保护 / 配额满）时不动视图，否则评论消失了但磁盘上没记。
+  const ok = isRead(r.review_id) ? unmarkRead(r.review_id) : markRead(r);
+  if (!ok) errorMsg.value = readMarksError.value;
+}
+
+function handleUndoRead() {
+  if (!undoLastRead() && readMarksError.value) errorMsg.value = readMarksError.value;
+}
+
 const filtered = computed(() => {
   // 批量模式：日期已在拉取时按各应用 Config 固定；星级按各应用 Config 过滤（上方星级控件
   // 不参与）；回复状态跟随页面控件实时筛选。「回复后又更新」忽略星级、显示所有星级。
   if (mode.value === "batch") {
     return reviews.value.filter((r) => {
+      if (!passesReadFilter(r)) return false;
       if (!matchesReplyState(r)) return false;
       if (replyState.value === "UPDATED") return true; // 忽略星级，显示所有星级
       const cs = batchStarsByPkg.value[r._pkg];
@@ -442,6 +526,7 @@ const filtered = computed(() => {
   // 单应用模式：星级（页面控件）+ 回复状态 + 页面日期范围。
   return reviews.value.filter(
     (r) =>
+      passesReadFilter(r) &&
       matchesReplyState(r) &&
       // 「回复后又更新」忽略星级，显示全部星级（这种通常不在乎评分，要看全部）
       (replyState.value === "UPDATED" || stars.value.includes(r.star_rating)) &&
@@ -520,12 +605,40 @@ const summary = computed(() => {
   if (!fetchedAt.value) return "";
   const total = reviews.value.length;
   const shown = filtered.value.length;
-  return `共拉到 ${total} 条（最近 7 天），当前筛选显示 ${shown} 条`;
+  // 本地是累积的：API 每次只回最近 7 天，更早的是历次拉取攒下来的（含后端定时巡检）。
+  const earliest = earliestLocalDate.value;
+  const range = earliest ? `最早 ${earliest}` : "";
+  return `本地共 ${total} 条${range ? `（${range}）` : ""}，当前筛选显示 ${shown} 条`;
 });
 
 const selectedAppLabel = computed(() => {
   const a = apps.value.find((x) => x.package_name === packageName.value);
   return a ? a.display_name : "";
+});
+
+// 筛选区收起时显示的一行摘要，让人不展开也知道当前筛的是什么。
+const collapsedFilterLabel = computed(() => {
+  const parts: string[] = [];
+  parts.push(selectedAppLabel.value || packageName.value || "未选应用");
+  if (mode.value === "batch") {
+    parts.push("批量（星级/日期按各应用 Config）");
+  } else {
+    parts.push(stars.value.length === 5 || stars.value.length === 0
+      ? "全部星级"
+      : [...stars.value].sort().join("/") + "★");
+  }
+  const stateText: Record<ReplyState, string> = {
+    ANY: "全部",
+    ABSENT: "无回复",
+    REPLIED: "已回复",
+    UPDATED: "回复后又更新",
+  };
+  parts.push(stateText[replyState.value]);
+  if (readOnly.value) parts.push("只看已读");
+  if (mode.value !== "batch" && fromDate.value && toDate.value) {
+    parts.push(`${fromDate.value.slice(5)} → ${toDate.value.slice(5)}`);
+  }
+  return parts.join(" · ");
 });
 
 // ── 收藏评论（评论卡片右下角 ★，收录进「收藏评论」tab）─────────────────────
@@ -539,7 +652,10 @@ onMounted(() => {
 watch(
   () => props.activeOption,
   (v) => {
-    if (v === "review-play") favIds.value = new Set(Object.keys(loadFavorites()));
+    if (v === "review-play") {
+      favIds.value = new Set(Object.keys(loadFavorites()));
+      reloadReadMarks();
+    }
   }
 );
 
@@ -1257,11 +1373,32 @@ async function submitAnReply(task: AnTask) {
     <header class="page-header">
       <h3>Play Console Reviews</h3>
       <p class="subtitle">
-        通过 Play Developer API 拉取最近 7 天的应用评论，在本地按星级 / 回复状态 / 日期筛选。
+        通过 Play Developer API 拉取评论（Google 每次只返回最近 7 天），本地会累积保留历次拉到的评论，
+        长时间不在也能回看整段时间；在本地按星级 / 回复状态 / 日期筛选。
       </p>
     </header>
 
     <section class="form-card">
+      <div class="filter-bar" :class="{ expanded: !filtersCollapsed }">
+        <button class="filter-toggle-btn" @click="filtersCollapsed = !filtersCollapsed">
+          {{ filtersCollapsed ? "▶" : "▼" }} 筛选条件
+        </button>
+        <template v-if="filtersCollapsed">
+          <span class="filter-brief">{{ collapsedFilterLabel }}</span>
+          <button
+            class="fetch-btn"
+            :disabled="loading || batchLoading || !packageName.trim()"
+            @click="handleFetch"
+          >
+            {{ loading ? "拉取中..." : "拉取评论" }}
+          </button>
+          <button class="batch-fetch-btn" :disabled="loading || batchLoading" @click="handleBatchFetch">
+            {{ batchLoading ? "批量拉取中..." : "批量拉取" }}
+          </button>
+        </template>
+      </div>
+
+      <div v-show="!filtersCollapsed">
       <div class="form-row">
         <label class="form-label">应用</label>
         <template v-if="!manualPackage">
@@ -1336,6 +1473,25 @@ async function submitAnReply(task: AnTask) {
       </div>
 
       <div class="form-row">
+        <label class="form-label">已读</label>
+        <div class="read-row">
+          <button
+            class="read-toggle-btn"
+            :class="{ active: readOnly }"
+            @click="readOnly = !readOnly"
+            title="已读的评论默认在所有筛选下都隐藏；切到这里可以查看并标回未读"
+          >{{ readOnly ? "返回未读列表" : `只看已读 (${readCount})` }}</button>
+          <button
+            class="read-undo-btn"
+            :disabled="readCount === 0"
+            @click="handleUndoRead"
+            :title="lastReadLabel ? `撤销：${lastReadLabel}` : '暂无可撤销的已读'"
+          >撤销上一条已读</button>
+          <span v-if="lastReadLabel" class="read-hint">最近：{{ lastReadLabel }}</span>
+        </div>
+      </div>
+
+      <div class="form-row">
         <label class="form-label">日期范围</label>
         <div class="date-row">
           <input type="date" v-model="fromDate" class="date-input" :min="minSelectableDate" :max="maxSelectableDate" />
@@ -1345,8 +1501,14 @@ async function submitAnReply(task: AnTask) {
             <button class="preset-btn" @click="setDatePreset(1)">今天</button>
             <button class="preset-btn" @click="setSinceLastWorkday">自上一个工作日</button>
             <button class="preset-btn" @click="setDatePreset(7)">近 7 天</button>
+            <button
+              v-if="earliestLocalDate && earliestLocalDate < minWindowDate"
+              class="preset-btn"
+              @click="setAllLocal"
+              title="把起始日期拉到本地最早一条评论，查看累积保留下来的全部评论"
+            >本地全部（自 {{ earliestLocalDate }}）</button>
           </div>
-          <span class="date-hint">⚠️ 仅能在最近 7 天内筛选（API 只返回最近约 7 天的评论）</span>
+          <span class="date-hint">API 只返回最近约 7 天，更早的是本地累积保留的（能看、能筛，回复是否还能提交取决于 Google 的窗口限制）</span>
         </div>
       </div>
       <div v-if="dateError" class="error">{{ dateError }}</div>
@@ -1373,6 +1535,7 @@ async function submitAnReply(task: AnTask) {
           App ID 按当前选中的应用分别记忆——切到别的 app 时需要各自填一次，之后批量视图里点该 app 的评论也能跳对详情页。
         </p>
       </div>
+      </div>
     </section>
 
     <div v-if="needRelogin" class="banner banner-warn">
@@ -1383,10 +1546,12 @@ async function submitAnReply(task: AnTask) {
 
     <div v-if="mode === 'batch' && batchSummary" class="summary-row">
       <span class="summary-text">{{ batchSummary }} · 当前筛选显示 {{ filtered.length }} 条</span>
+      <span v-if="hiddenReadCount" class="summary-app">· 已隐藏 {{ hiddenReadCount }} 条已读</span>
       <span class="summary-app">· 星级/日期按各应用 Config；回复状态可在上方实时筛选</span>
     </div>
     <div v-else-if="summary" class="summary-row">
       <span class="summary-text">{{ summary }}</span>
+      <span v-if="hiddenReadCount" class="summary-app">· 已隐藏 {{ hiddenReadCount }} 条已读</span>
       <span v-if="selectedAppLabel" class="summary-app">· {{ selectedAppLabel }}</span>
     </div>
 
@@ -1397,6 +1562,12 @@ async function submitAnReply(task: AnTask) {
           <span class="stars" :class="`stars-${r.star_rating}`">{{ starsDisplay(r.star_rating) }}</span>
           <span class="author">{{ r.author_name || "(匿名)" }}</span>
           <span class="ts">{{ formatTs(r.user_comment_ts) }}</span>
+          <button
+            class="read-btn"
+            :class="{ active: readOnly }"
+            @click="toggleRead(r)"
+            :title="readOnly ? '标回未读，回到正常列表' : '标为已读：不回复也让它从本页和批量回复页消失，可在上方撤销'"
+          >{{ readOnly ? "标回未读" : "已读" }}</button>
           <button class="an-btn" @click="openAnalysis(r)" title="分析这条评论暴露的问题并给出推荐回复">
             🔍 分析
           </button>
@@ -1440,6 +1611,10 @@ async function submitAnReply(task: AnTask) {
           </button>
         </div>
       </article>
+    </div>
+
+    <div v-else-if="readOnly && !loading" class="empty-state">
+      还没有标记过已读的评论（当前筛选条件下）。点评论卡片上的「已读」按钮，它就会从列表里消失。
     </div>
 
     <div v-else-if="fetchedAt && !loading" class="empty-state">
@@ -1849,6 +2024,38 @@ async function submitAnReply(task: AnTask) {
   border-radius: 8px;
   padding: 14px 16px;
   margin-bottom: 12px;
+}
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+}
+.filter-bar.expanded {
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e9e9e9;
+}
+.filter-toggle-btn {
+  background: none;
+  border: none;
+  color: #667eea;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 0;
+  flex-shrink: 0;
+}
+.filter-toggle-btn:hover {
+  text-decoration: underline;
+}
+.filter-brief {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .form-row {
   display: flex;
@@ -2864,5 +3071,73 @@ async function submitAnReply(task: AnTask) {
 }
 .tpl-lang-select:focus {
   border-color: #9f7aea;
+}
+/* ── 已读标记 ── */
+.read-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.read-toggle-btn,
+.read-undo-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  line-height: 18px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  background: white;
+  color: #4a5568;
+  cursor: pointer;
+}
+.read-toggle-btn:hover,
+.read-undo-btn:hover:not(:disabled) {
+  border-color: #a0aec0;
+  background: #f7fafc;
+}
+.read-toggle-btn.active {
+  border-color: #4299e1;
+  background: #ebf8ff;
+  color: #2b6cb0;
+  font-weight: 500;
+}
+.read-undo-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.read-hint {
+  font-size: 11px;
+  color: #718096;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+
+/* 卡片头上的「已读」：接管原本在 .an-btn 上的右推，让整排按钮保持贴右 */
+.read-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  background: white;
+  color: #4a5568;
+  cursor: pointer;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.read-btn:hover {
+  background: #edf2f7;
+  border-color: #a0aec0;
+}
+.read-btn.active {
+  border-color: #4299e1;
+  background: #ebf8ff;
+  color: #2b6cb0;
+}
+.review-head .read-btn + .an-btn {
+  margin-left: 0;
 }
 </style>

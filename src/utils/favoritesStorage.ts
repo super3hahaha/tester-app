@@ -19,7 +19,7 @@ export function corruptBackupKey(key: string): string {
   return `${key}__corrupt`;
 }
 
-function quarantine(key: string, raw: string): string {
+function quarantine(key: string, raw: string, label: string): string {
   quarantined.add(key);
   const bk = corruptBackupKey(key);
   try {
@@ -31,7 +31,7 @@ function quarantine(key: string, raw: string): string {
     // 连备份都写不下就算了：quarantined 已经拦住覆盖写，原值还在原 key 上
   }
   return (
-    `收藏数据读取失败（内容可能已损坏），已暂停写入以免覆盖残存数据。` +
+    `${label}读取失败（内容可能已损坏），已暂停写入以免覆盖残存数据。` +
     `原始内容备份在 localStorage 的「${bk}」，处理后重启 app 恢复。`
   );
 }
@@ -41,7 +41,9 @@ export interface LoadResult<T> {
   error: string; // 空串表示正常
 }
 
-export function loadMapSafe<T>(key: string): LoadResult<T> {
+// label 只影响报错文案（默认「收藏数据」）：同一套保护逻辑也给已读标记等其它单 key
+// JSON 表复用，别让用户看到「收藏数据读取失败」这种驴唇不对马嘴的提示。
+export function loadMapSafe<T>(key: string, label = "收藏数据"): LoadResult<T> {
   let raw: string | null = null;
   try {
     raw = localStorage.getItem(key);
@@ -65,7 +67,7 @@ export function loadMapSafe<T>(key: string): LoadResult<T> {
     quarantined.delete(key);
     return { map: obj as Record<string, T>, error: "" };
   } catch {
-    return { map: {}, error: quarantine(key, raw) };
+    return { map: {}, error: quarantine(key, raw, label) };
   }
 }
 
@@ -84,12 +86,12 @@ function isQuotaError(e: any): boolean {
   );
 }
 
-export function saveMapSafe<T>(key: string, map: Record<string, T>): SaveResult {
+export function saveMapSafe<T>(key: string, map: Record<string, T>, label = "收藏数据"): SaveResult {
   if (quarantined.has(key)) {
     return {
       ok: false,
       error:
-        `收藏数据处于损坏保护状态，本次修改未保存（避免覆盖掉可能还能恢复的数据）。` +
+        `${label}处于损坏保护状态，本次修改未保存（避免覆盖掉可能还能恢复的数据）。` +
         `备份见 localStorage 的「${corruptBackupKey(key)}」，处理后重启 app。`,
     };
   }

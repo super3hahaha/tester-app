@@ -27,6 +27,15 @@ import {
   matchesReplyState,
 } from "../utils/reviewsStore";
 import { type DraftEntry, loadDrafts, mergeDrafts, removeDraft } from "../utils/draftsStore";
+import {
+  isRead,
+  markRead,
+  undoLastRead,
+  lastRead,
+  readCount,
+  reloadReadMarks,
+  readMarksError,
+} from "../utils/reviewReadMarks";
 
 interface PlayApp {
   package_name: string;
@@ -282,6 +291,8 @@ const visibleByPkg = computed(() => {
     const { from, to } = tsRange(g.effectiveRange);
     out[g.packageName] = getReviews(g.packageName).value.filter(
       (r) =>
+        // 标了已读的不再进候选（与 Play Console 页共享同一张表，任一页标记两页同步）
+        !isRead(r.review_id) &&
         matchesReplyState(r, g.config.replyState) &&
         // 「回复后又更新」忽略星级（与 Play Console 页同口径）
         (g.config.replyState === "UPDATED" || g.config.stars.includes(r.star_rating)) &&
@@ -404,10 +415,30 @@ watch(
   async (opt) => {
     // rebuildGroups 现在会保留已有候选，随时重建都安全。
     if (opt !== "review-batch-reply" || fetching.value) return;
+    reloadReadMarks();
     rebuildGroups();
     await loadFromCache();
   }
 );
+
+// ── 已读标记 ──────────────────────────────────────────────────────────────
+// 「已读」= 看过但不打算回复。标记后这条候选立刻移出列表（与回复成功后消失同机制），
+// 并在 Play Console 页同步消失。查看/逐条恢复在 Play Console 页的「只看已读」里。
+const lastReadLabel = computed(() => {
+  const last = lastRead();
+  if (!last) return "";
+  const { author, excerpt } = last.mark;
+  return excerpt ? `${author}：${excerpt}` : author;
+});
+
+function handleMarkRead(c: Candidate) {
+  // 写失败（存储损坏保护 / 配额满）时不动视图，否则候选消失了但磁盘上没记。
+  if (!markRead(c.review)) overallError.value = readMarksError.value;
+}
+
+function handleUndoRead() {
+  if (!undoLastRead() && readMarksError.value) overallError.value = readMarksError.value;
+}
 
 function tsRange(r: DateRange): { from: number; to: number } {
   const from = r.fromDate
@@ -1044,6 +1075,13 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
       </span>
       <span class="summary-text" v-else>未配置启用任何应用</span>
 
+      <button
+        v-if="readCount > 0"
+        class="read-undo-btn"
+        @click="handleUndoRead"
+        :title="lastReadLabel ? `撤销：${lastReadLabel}` : ''"
+      >撤销上一条已读</button>
+
       <div class="toolbar-spacer"></div>
 
       <button
@@ -1129,7 +1167,7 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
               </span>
               <span v-else-if="g.error" class="group-tag err">出错</span>
               <span v-else-if="g.candidates.length > 0" class="group-tag ok">
-                {{ g.candidates.length }} 条候选 / 共 {{ g.totalFetched }}
+                {{ g.candidates.length }} 条候选 / 本地共 {{ g.totalFetched }}
               </span>
               <span v-else-if="fetchedAt !== null" class="group-tag empty">无候选</span>
             </div>
@@ -1184,6 +1222,12 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
               >
                 {{ c.manual ? "↩ 取消人工" : "✋ 人工处理" }}
               </button>
+              <button
+                class="read-btn"
+                :disabled="c.status === 'submitting' || bulkSubmitting"
+                title="标为已读：不回复也让它从本页和 Play Console 页消失。撤销在上方「撤销上一条已读」，或去 Play Console 页「只看已读」逐条恢复"
+                @click="handleMarkRead(c)"
+              >已读</button>
               <span v-if="c.manual" class="status-tag status-manual">✋ 人工处理</span>
               <span v-if="c.unmatched && c.status === 'pending'" class="unmatched-tag">
                 生成异常 · 需手动处理
@@ -2596,5 +2640,42 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
   border-top: 1px solid #eee;
   font-size: 11px;
   color: #999;
+}
+/* ── 已读标记 ── */
+.read-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  background: white;
+  color: #718096;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.read-btn:hover:not(:disabled) {
+  background: #edf2f7;
+  color: #4a5568;
+}
+.read-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.read-undo-btn {
+  margin-left: 10px;
+  padding: 3px 10px;
+  font-size: 11px;
+  line-height: 18px;
+  border: 1px solid #cbd5e0;
+  border-radius: 6px;
+  background: white;
+  color: #4a5568;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.read-undo-btn:hover {
+  border-color: #a0aec0;
+  background: #f7fafc;
 }
 </style>

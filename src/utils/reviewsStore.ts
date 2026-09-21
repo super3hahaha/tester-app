@@ -6,6 +6,10 @@
 //
 // 磁盘快照沿用 reviews.rs 的 save/load_reviews_snapshot（key = `账号__包名`），
 // 后端定时线程写的是同一份文件 —— 所以定时巡检拉到的新评论，两页都能直接读到。
+//
+// 快照是**累积**的（不是每次覆盖）：API 只回最近 ~7 天，超窗口的评论只在本地留着，
+// 这样长假期间每天定时拉取，回来能看到整段时间的评论而不只是最后 7 天。合并逻辑在
+// 后端 save_reviews_snapshot 里（两条写路径都经过它），内存侧对应下面的 upsert。
 
 import { ref, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
@@ -68,21 +72,36 @@ export function getFetchedAt(pkg: string): number | null {
   return entryOf(pkg).fetchedAt.value;
 }
 
+// 本地累积保留多久（天）。与后端 reviews.rs 的 SNAPSHOT_RETAIN_DAYS 保持一致：
+// 内存和磁盘用同一个口径，免得页面上还有、重启后又没了。
+const RETAIN_DAYS = 180;
+
 // 按 review_id 把新数据并进已有数组：命中的原地改写（保留对象引用，这样另一页持有的
 // 引用、以及 BatchReply 已经填好的候选草稿都不会被冲掉），没命中的新增；
-// 本次没返回的删除（Play 评论接口只回最近约 7 天，过期的本就该从视图里消失）。
+// **本次没返回的保留**（Play 评论接口只回最近约 7 天，但长假 10 天回来要能看到全程，
+// 所以超窗口的旧评论留在本地，由磁盘快照累积 —— 见 decisions.md「评论本地累积归档」）。
+// 超过 RETAIN_DAYS 的丢掉，防止无限膨胀。
 //
 // 注意是**原地** splice 而不是整体换一个新数组：两个页面都直接持有这个数组的引用，
 // 换掉引用会让先拿到旧数组的那页看不到新拉到的评论。
 function upsert(e: Entry, incoming: TaggedReview[]) {
   const byId = new Map(e.list.value.map((r) => [r.review_id, r]));
-  const next: TaggedReview[] = incoming.map((r) => {
+  const next: TaggedReview[] = [...e.list.value];
+  for (const r of incoming) {
     const hit = byId.get(r.review_id);
-    if (!hit) return r;
-    Object.assign(hit, r);
-    return hit;
-  });
-  e.list.value.splice(0, e.list.value.length, ...next);
+    if (hit) {
+      Object.assign(hit, r); // 回复状态/点赞数等会变，以新数据为准
+    } else {
+      byId.set(r.review_id, r);
+      next.push(r);
+    }
+  }
+  const cutoff = Math.floor(Date.now() / 1000) - RETAIN_DAYS * 86400;
+  // ts 缺失/为 0 的留着（裁剪只为控体积，不该因为字段异常就丢用户数据）。
+  const kept = next.filter((r) => !r.user_comment_ts || r.user_comment_ts >= cutoff);
+  // 统一按评论时间倒序：合并进来的旧评论本来追加在末尾，不排序列表顺序会乱。
+  kept.sort((a, b) => b.user_comment_ts - a.user_comment_ts);
+  e.list.value.splice(0, e.list.value.length, ...kept);
 }
 
 async function readSnapshot(
@@ -108,6 +127,27 @@ async function writeSnapshot(pkg: string, e: Entry) {
     // 持久化失败不阻塞主流程
     console.warn("save reviews snapshot failed:", err);
   }
+}
+
+// markReplied 的合并写：快照累积后能到几 MB，「一键提交全部」逐条落盘会把同一份
+// 大文件反复读-改-写上百次，明显拖慢提交。改成 500ms 内合并成一次写。
+//
+// 代价：最后一次写落盘前进程被杀，那几条回复的状态在本地快照里会缺 —— 无害，
+// 回复在 Play 侧已经生效，下次拉取就会带回来。拉取/批量拉取仍是立即写，不走这里。
+const WRITE_DEBOUNCE_MS = 500;
+const pendingWrites = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleWrite(pkg: string, e: Entry) {
+  const key = cacheKey(pkg);
+  const prev = pendingWrites.get(key);
+  if (prev) clearTimeout(prev);
+  pendingWrites.set(
+    key,
+    setTimeout(() => {
+      pendingWrites.delete(key);
+      void writeSnapshot(pkg, e);
+    }, WRITE_DEBOUNCE_MS)
+  );
 }
 
 /** 本会话首次访问该包名时从磁盘快照载入；返回是否有可用数据。 */
@@ -166,7 +206,7 @@ export async function markReplied(
   if (!hit) return; // 该 app 的评论没在内存里（比如从收藏页发起的回复）→ 无需同步
   hit.developer_reply = replyText;
   hit.developer_reply_ts = ts;
-  await writeSnapshot(pkg, e);
+  scheduleWrite(pkg, e);
 }
 
 /** 回复状态筛选口径 —— 两页共用这一份实现，保证展示的评论完全一致。 */
