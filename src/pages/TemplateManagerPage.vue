@@ -765,7 +765,8 @@ watch(
       <span v-if="selectedInfo.apps.length">
         关联应用：{{ selectedInfo.apps.join("、") }}
       </span>
-      <button class="pkg-map-btn" @click="openPkgMapModal">管理关联</button>
+      <!-- package_map 只有 GP 一份：邮件模板页打开的也是它，但下拉框列的是邮件产品，对不上还容易误改 → 邮件页隐藏 -->
+      <button v-if="NS !== 'email'" class="pkg-map-btn" @click="openPkgMapModal">管理关联</button>
 
       <div class="meta-spacer"></div>
 

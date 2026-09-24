@@ -35,6 +35,8 @@ export interface FavoriteReview {
   // 存在收藏记录内部而非独立表——取消收藏即连带删掉备注，不留孤儿数据。
   note?: string;
   noteUpdatedAt?: number;
+  // 标签：存 favTags.ts 里的标签 id，可空（旧记录没有）。取消收藏连带删掉。
+  tags?: string[];
 }
 
 function storeKey(): string {
@@ -96,4 +98,15 @@ export function updateFavoriteReply(reviewId: string, replyText: string, ts: num
   hit.developer_reply = replyText;
   hit.developer_reply_ts = ts;
   saveFavorites(map);
+}
+
+// 标签整组覆盖写：传空数组即清空标签（但不取消收藏）。未收藏返回 false。
+export function setFavoriteTags(reviewId: string, tagIds: string[]): boolean {
+  const map = loadFavorites();
+  const hit = map[reviewId];
+  if (!hit) return false;
+  const ids = Array.from(new Set(tagIds));
+  if (ids.length) hit.tags = ids;
+  else delete hit.tags;
+  return saveFavorites(map);
 }

@@ -9,7 +9,11 @@ import {
   removeFavorite as removeMailFavorite,
   mailFavKey,
   favoritesError as mailFavoritesError,
+  setFavoriteTags as setMailFavoriteTags,
 } from "../utils/mailFavorites";
+import TagPicker from "../components/TagPicker.vue";
+import TagChips from "../components/TagChips.vue";
+import { pkgApps, loadPkgApps, appLabel, appPkgForProduct } from "../utils/appRegistry";
 
 // app 读的是 Apps Script（gmail-sync.gs）同步出来的 Google Sheet。
 // 表的列顺序固定（见 gmail-sync.gs 的 HEADERS）：
@@ -32,6 +36,8 @@ interface MailSource {
   label: string; // 备注（账号邮箱等）
   profileDir?: string; // 用哪个 Chrome profile 打开邮件（目录名；空=系统默认浏览器）
   templateProduct?: string; // 关联的邮件模板产品名
+  // 关联的 app 包名（收藏标签按 app 限定范围用）。undefined = 还没自动推断过；"" = 明确不关联
+  appPkg?: string;
 }
 
 interface TemplateView {
@@ -410,6 +416,7 @@ function toggleFavorite(m: Mail) {
       return;
     }
     favKeys.value.delete(key);
+    delete favTagIds.value[key];
   } else {
     const ok = addMailFavorite({
       ...m,
@@ -427,6 +434,72 @@ function toggleFavorite(m: Mail) {
   }
   // Set 原地增删不触发模板重算，换个引用强制刷新星标
   favKeys.value = new Set(favKeys.value);
+}
+
+// ── 收藏标签（「标签」按钮；勾任一标签即自动收藏，见 docs/handoff-favorite-tags.md）──
+// 已收藏邮件 key → 标签 id。与 favKeys 分开存，旧的收藏逻辑不动。
+const favTagIds = ref<Record<string, string[]>>({});
+function reloadFavTagIds() {
+  const out: Record<string, string[]> = {};
+  for (const [k, f] of Object.entries(loadMailFavorites())) if (f.tags?.length) out[k] = f.tags;
+  favTagIds.value = out;
+}
+reloadFavTagIds();
+watch(
+  () => props.activeOption,
+  (v) => {
+    if (v === "gmail-inbox") reloadFavTagIds();
+  }
+);
+
+// 邮件源「关联 app」：没设过（undefined）的按关联的邮件模板产品名自动推断一次
+// （`video to mp3` ≈ GP 产品 `Video to MP3` → 该包名），推断不出记成 ""，之后只能手动改。
+// package_map 还没读到时先不推断，免得把所有源都记成「不关联」。
+loadPkgApps();
+watch(
+  [sources, pkgApps],
+  () => {
+    if (!pkgApps.value.length) return;
+    for (const s of sources.value) {
+      if (s.appPkg === undefined) s.appPkg = appPkgForProduct(s.templateProduct);
+    }
+  },
+  { deep: true, immediate: true }
+);
+function onAppPkgChange(e: Event) {
+  if (currentSource.value) currentSource.value.appPkg = (e.target as HTMLSelectElement).value;
+}
+const currentAppPkg = computed(() => currentSource.value?.appPkg || "");
+
+function mailTagIds(m: Mail): string[] {
+  return isFavorited(m) ? favTagIds.value[mailFavKey(m)] || [] : [];
+}
+
+function onPickTags(m: Mail, ids: string[]) {
+  const key = mailFavKey(m);
+  if (!key) return;
+  // 未收藏且要打标签 → 先收藏（同 toggleFavorite 的快照口径）；失败则整个放弃
+  if (!favKeys.value.has(key)) {
+    if (!ids.length) return;
+    const ok = addMailFavorite({
+      ...m,
+      _sourceKey: currentSource.value?.key || "",
+      _sourceLabel: currentLabel.value,
+      _sourceTab: currentSource.value?.tab || "",
+      _profileDir: currentSource.value?.profileDir || "",
+      favoritedAt: Date.now(),
+    });
+    if (!ok) {
+      errorMsg.value = mailFavoritesError.value;
+      return;
+    }
+    favKeys.value = new Set([...favKeys.value, key]);
+  }
+  if (!setMailFavoriteTags(key, ids)) {
+    errorMsg.value = mailFavoritesError.value;
+    return;
+  }
+  favTagIds.value = { ...favTagIds.value, [key]: ids };
 }
 
 function openDetail(m: Mail) {
@@ -858,6 +931,30 @@ async function copyAndJumpAi(task: AiMailTask) {
           关联后查看邮件时可一键调出该产品的回复模板
         </span>
       </div>
+
+      <!-- 关联 app：收藏标签按 app 限定范围 -->
+      <div class="form-row profile-row">
+        <label class="form-label">关联 app</label>
+        <select
+          v-if="!adding"
+          :value="currentSource?.appPkg || ''"
+          @change="onAppPkgChange"
+          @focus="loadPkgApps(true)"
+          class="src-select"
+          :disabled="!selectedId"
+        >
+          <option value="">不关联 app</option>
+          <option v-for="a in pkgApps" :key="a.package" :value="a.package">{{ a.display || a.package }}</option>
+          <option
+            v-if="currentSource?.appPkg && !pkgApps.some((a) => a.package === currentSource!.appPkg)"
+            :value="currentSource.appPkg"
+          >{{ appLabel(currentSource.appPkg) }}</option>
+        </select>
+        <span v-else class="profile-hint">添加后按上面选的模板自动匹配，可再手动改</span>
+        <span v-if="!adding" class="profile-hint">
+          打标签时只列「通用 + 该 app」的标签；不关联则列全部
+        </span>
+      </div>
     </section>
 
     <div v-if="errorMsg" class="banner banner-error">{{ errorMsg }}</div>
@@ -887,7 +984,9 @@ async function copyAndJumpAi(task: AiMailTask) {
           <span class="from">{{ m.from || "(未知发件人)" }}</span>
           <span class="ts">{{ m.date }}</span>
           <span v-if="hasAttachment(m)" class="att-dot" :title="m.attachments">📎</span>
+          <TagChips :ids="mailTagIds(m)" />
           <div class="mi-actions">
+            <TagPicker :selected="mailTagIds(m)" :app="currentAppPkg" @change="(ids) => onPickTags(m, ids)" />
             <button
               class="fav-star-btn"
               :class="{ active: isFavorited(m) }"
@@ -1083,6 +1182,8 @@ async function copyAndJumpAi(task: AiMailTask) {
             <span class="ts">{{ selectedMail.date }}</span>
           </div>
           <div class="detail-head-actions">
+            <TagChips :ids="mailTagIds(selectedMail)" />
+            <TagPicker :selected="mailTagIds(selectedMail)" :app="currentAppPkg" @change="(ids) => onPickTags(selectedMail!, ids)" />
             <button
               class="fav-star-btn"
               :class="{ active: isFavorited(selectedMail) }"

@@ -298,3 +298,11 @@ HTML 提取脚本支持 `--info` 列章节目录再挑章节，skill 在真人�
 ## 定时巡检 + 长假：Telegram 报告不是完整存档
 
 `max_items_in_msg` 默认 **5**：每次推送每个区段最多列 5 条正文（还截到 40 字），其余只给「（其余 N 条见 app）」。长假期间要靠 Telegram 回溯全部评论的话，得先把这个值调大 —— 否则真正的完整数据只在本地累积快照里。
+
+## 输入框「回车提交」要排除输入法上屏
+
+中文输入法里按回车是「确认拼音上屏」，`@keydown.enter` 照样会触发 → 直接把拼音字母当内容提交（比如建出一个叫 `shantui` 的标签）。凡是「回车=提交」的输入框都要先判 `e.isComposing || e.keyCode === 229` 再 return。已处理：`TagPicker.vue` / `TagManager.vue`。老页面里其它 `@keydown.enter` 没逐个排查。
+
+## 浮层放在 overflow 容器里会被裁掉
+
+GmailPage / FavoriteMailsPage 的卡片第一行 `.mi-row1` 是 `overflow: hidden`（为了单行截断），详情弹窗是 `overflow-y: auto`。里面的 `position: absolute` 下拉浮层会被裁。`TagPicker` 的做法：`<Teleport to="body">` + `position: fixed` 按按钮 rect 定位，滚动/resize 时直接关闭。以后在卡片里加下拉菜单照抄这个。

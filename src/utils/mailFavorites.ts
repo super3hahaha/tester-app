@@ -38,6 +38,8 @@ export interface FavoriteMail {
   // 存在收藏记录内部而非独立表——取消收藏即连带删掉备注，不留孤儿数据。
   note?: string;
   noteUpdatedAt?: number;
+  // 标签：存 favTags.ts 里的标签 id，可空（旧记录没有）。取消收藏连带删掉。
+  tags?: string[];
 }
 
 // 表里少数行可能没有 messageId（脚本旧版本写的行），退回用邮件链接做键。
@@ -90,5 +92,16 @@ export function setFavoriteNote(key: string, note: string): boolean {
     delete hit.note;
     delete hit.noteUpdatedAt;
   }
+  return saveFavorites(map);
+}
+
+// 标签整组覆盖写：传空数组即清空标签（但不取消收藏）。未收藏返回 false。
+export function setFavoriteTags(key: string, tagIds: string[]): boolean {
+  const map = loadFavorites();
+  const hit = map[key];
+  if (!hit) return false;
+  const ids = Array.from(new Set(tagIds));
+  if (ids.length) hit.tags = ids;
+  else delete hit.tags;
   return saveFavorites(map);
 }

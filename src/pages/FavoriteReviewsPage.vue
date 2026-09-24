@@ -11,8 +11,13 @@ import {
   setFavoriteNote,
   updateFavoriteReply,
   favoritesError,
+  setFavoriteTags,
   type FavoriteReview,
 } from "../utils/reviewFavorites";
+import { passesTagFilter, resolveTags, reloadTags, NO_TAG_FILTER } from "../utils/favTags";
+import TagPicker from "../components/TagPicker.vue";
+import TagChips from "../components/TagChips.vue";
+import TagFilterBar from "../components/TagFilterBar.vue";
 
 const props = defineProps<{ activeOption?: string }>();
 
@@ -46,6 +51,27 @@ const filteredFavorites = computed(() =>
     : favorites.value.filter((r) => r._pkg === activeTab.value)
 );
 
+// ── 标签筛选：叠加在 app tab 之上（先按 app，再按标签，命中任意一个即显示）──
+const selectedTags = ref<string[]>([]);
+const tagFilteredFavorites = computed(() =>
+  filteredFavorites.value.filter((r) => passesTagFilter(r.tags, selectedTags.value))
+);
+// 当前 app tab 下每个标签的条数（含「无标签」）
+const tagCounts = computed(() => {
+  const out: Record<string, number> = { [NO_TAG_FILTER]: 0 };
+  for (const r of filteredFavorites.value) {
+    const live = resolveTags(r.tags);
+    if (!live.length) out[NO_TAG_FILTER]++;
+    for (const t of live) out[t.id] = (out[t.id] || 0) + 1;
+  }
+  return out;
+});
+// 写失败时 picker 勾选状态跟着 r.tags 走，不刷新即回滚；原因由 favoritesError banner 说明
+function onPickTags(r: FavoriteReview, ids: string[]) {
+  if (!setFavoriteTags(r.review_id, ids)) return;
+  loadList();
+}
+
 function loadList() {
   const map = loadFavorites();
   favorites.value = Object.values(map).sort((a, b) => b.favoritedAt - a.favoritedAt);
@@ -68,6 +94,7 @@ function loadConsoleConfig() {
 }
 
 onMounted(() => {
+  reloadTags();
   loadList();
   loadConsoleConfig();
 });
@@ -77,6 +104,7 @@ watch(
   () => props.activeOption,
   (v) => {
     if (v === "review-favorites") {
+      reloadTags();
       loadList();
       loadConsoleConfig();
     }
@@ -506,11 +534,16 @@ async function handleSubmitReply(task: AiTask) {
         >{{ t.label }} <span class="tab-count">{{ t.count }}</span></button>
       </div>
 
+      <TagFilterBar v-model="selectedTags" :counts="tagCounts" :app="activeTab === 'all' ? '' : activeTab" />
+
       <div v-if="filteredFavorites.length === 0" class="empty-state">
         该应用下暂无收藏评论。
       </div>
+      <div v-else-if="tagFilteredFavorites.length === 0" class="empty-state">
+        没有符合所选标签的收藏评论。
+      </div>
       <div v-else class="review-list">
-        <article v-for="r in filteredFavorites" :key="r.review_id" class="review-card">
+        <article v-for="r in tagFilteredFavorites" :key="r.review_id" class="review-card">
           <div class="review-head">
             <span class="app-badge">{{ r._app }}</span>
             <span class="stars" :class="`stars-${r.star_rating}`">{{ starsDisplay(r.star_rating) }}</span>
@@ -539,6 +572,8 @@ async function handleSubmitReply(task: AiTask) {
             <div class="reply-text">{{ r.developer_reply }}</div>
           </div>
           <div class="review-actions">
+            <TagChips class="card-tags" :ids="r.tags" />
+            <TagPicker :selected="r.tags || []" :app="r._pkg" @change="(ids) => onPickTags(r, ids)" />
             <button class="fav-star-btn active" @click="unfavorite(r)" title="取消收藏">★</button>
             <button class="ai-btn" @click="openAiDialog(r)">
               🤖 {{ r.developer_reply ? "AI 重新回复" : "AI 回复" }}
@@ -933,6 +968,9 @@ async function handleSubmitReply(task: AiTask) {
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
+}
+.card-tags {
+  margin-right: auto;
 }
 .review-actions {
   margin-top: 10px;

@@ -9,8 +9,14 @@ import {
   setFavoriteNote,
   mailFavKey,
   favoritesError,
+  setFavoriteTags,
   type FavoriteMail,
 } from "../utils/mailFavorites";
+import { passesTagFilter, resolveTags, reloadTags, NO_TAG_FILTER } from "../utils/favTags";
+import { mailSourceApps, reloadMailSourceApps } from "../utils/appRegistry";
+import TagPicker from "../components/TagPicker.vue";
+import TagChips from "../components/TagChips.vue";
+import TagFilterBar from "../components/TagFilterBar.vue";
 
 const props = defineProps<{ activeOption?: string }>();
 
@@ -45,6 +51,28 @@ const filteredFavorites = computed(() =>
     : favorites.value.filter((m) => m._sourceKey === activeTab.value)
 );
 
+// ── 标签筛选：叠加在邮件源 tab 之上（先按源，再按标签，命中任意一个即显示）──
+const selectedTags = ref<string[]>([]);
+const tagFilteredFavorites = computed(() =>
+  filteredFavorites.value.filter((m) => passesTagFilter(m.tags, selectedTags.value))
+);
+// 标签范围跟邮件源当前的「关联 app」走（读 gmail-sources-v1，不存进收藏快照——改了关联立刻生效）；
+// 源被删了 / 没关联 → ""（不限 app，显示全部标签）
+function mailApp(m: FavoriteMail): string {
+  return mailSourceApps.value[m._sourceKey] || "";
+}
+const filterApp = computed(() => (activeTab.value === "all" ? "" : mailSourceApps.value[activeTab.value] || ""));
+// 当前源 tab 下每个标签的条数（含「无标签」）
+const tagCounts = computed(() => {
+  const out: Record<string, number> = { [NO_TAG_FILTER]: 0 };
+  for (const m of filteredFavorites.value) {
+    const live = resolveTags(m.tags);
+    if (!live.length) out[NO_TAG_FILTER]++;
+    for (const t of live) out[t.id] = (out[t.id] || 0) + 1;
+  }
+  return out;
+});
+
 function loadList() {
   const map = loadFavorites();
   favorites.value = Object.values(map).sort((a, b) => b.favoritedAt - a.favoritedAt);
@@ -54,13 +82,21 @@ function loadList() {
   }
 }
 
-onMounted(loadList);
+onMounted(() => {
+  reloadTags();
+  reloadMailSourceApps();
+  loadList();
+});
 
 // MainPage 用 v-show，组件常驻不重新 mount；从 Gmail 页收藏后切回本页时刷新一次
 watch(
   () => props.activeOption,
   (v) => {
-    if (v === "gmail-favorites") loadList();
+    if (v === "gmail-favorites") {
+      reloadTags();
+      reloadMailSourceApps();
+      loadList();
+    }
   }
 );
 
@@ -129,6 +165,13 @@ function afterNoteChanged(key: string) {
   if (selectedMail.value && mailFavKey(selectedMail.value) === key) {
     selectedMail.value = favorites.value.find((x) => mailFavKey(x) === key) || null;
   }
+}
+// 标签改动与备注同理：重载列表 + 把详情弹窗的引用指到新对象。
+// 写失败时 picker 勾选状态跟着 m.tags 走，不刷新即回滚；原因由 favoritesError banner 说明
+function onPickTags(m: FavoriteMail, ids: string[]) {
+  const key = mailFavKey(m);
+  if (!setFavoriteTags(key, ids)) return;
+  afterNoteChanged(key);
 }
 // 保存失败时保持编辑态不关（用户刚写的内容还在 noteDraft 里，别让它凭空消失）
 function saveNote(m: FavoriteMail) {
@@ -434,19 +477,26 @@ async function copyAndJumpAi(task: AiMailTask) {
         >{{ t.label }} <span class="tab-count">{{ t.count }}</span></button>
       </div>
 
+      <TagFilterBar v-model="selectedTags" :counts="tagCounts" :app="filterApp" />
+
       <div v-if="filteredFavorites.length === 0" class="empty-state">
         该邮件源下暂无收藏邮件。
       </div>
+      <div v-else-if="tagFilteredFavorites.length === 0" class="empty-state">
+        没有符合所选标签的收藏邮件。
+      </div>
       <!-- 与 Gmail 页同款紧凑三行卡片：发件人+日期 / 主题 / 机翻中文（单行截断），全文进详情弹窗 -->
       <div v-else class="mail-list">
-        <article v-for="m in filteredFavorites" :key="mailFavKey(m)" class="mail-item">
+        <article v-for="m in tagFilteredFavorites" :key="mailFavKey(m)" class="mail-item">
           <div class="mi-row1">
             <span v-if="activeTab === 'all'" class="src-badge">{{ sourceName(m) }}</span>
             <span class="from">{{ m.from || "(未知发件人)" }}</span>
             <span class="ts">{{ m.date }}</span>
             <span v-if="hasAttachment(m)" class="att-dot" :title="m.attachments">📎</span>
             <span class="fav-ts">收藏于 {{ formatFavTs(m.favoritedAt) }}</span>
+            <TagChips :ids="m.tags" />
             <div class="mi-actions">
+              <TagPicker :selected="m.tags || []" :app="mailApp(m)" @change="(ids) => onPickTags(m, ids)" />
               <button class="fav-star-btn active" @click="unfavorite(m)" title="取消收藏">★</button>
               <button class="ai-btn" @click="openAiDialog(m)" title="AI 生成回复草稿">✨ AI</button>
               <button class="detail-btn" @click="openDetail(m)">详情</button>
@@ -503,6 +553,8 @@ async function copyAndJumpAi(task: AiMailTask) {
             <span class="ts">{{ selectedMail.date }}</span>
           </div>
           <div class="detail-head-actions">
+            <TagChips :ids="selectedMail.tags" />
+            <TagPicker :selected="selectedMail.tags || []" :app="mailApp(selectedMail)" @change="(ids) => onPickTags(selectedMail!, ids)" />
             <button
               class="fav-star-btn active"
               @click="unfavoriteFromDetail(selectedMail)"

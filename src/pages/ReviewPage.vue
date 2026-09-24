@@ -16,7 +16,9 @@ import {
   matchesReplyState as replyStateMatches,
 } from "../utils/reviewsStore";
 import { loadFavIds } from "../utils/templateFavorites";
-import { loadFavorites, addFavorite, removeFavorite, updateFavoriteReply, favoritesError } from "../utils/reviewFavorites";
+import { loadFavorites, addFavorite, removeFavorite, updateFavoriteReply, favoritesError, setFavoriteTags } from "../utils/reviewFavorites";
+import TagPicker from "../components/TagPicker.vue";
+import TagChips from "../components/TagChips.vue";
 import {
   isRead,
   markRead,
@@ -672,6 +674,7 @@ function toggleFavorite(r: TaggedReview) {
       return;
     }
     favIds.value.delete(r.review_id);
+    delete favTagIds.value[r.review_id];
   } else {
     if (!addFavorite({ ...r, favoritedAt: Date.now() })) {
       errorMsg.value = favoritesError.value;
@@ -679,6 +682,40 @@ function toggleFavorite(r: TaggedReview) {
     }
     favIds.value.add(r.review_id);
   }
+}
+
+// ── 收藏标签（卡片「标签」按钮；勾任一标签即自动收藏，见 docs/handoff-favorite-tags.md）──
+// 已收藏记录的 review_id → 标签 id。与 favIds 分开存，旧的收藏逻辑不动。
+const favTagIds = ref<Record<string, string[]>>({});
+function reloadFavTagIds() {
+  const map = loadFavorites();
+  const out: Record<string, string[]> = {};
+  for (const [id, f] of Object.entries(map)) if (f.tags?.length) out[id] = f.tags;
+  favTagIds.value = out;
+}
+onMounted(reloadFavTagIds);
+watch(
+  () => props.activeOption,
+  (v) => {
+    if (v === "review-play") reloadFavTagIds();
+  }
+);
+
+function onPickTags(r: TaggedReview, ids: string[]) {
+  // 未收藏且要打标签 → 先收藏；收藏失败就整个放弃（不动视图）
+  if (!favIds.value.has(r.review_id)) {
+    if (!ids.length) return;
+    if (!addFavorite({ ...r, favoritedAt: Date.now() })) {
+      errorMsg.value = favoritesError.value;
+      return;
+    }
+    favIds.value.add(r.review_id);
+  }
+  if (!setFavoriteTags(r.review_id, ids)) {
+    errorMsg.value = favoritesError.value;
+    return;
+  }
+  favTagIds.value = { ...favTagIds.value, [r.review_id]: ids };
 }
 
 // ── AI 回复 ──────────────────────────────────────────────────────────────
@@ -1600,6 +1637,13 @@ async function submitAnReply(task: AnTask) {
           <div class="reply-text">{{ r.developer_reply }}</div>
         </div>
         <div class="review-actions">
+          <TagChips v-if="isFavorited(r)" class="card-tags" :ids="favTagIds[r.review_id]" />
+          <TagPicker
+            class="card-tag-picker"
+            :selected="isFavorited(r) ? favTagIds[r.review_id] || [] : []"
+            :app="r._pkg"
+            @change="(ids) => onPickTags(r, ids)"
+          />
           <button
             class="fav-star-btn"
             :class="{ active: isFavorited(r) }"
@@ -2570,6 +2614,13 @@ async function submitAnReply(task: AnTask) {
   background: #f5f5fa;
   border-color: #cbd5e0;
   color: #2d3748;
+}
+.card-tags {
+  margin-right: auto;
+  align-self: center;
+}
+.card-tag-picker {
+  margin-right: 4px;
 }
 .fav-star-btn {
   border: none;
