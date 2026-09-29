@@ -67,3 +67,7 @@ interface FavTag { id: string; name: string; color: string; createdAt: number }
 落地：新增 `utils/appRegistry.ts`（pkgApps/loadPkgApps/appLabel/appPkgForProduct/mailSourceApps/reloadMailSourceApps）；
 `favTags.ts` 加 addTag(name, apps)/setTagApps/isGeneralTag/tagsForApp/groupTags；TagPicker/TagFilterBar 加 `app` prop；
 TagManager 每行加范围按钮 + 展开面板（通用单选 / app 多选）。UI 在 dev 页面挂组件实测过，**四个真实页面待真机验证**。
+
+## 七、批量回复页补齐（2026-09-28）
+
+BatchReplyPage 候选卡头部（「已读」后）加 TagChips + TagPicker + ☆ 收藏，与 ReviewPage 同一存储、同一套失败不动视图逻辑；错误走 overallError。两页各自持有 favIds/favTagIds，靠 activeOption 切回时重读同步。

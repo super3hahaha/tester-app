@@ -112,6 +112,7 @@ pub struct ClaudeState {
     pub session_id: Mutex<Option<String>>,
     pub running: Mutex<bool>,
     pub child_pid: Mutex<Option<u32>>,
+    pub codex_dirs: Mutex<Vec<String>>,
 }
 
 impl ClaudeState {
@@ -120,6 +121,7 @@ impl ClaudeState {
             session_id: Mutex::new(None),
             running: Mutex::new(false),
             child_pid: Mutex::new(None),
+            codex_dirs: Mutex::new(Vec::new()),
         }
     }
 }
@@ -489,6 +491,37 @@ async fn run_claude_and_stream(
 }
 
 
+async fn run_codex_task(
+    prompt: &str,
+    opts: crate::cli::Options,
+    app: &AppHandle,
+    state: &State<'_, ClaudeState>,
+) -> Result<(), String> {
+    {
+        let mut running = state.running.lock().unwrap();
+        if *running { return Err("已有生成任务在运行".into()); }
+        *running = true;
+    }
+    let result = crate::cli::run(prompt, opts, app, "claude-log",
+        |pid| *state.child_pid.lock().unwrap() = pid,
+        || *state.running.lock().unwrap()).await;
+    *state.child_pid.lock().unwrap() = None;
+    *state.running.lock().unwrap() = false;
+    match result {
+        Ok(output) => {
+            if let Some(id) = output.session_id {
+                *state.session_id.lock().unwrap() = Some(format!("codex:{}", id));
+            }
+            emit_log(app, "Codex 生成完成，可继续补充要求。", "result", true);
+            Ok(())
+        }
+        Err(e) => {
+            emit_log(app, &e, if e == "CANCELLED" { "info" } else { "error" }, true);
+            Err(e)
+        }
+    }
+}
+
 fn data_dir() -> PathBuf {
     dirs::home_dir().unwrap().join(".tester-app")
 }
@@ -504,6 +537,7 @@ pub async fn run_claude_task(
     app: AppHandle,
     state: State<'_, ClaudeState>,
 ) -> Result<(), String> {
+    if *state.running.lock().unwrap() { return Err("已有生成任务在运行".into()); }
     *state.session_id.lock().unwrap() = None;
 
     let mut args = vec![
@@ -600,6 +634,20 @@ pub async fn run_claude_task(
         output_path
     ));
 
+    let cfg = crate::model_config::load();
+    if cfg.cli_engine == "codex" {
+        let prompt = crate::cli::skill_prompt("test-case-generator", &prompt)?;
+        let mut opts = crate::cli::Options::from_config(&cfg);
+        opts.writable_dirs = dirs.iter().cloned().collect();
+        // Skill helpers may create their own venv/cache next to scripts.
+        opts.writable_dirs.push(dirs::home_dir().ok_or("找不到用户目录")?
+            .join(".claude/skills/test-case-generator").to_string_lossy().into_owned());
+        opts.images = pptx_paths;
+        opts.persist = true;
+        *state.codex_dirs.lock().unwrap() = opts.writable_dirs.clone();
+        return run_codex_task(&prompt, opts, &app, &state).await;
+    }
+
     run_claude_and_stream(args, Some(prompt), app, &state).await
 }
 
@@ -617,6 +665,20 @@ pub async fn send_claude_input(
         .unwrap()
         .clone()
         .ok_or("No active Claude session")?;
+
+    let cfg = crate::model_config::load();
+    let codex_session = session_id.strip_prefix("codex:");
+    if (cfg.cli_engine == "codex") != codex_session.is_some() {
+        return Err("全局 AI 引擎已切换，请重新生成后再继续对话。".into());
+    }
+    if let Some(id) = codex_session {
+        let mut opts = crate::cli::Options::from_config(&cfg);
+        opts.resume = Some(id.to_owned());
+        opts.persist = true;
+        opts.writable_dirs = state.codex_dirs.lock().unwrap().clone();
+        opts.images = image_paths.unwrap_or_default();
+        return run_codex_task(&input, opts, &app, &state).await;
+    }
 
     let mut args = vec![
         "--print".to_string(),
@@ -649,6 +711,7 @@ pub async fn send_claude_input(
 
 #[tauri::command]
 pub async fn stop_claude(state: State<'_, ClaudeState>) -> Result<(), String> {
+    *state.running.lock().unwrap() = false;
     let pid = state.child_pid.lock().unwrap().take();
     let pid = match pid {
         Some(p) => p,

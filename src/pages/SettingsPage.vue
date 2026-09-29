@@ -97,6 +97,8 @@ interface ModelConfig {
   translate: string;
   testcase: string;
   github_token: string;
+  cli_engine: "claude" | "codex";
+  codex_model: string;
 }
 
 const modelConfig = ref<ModelConfig>({
@@ -105,7 +107,53 @@ const modelConfig = ref<ModelConfig>({
   translate: "claude-haiku-4-5",
   testcase: "claude-sonnet-4-6",
   github_token: "",
+  cli_engine: "claude",
+  codex_model: "",
 });
+interface CodexAccountInfo {
+  installed: boolean;
+  cli_path: string | null;
+  logged_in: boolean;
+  error: string | null;
+}
+interface CodexModel {
+  model: string;
+  displayName: string;
+}
+const codexModels = ref<CodexModel[]>([]);
+const codexModelsLoading = ref(false);
+const codexModelsError = ref("");
+const unlistedCodexModel = computed(() => modelConfig.value.codex_model &&
+  !codexModels.value.some(m => m.model === modelConfig.value.codex_model));
+async function refreshCodexModels() {
+  if (codexModelsLoading.value) return;
+  codexModelsLoading.value = true;
+  codexModelsError.value = "";
+  try {
+    codexModels.value = await invoke<CodexModel[]>("get_codex_models");
+    if (!codexModels.value.length) codexModelsError.value = "Codex 暂未返回可选模型，可使用默认模型或稍后刷新。";
+  } catch (e) {
+    codexModelsError.value = String(e);
+  } finally {
+    codexModelsLoading.value = false;
+  }
+}
+const codexInfo = ref<CodexAccountInfo | null>(null);
+const codexLoading = ref(false);
+const codexError = ref("");
+async function refreshCodex() {
+  codexLoading.value = true;
+  codexError.value = "";
+  try {
+    codexInfo.value = await invoke<CodexAccountInfo>("get_codex_account");
+    if (codexInfo.value.installed) await refreshCodexModels();
+  } catch (e) {
+    codexInfo.value = null;
+    codexError.value = String(e);
+  } finally {
+    codexLoading.value = false;
+  }
+}
 const modelSaving = ref(false);
 const modelMessage = ref("");
 
@@ -168,6 +216,7 @@ const claudeLoginCommand = computed(() => {
 onMounted(() => {
   refreshCacheSize();
   refreshClaude();
+  refreshCodex();
   refreshSkillStatuses();
   loadModelConfig();
   getVersion().then((v) => (appVersion.value = v)).catch(() => {});
@@ -186,7 +235,7 @@ async function saveModelConfig() {
   modelMessage.value = "";
   try {
     await invoke("save_model_config", { config: modelConfig.value });
-    modelMessage.value = "已保存";
+    modelMessage.value = "已保存，新的 AI 任务将使用所选引擎";
     setTimeout(() => { modelMessage.value = ""; }, 2000);
   } catch (e: any) {
     modelMessage.value = "保存失败：" + String(e);
@@ -294,7 +343,7 @@ async function copyText(text: string) {
     <div class="section">
       <div class="section-title">Claude CLI</div>
       <div class="section-desc">
-        App 通过本机 Claude CLI 调用模型。这里展示当前 CLI 的安装与登录状态。
+        选择 Claude 时，App 使用这里检测到的本机 CLI 和登录账号。
       </div>
 
       <!-- Status banner -->
@@ -375,32 +424,77 @@ async function copyText(text: string) {
     <!-- 模型配置 -->
     <div class="section">
       <div class="section-title">模型配置</div>
-      <div class="section-desc">为各功能选择调用的 Claude 模型。Haiku 更快更省额度，Sonnet 质量更高。</div>
+      <div class="section-desc">全局切换所有 AI 功能的调用引擎，包括回复、分析、翻译、用例生成和知识提炼。保存后对新任务生效，运行中的任务不受影响。</div>
 
       <div class="model-row">
-        <span class="model-label">回复生成</span>
-        <select v-model="modelConfig.reply" class="model-select">
-          <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+        <label class="model-label" for="cli-engine">全局 AI 引擎</label>
+        <select id="cli-engine" v-model="modelConfig.cli_engine" class="model-select" :disabled="modelSaving">
+          <option value="claude">Claude CLI</option>
+          <option value="codex">Codex CLI</option>
         </select>
       </div>
-      <div class="model-row">
-        <span class="model-label">评论分析</span>
-        <select v-model="modelConfig.analysis" class="model-select">
-          <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
-        </select>
-      </div>
-      <div class="model-row">
-        <span class="model-label">模板翻译</span>
-        <select v-model="modelConfig.translate" class="model-select">
-          <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
-        </select>
-      </div>
-      <div class="model-row">
-        <span class="model-label">用例生成</span>
-        <select v-model="modelConfig.testcase" class="model-select">
-          <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
-        </select>
-      </div>
+      <template v-if="modelConfig.cli_engine === 'codex'">
+        <div class="model-row">
+          <label class="model-label" for="codex-model">Codex 模型</label>
+          <select id="codex-model" v-model="modelConfig.codex_model" class="model-select" :disabled="modelSaving">
+            <option value="">使用 Codex 默认模型</option>
+            <option v-if="unlistedCodexModel" :value="modelConfig.codex_model">{{ modelConfig.codex_model }}（当前配置）</option>
+            <option v-for="m in codexModels" :key="m.model" :value="m.model">{{ m.displayName || m.model }}</option>
+          </select>
+        </div>
+        <div class="claude-actions">
+          <button class="refresh-btn" :disabled="codexModelsLoading || codexLoading" @click="refreshCodexModels">
+            {{ codexModelsLoading ? "正在读取模型…" : "刷新模型列表" }}
+          </button>
+        </div>
+        <div v-if="codexModelsError" class="section-desc" role="status">{{ codexModelsError }}</div>
+        <div class="section-desc">所有 AI 功能使用同一个 Codex 模型。无需在 App 中填写 API Key，沿用本机 Codex 的登录和配置。</div>
+        <div class="claude-status" :class="codexInfo?.logged_in ? 'ok' : 'warn'">
+          <span v-if="codexLoading">正在检测 Codex CLI…</span>
+          <span v-else-if="codexError">检测失败：{{ codexError }}</span>
+          <span v-else-if="codexInfo?.error">{{ codexInfo.error }}</span>
+          <span v-else-if="!codexInfo?.installed">未检测到 Codex CLI，请先安装并登录。</span>
+          <span v-else-if="!codexInfo.logged_in">Codex CLI 已安装，请先在终端登录。</span>
+          <span v-else>Codex CLI 已安装、已登录</span>
+        </div>
+        <div v-if="codexInfo?.cli_path" class="claude-detail">
+          <code class="detail-value">{{ codexInfo.cli_path }}</code>
+        </div>
+        <div v-if="!codexLoading && !codexInfo?.logged_in" class="section-desc">
+          <div v-if="!codexInfo?.installed"><code>npm install -g @openai/codex</code></div>
+          <code>codex login</code>
+        </div>
+        <div class="claude-actions">
+          <button class="refresh-btn" :disabled="codexLoading" @click="refreshCodex">重新检测 Codex</button>
+        </div>
+      </template>
+      <template v-else>
+        <div class="model-row">
+          <span class="model-label">回复生成</span>
+          <select v-model="modelConfig.reply" class="model-select">
+            <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+          </select>
+        </div>
+        <div class="model-row">
+          <span class="model-label">评论分析</span>
+          <select v-model="modelConfig.analysis" class="model-select">
+            <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+          </select>
+        </div>
+        <div class="model-row">
+          <span class="model-label">模板翻译</span>
+          <select v-model="modelConfig.translate" class="model-select">
+            <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+          </select>
+        </div>
+        <div class="model-row">
+          <span class="model-label">用例生成</span>
+          <select v-model="modelConfig.testcase" class="model-select">
+            <option v-for="o in MODEL_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+          </select>
+        </div>
+
+      </template>
 
       <div class="model-actions">
         <button class="sync-btn" @click="saveModelConfig" :disabled="modelSaving">

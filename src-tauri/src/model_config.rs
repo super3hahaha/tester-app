@@ -1,10 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// 默认 CLI 引擎。直出类功能（单条回复 / 评论分析 / 邮件回复 / 模板翻译）按此值
-/// 路由到 Claude CLI 或 Codex CLI；skill 依赖类（测试用例生成、批量模板匹配回复）
-/// 永远走 Claude CLI，不受此项影响——但 `reply`/`testcase` 等模型 id 字段仍然生效
-/// （批量回复复用 `reply` 字段，与单条 AI 回复同一份配置）。
+/// 全局 CLI 引擎，覆盖所有 AI 功能；旧配置默认 Claude。
 fn default_cli_engine() -> String {
     "claude".to_string()
 }
@@ -24,10 +21,10 @@ pub struct ModelConfig {
     pub testcase: String,
     #[serde(default)]
     pub github_token: String,
-    /// 直出类功能用哪个 CLI 引擎："claude" | "codex"。
+    /// 全局使用哪个 CLI 引擎："claude" | "codex"。
     #[serde(default = "default_cli_engine")]
     pub cli_engine: String,
-    /// engine=codex 时给 codex exec 传的模型（如 gpt-5 / o3）；空串=用 Codex 自身默认。
+    /// engine=codex 时给 codex exec 传的模型；空串=用 Codex 自身默认。
     #[serde(default)]
     pub codex_model: String,
 }
@@ -67,9 +64,37 @@ pub fn get_model_config() -> ModelConfig {
 }
 
 #[tauri::command]
-pub fn save_model_config(config: ModelConfig) -> Result<(), String> {
+pub fn save_model_config(mut config: ModelConfig) -> Result<(), String> {
+    if !matches!(config.cli_engine.as_str(), "claude" | "codex") {
+        return Err("不支持的 AI 引擎，请选择 Claude 或 Codex".into());
+    }
+    config.codex_model = config.codex_model.trim().to_string();
     let path = config_path();
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn old_configs_default_to_claude_and_new_fields_roundtrip() {
+        let old = r#"{"reply":"sonnet","analysis":"sonnet","translate":"haiku"}"#;
+        let mut cfg: ModelConfig = serde_json::from_str(old).unwrap();
+        assert_eq!(cfg.cli_engine, "claude");
+        assert!(cfg.codex_model.is_empty());
+        cfg.cli_engine = "codex".into();
+        cfg.codex_model = "custom-model".into();
+        let restored: ModelConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(restored.cli_engine, "codex");
+        assert_eq!(restored.codex_model, "custom-model");
+        assert_eq!(restored.reply, "sonnet");
+    }
+
+    #[test]
+    fn invalid_engine_is_rejected_before_writing() {
+        let cfg = ModelConfig { cli_engine: "unknown".into(), ..Default::default() };
+        assert!(save_model_config(cfg).is_err());
+    }
 }

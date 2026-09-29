@@ -357,6 +357,18 @@ async fn generate_single_reply_inner(
     let prompt =
         build_gen_prompt(&review, &product, &package_name, &knowledge, instruction.trim(), &language);
 
+    let cfg = crate::model_config::load();
+    if cfg.cli_engine == "codex" {
+        let raw = crate::cli::run(&prompt, crate::cli::Options::from_config(&cfg), &app, "reply-log",
+            |pid| *app.state::<ReplyState>().child_pid.lock().unwrap() = pid,
+            || *app.state::<ReplyState>().running.lock().unwrap()).await?.text;
+        let json_str = extract_json_array(&raw).ok_or("Codex 输出里找不到 JSON 数组")?;
+        let candidates = serde_json::from_str(json_str)
+            .or_else(|_| serde_json::from_str(&crate::json_repair::repair_json(json_str)))
+            .map_err(|e| format!("候选不是合法 JSON：{}", e))?;
+        return Ok(GenReplyResult { candidates, usage: None });
+    }
+
     let claude_path = find_claude()
         .ok_or("Claude CLI not found. Please install it: npm install -g @anthropic-ai/claude-code")?;
 
@@ -565,6 +577,20 @@ async fn run_reply_skill_inner(
     // skill failure can't be masked by a leftover from a previous run.
     if let Some(p) = find_candidates_file(&dir, &stem) {
         let _ = std::fs::remove_file(p);
+    }
+
+    let cfg = crate::model_config::load();
+    if cfg.cli_engine == "codex" {
+        let prompt = crate::cli::skill_prompt("review-reply", &format!("输入 JSON 文件：{}", input_path.display()))?;
+        let mut opts = crate::cli::Options::from_config(&cfg);
+        opts.writable_dirs.push(dir.to_string_lossy().into_owned());
+        crate::cli::run(&prompt, opts, &app, "reply-log",
+            |pid| *app.state::<ReplyState>().child_pid.lock().unwrap() = pid,
+            || *app.state::<ReplyState>().running.lock().unwrap()).await?;
+        let candidates_path = find_candidates_file(&dir, &stem).ok_or("Codex 未生成 candidates.json 文件，请查看日志")?;
+        let content = std::fs::read_to_string(candidates_path).map_err(|e| e.to_string())?;
+        let output = serde_json::from_str(&content).map_err(|e| format!("候选文件不是合法 JSON：{}", e))?;
+        return Ok(ReplyResult { output, usage: None });
     }
 
     let claude_path = find_claude()
@@ -818,6 +844,26 @@ async fn generate_mail_reply_inner(
     app: AppHandle,
 ) -> Result<MailReplyResult, String> {
     let prompt = build_mail_reply_prompt(body.trim(), instruction.trim(), &language);
+
+    let cfg = crate::model_config::load();
+    if cfg.cli_engine == "codex" {
+        let raw = crate::cli::run(&prompt, crate::cli::Options::from_config(&cfg), &app, "reply-log",
+            |pid| *app.state::<ReplyState>().child_pid.lock().unwrap() = pid,
+            || *app.state::<ReplyState>().running.lock().unwrap()).await?.text;
+        let json_str = extract_json_object(&raw)
+            .ok_or_else(|| format!("模型输出里找不到 JSON 对象：{}", raw.chars().take(300).collect::<String>()))?;
+        let obj: serde_json::Value = serde_json::from_str(json_str)
+            .or_else(|_| serde_json::from_str(&crate::json_repair::repair_json(json_str)))
+            .map_err(|e| format!("回复不是合法 JSON：{}", e))?;
+
+        let language_out = obj.get("language").and_then(|v| v.as_str()).unwrap_or(&language).to_string();
+        let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let text_zh = obj.get("text_zh").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let char_count = obj.get("char_count").and_then(|v| v.as_i64()).unwrap_or(text.chars().count() as i64);
+        let usage = None;
+
+        return Ok(MailReplyResult { language: language_out, text, text_zh, char_count, usage });
+    }
 
     let claude_path = find_claude()
         .ok_or("Claude CLI not found. Please install it: npm install -g @anthropic-ai/claude-code")?;

@@ -2,6 +2,7 @@ mod analysis;
 mod auth;
 mod chrome;
 mod claude;
+mod cli;
 mod compare;
 mod feedback;
 mod json_repair;
@@ -73,6 +74,8 @@ pub fn run() {
             claude::get_claude_status,
             claude::stop_claude,
             claude::get_claude_account,
+            cli::get_codex_account,
+            cli::get_codex_models,
             compare::export_sheet_html,
             compare::run_diff_skill,
             compare::open_in_chrome,

@@ -306,3 +306,11 @@ HTML 提取脚本支持 `--info` 列章节目录再挑章节，skill 在真人�
 ## 浮层放在 overflow 容器里会被裁掉
 
 GmailPage / FavoriteMailsPage 的卡片第一行 `.mi-row1` 是 `overflow: hidden`（为了单行截断），详情弹窗是 `overflow-y: auto`。里面的 `position: absolute` 下拉浮层会被裁。`TagPicker` 的做法：`<Teleport to="body">` + `position: fixed` 按按钮 rect 定位，滚动/resize 时直接关闭。以后在卡片里加下拉菜单照抄这个。
+
+## Codex 非交互接入
+
+- 普通任务 `--ephemeral`，需续聊的用例任务不能加；续聊用 `exec resume`，不能混用 Claude 的 session ID。exec 的 sandbox/add-dir 参数放在 resume 子命令之前。
+- Codex 登录凭证可能在 Keychain 或 CODEX_HOME；不要用 `auth.json` 文件存在与否判断，调用 `codex login status`（有超时）。
+- stdin 大输入和 stderr 大输出要并发 drain；仅等待 child 再读管道会死锁。最终输出文件名需每次唯一，否则多功能并行生成可能互串。
+- `~/.claude/skills` 只是本 App 的共享 skill 存储位置，Codex 不需要安装 Claude CLI；缺 skill 则去设置更新。skill 的相对资源路径必须绑定其目录。
+- skill 模式有沙箱：只授予本次任务目录。脚本如果需要在别处安装依赖会明确失败，不能把它当作成功产物。

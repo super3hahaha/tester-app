@@ -223,8 +223,10 @@ async fn translate_inner(
     );
     emit_progress(&app, total_units, 0);
 
-    let claude_path = find_claude()
-        .ok_or("未找到 Claude CLI，请先安装：npm install -g @anthropic-ai/claude-code")?;
+    let cfg = crate::model_config::load();
+    let claude_path = if cfg.cli_engine == "codex" { String::new() } else {
+        find_claude().ok_or("未找到 Claude CLI，请先安装：npm install -g @anthropic-ai/claude-code")?
+    };
     let model = model.filter(|s| !s.trim().is_empty());
 
     let mut done_templates = 0usize;
@@ -243,7 +245,7 @@ async fn translate_inner(
         );
 
         let updates =
-            translate_one_batch(&claude_path, &channel, chunk, model.as_deref(), &app).await?;
+            translate_one_batch(&claude_path, &channel, chunk, model.as_deref(), &app, &cfg).await?;
 
         // 增量写回：这一批立刻落盘，取消/失败也保住已完成的。
         crate::templates::apply_translations(&product, &ns, &updates)?;
@@ -447,7 +449,13 @@ async fn run_claude_raw(
     prompt: &str,
     model: Option<&str>,
     app: &AppHandle,
+    cfg: &crate::model_config::ModelConfig,
 ) -> Result<String, String> {
+    if cfg.cli_engine == "codex" {
+        return Ok(crate::cli::run(prompt, crate::cli::Options::from_config(cfg), &app, "translate-log",
+            |pid| *app.state::<TranslateState>().child_pid.lock().unwrap() = pid,
+            || *app.state::<TranslateState>().running.lock().unwrap()).await?.text);
+    }
     let mut args = vec![
         "--print".to_string(),
         "--verbose".to_string(),
@@ -583,8 +591,9 @@ async fn translate_one_batch(
     chunk: &[Job],
     model: Option<&str>,
     app: &AppHandle,
+    cfg: &crate::model_config::ModelConfig,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>, String> {
-    let raw = run_claude_raw(claude_path, &build_prompt(channel, chunk), model, app).await?;
+    let raw = run_claude_raw(claude_path, &build_prompt(channel, chunk), model, app, cfg).await?;
     let mut updates = parse_translations(&raw)?;
 
     // gp 渠道：硬把关 350 字符。超长的发一次压缩调用改写到限内。
@@ -597,7 +606,7 @@ async fn translate_one_batch(
                 "info",
                 false,
             );
-            match run_claude_raw(claude_path, &build_compress_prompt(&over, GP_LIMIT), model, app)
+            match run_claude_raw(claude_path, &build_compress_prompt(&over, GP_LIMIT), model, app, cfg)
                 .await
             {
                 Ok(raw2) => {

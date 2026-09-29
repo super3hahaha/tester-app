@@ -318,6 +318,7 @@ fn build_distill_prompt(
 /// 走 `claude --print stream-json`，收集最终文本返回（参考 reply.rs::generate_single_reply）。
 #[tauri::command]
 pub async fn kb_ai_distill(
+    app: tauri::AppHandle,
     image_paths: Vec<String>,
     note: String,
     existing_md: String,
@@ -325,6 +326,13 @@ pub async fn kb_ai_distill(
     model: Option<String>,
 ) -> Result<String, String> {
     let prompt = build_distill_prompt(&image_paths, &note, &existing_md, is_product);
+
+    let cfg = crate::model_config::load();
+    if cfg.cli_engine == "codex" {
+        let mut opts = crate::cli::Options::from_config(&cfg);
+        opts.images = image_paths.clone();
+        return Ok(crate::cli::run(&prompt, opts, &app, "knowledge-log", |_| {}, || true).await?.text);
+    }
 
     let claude_path = crate::claude::find_claude()
         .ok_or("未找到 Claude CLI，请先安装：npm install -g @anthropic-ai/claude-code")?;

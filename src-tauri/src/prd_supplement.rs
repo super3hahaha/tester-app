@@ -155,9 +155,6 @@ async fn run_inner(
     let gen_dir = generation_dir(&app_name, &version, &generation)?;
     std::fs::create_dir_all(&gen_dir).map_err(|e| format!("创建目录失败：{}", e))?;
 
-    let claude_path = find_claude()
-        .ok_or("未找到 Claude CLI，请先安装：npm install -g @anthropic-ai/claude-code")?;
-
     let mut dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     dirs.insert(gen_dir.to_string_lossy().to_string());
     for p in &prd_image_paths {
@@ -234,6 +231,25 @@ python3 \"{}/scripts/extract_html.py\" --input \"{}\" --outdir \"{}\"（Windows 
         SUPPLEMENT_FILE,
         gen_dir.to_string_lossy()
     ));
+
+    let cfg = crate::model_config::load();
+    if cfg.cli_engine == "codex" {
+        let prompt = crate::cli::skill_prompt("prd-risk-profiler", &prompt)?;
+        let mut opts = crate::cli::Options::from_config(&cfg);
+        opts.writable_dirs = dirs.iter().cloned().collect();
+        opts.images = prd_image_paths.clone();
+        let output = crate::cli::run(&prompt, opts, &app, "prd-supplement-log",
+            |pid| *app.state::<PrdSupplementState>().child_pid.lock().unwrap() = pid,
+            || *app.state::<PrdSupplementState>().running.lock().unwrap()).await?;
+        let _ = output;
+        if !gen_dir.join(RISK_REPORT_FILE).is_file() || !gen_dir.join(SUPPLEMENT_FILE).is_file() {
+            return Err("Codex 未按约定路径生成风险分析和补充测试点文件，请查看日志".into());
+        }
+        return Ok(generation);
+    }
+
+    let claude_path = find_claude()
+        .ok_or("未找到 Claude CLI，请先安装：npm install -g @anthropic-ai/claude-code")?;
 
     emit_log(&app, &format!("$ claude {} '/prd-risk-profiler ...'", args.join(" ")), "info", false);
 

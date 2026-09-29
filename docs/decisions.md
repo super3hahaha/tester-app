@@ -240,3 +240,12 @@
 - 邮件本身没有 app 信息。可选路径：邮件源 → 邮件模板产品 → GP 模板产品 → 包名。**没采用**：两套模板库（`templates/` 与 `email-templates/`）产品名只是大小写不同的「约定」，改个名就断；邮件源可以不配模板；「纯生成」app（product=null，如 Video Player）根本没有产品可对。
 - 采用：邮件源加 `appPkg`，模板链只用来**首次自动推断**（undefined 才推），之后以用户手选为准。
 - 收藏邮件不快照 appPkg，实时按 `_sourceKey` 查源 —— 用户改关联后老收藏立即跟着变。
+
+## 2026-09-28：CLI 引擎按全局配置切换
+
+- 用户本次明确要求全局切换，替代历史「只接直出、skill 固定 Claude」方案；所有 AI 入口统一读 `cli_engine`，默认 Claude 保持兼容。以独立 Codex 适配器和提前返回接入，不重写 Claude 执行器。
+- 两引擎共用现有 skill 指令与资源。Codex 显式内联 SKILL.md 和资源根目录，避免再维护一套业务规则。
+- 一次任务持有配置快照，多批翻译不能中途切引擎；会话 ID 带 Codex 前缀，跨引擎续聊报错并要求新建生成。
+- `login status` 是登录态来源，避免猜测 auth.json 的存储方式；Codex 最终文本使用独立输出文件，JSONL 只用于进度和 session ID。
+
+- Codex 模型选择使用 CLI 的 `model/list` 协议实时发现，而不硬编码名称或读取内部 models_cache.json；按返回清单分页、隐藏模型过滤，获取失败保留用户已有配置。

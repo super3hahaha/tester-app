@@ -304,6 +304,18 @@ async fn generate_analysis_inner(
 
     let prompt = build_analysis_prompt(&review, &product, &package_name, &knowledge, &language);
 
+    let cfg = crate::model_config::load();
+    if cfg.cli_engine == "codex" {
+        let raw = crate::cli::run(&prompt, crate::cli::Options::from_config(&cfg), &app, "analysis-log",
+            |pid| *app.state::<AnalysisState>().child_pid.lock().unwrap() = pid,
+            || *app.state::<AnalysisState>().running.lock().unwrap()).await?.text;
+        let json_str = extract_json_object(&raw).ok_or("Codex 输出里找不到 JSON 对象")?;
+        let analysis = serde_json::from_str(json_str)
+            .or_else(|_| serde_json::from_str(&crate::json_repair::repair_json(json_str)))
+            .map_err(|e| format!("分析结果不是合法 JSON：{}", e))?;
+        return Ok(AnalysisResult { analysis, usage: None });
+    }
+
     let claude_path = find_claude()
         .ok_or("Claude CLI not found. Please install it: npm install -g @anthropic-ai/claude-code")?;
 

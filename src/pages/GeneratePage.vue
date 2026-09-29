@@ -398,8 +398,8 @@ async function handleGenerate() {
 
     if (cancelRequested.value) throw new Error("__cancelled__");
     claudeStarted.value = true;
-    progress.value = "Generating test cases with Claude...";
-    pushLog("[3/3] Launching Claude CLI with /test-case-generator skill", "info");
+    progress.value = "正在生成测试用例…";
+    pushLog("[3/3] 使用全局 AI 引擎执行 test-case-generator skill", "info");
     if (csvPath) pushLog(`  CSV: ${csvPath}`);
     pushLog(`  Images: ${imgPaths.length} page(s)`);
     if (htmlPath.value) {
@@ -458,7 +458,7 @@ async function handleSendInput() {
   generating.value = true;
   done.value = false;
   error.value = "";
-  progress.value = "Sending to Claude...";
+  progress.value = "正在发送给 AI…";
 
   let input = text;
   if (images.length > 0) {
@@ -493,7 +493,7 @@ async function handleStop() {
   if (claudeStarted.value) {
     try {
       await invoke("stop_claude");
-      pushLog("Stop requested — terminating Claude process...", "info");
+      pushLog("已请求停止 AI 任务…", "info");
     } catch (e: any) {
       error.value = String(e);
       stopping.value = false;
@@ -677,7 +677,7 @@ watch(
           <button class="kb-modal-close" @click="showKbModal = false">✕</button>
         </div>
         <div class="kb-modal-body">
-          <p class="kb-modal-hint">勾选要作为约定传给 Claude 的资料。勾选产品 = 全选其下资料；同一份资料关联多个产品时状态联动。</p>
+          <p class="kb-modal-hint">勾选要作为约定传给 AI 的资料。勾选产品 = 全选其下资料；同一份资料关联多个产品时状态联动。</p>
           <div v-if="kbGroups.length === 0" class="kb-modal-empty">知识库暂无资料。先到「知识库」页新建。</div>
           <div v-for="group in kbGroups" :key="group.key" class="kb-group">
             <label class="kb-group-head">
@@ -748,7 +748,7 @@ watch(
         </div>
         <div v-if="showIdle" class="log-line log-idle">
           <span class="log-icon idle-pulse">⏳</span>
-          <span class="log-text">Claude is thinking… ({{ idleSeconds }}s)</span>
+          <span class="log-text">AI 正在处理… ({{ idleSeconds }}s)</span>
         </div>
       </div>
 
@@ -786,7 +786,7 @@ watch(
           <textarea
             v-model="userInput"
             class="claude-input"
-            placeholder="Type your response to Claude... (⌘/Ctrl+Enter 发送，可直接 ⌘/Ctrl+V 粘贴截图)"
+            placeholder="输入补充要求… (⌘/Ctrl+Enter 发送，可直接 ⌘/Ctrl+V 粘贴截图)"
             rows="2"
             :disabled="sending"
             @keydown="handleInputKeydown"

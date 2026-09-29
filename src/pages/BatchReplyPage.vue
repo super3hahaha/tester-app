@@ -36,6 +36,9 @@ import {
   reloadReadMarks,
   readMarksError,
 } from "../utils/reviewReadMarks";
+import { loadFavorites, addFavorite, removeFavorite, favoritesError, setFavoriteTags } from "../utils/reviewFavorites";
+import TagPicker from "../components/TagPicker.vue";
+import TagChips from "../components/TagChips.vue";
 
 interface PlayApp {
   package_name: string;
@@ -414,7 +417,10 @@ watch(
   () => props.activeOption,
   async (opt) => {
     // rebuildGroups 现在会保留已有候选，随时重建都安全。
-    if (opt !== "review-batch-reply" || fetching.value) return;
+    if (opt !== "review-batch-reply") return;
+    // 收藏/标签与 Play Console 页共用 review-fav-v1；切回本页重读，拿到那边的改动
+    reloadFavState();
+    if (fetching.value) return;
     reloadReadMarks();
     rebuildGroups();
     await loadFromCache();
@@ -438,6 +444,59 @@ function handleMarkRead(c: Candidate) {
 
 function handleUndoRead() {
   if (!undoLastRead() && readMarksError.value) overallError.value = readMarksError.value;
+}
+
+// ── 收藏 + 收藏标签（与 Play Console 页同一份 review-fav-v1，逻辑照搬 ReviewPage）──
+// 写失败（存储损坏保护 / 配额满）时不动本地状态，原因走 overallError banner。
+const favIds = ref<Set<string>>(new Set());
+const favTagIds = ref<Record<string, string[]>>({});
+function reloadFavState() {
+  const map = loadFavorites();
+  favIds.value = new Set(Object.keys(map));
+  const tags: Record<string, string[]> = {};
+  for (const [id, f] of Object.entries(map)) if (f.tags?.length) tags[id] = f.tags;
+  favTagIds.value = tags;
+}
+onMounted(reloadFavState);
+
+function isFavorited(c: Candidate): boolean {
+  return favIds.value.has(c.review.review_id);
+}
+
+function toggleFavorite(c: Candidate) {
+  const id = c.review.review_id;
+  if (favIds.value.has(id)) {
+    if (!removeFavorite(id)) {
+      overallError.value = favoritesError.value;
+      return;
+    }
+    favIds.value.delete(id);
+    delete favTagIds.value[id];
+  } else {
+    if (!addFavorite({ ...c.review, favoritedAt: Date.now() })) {
+      overallError.value = favoritesError.value;
+      return;
+    }
+    favIds.value.add(id);
+  }
+}
+
+function onPickTags(c: Candidate, ids: string[]) {
+  const id = c.review.review_id;
+  // 未收藏且要打标签 → 先收藏；收藏失败就整个放弃（不动视图）
+  if (!favIds.value.has(id)) {
+    if (!ids.length) return;
+    if (!addFavorite({ ...c.review, favoritedAt: Date.now() })) {
+      overallError.value = favoritesError.value;
+      return;
+    }
+    favIds.value.add(id);
+  }
+  if (!setFavoriteTags(id, ids)) {
+    overallError.value = favoritesError.value;
+    return;
+  }
+  favTagIds.value = { ...favTagIds.value, [id]: ids };
 }
 
 function tsRange(r: DateRange): { from: number; to: number } {
@@ -1228,6 +1287,18 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
                 title="标为已读：不回复也让它从本页和 Play Console 页消失。撤销在上方「撤销上一条已读」，或去 Play Console 页「只看已读」逐条恢复"
                 @click="handleMarkRead(c)"
               >已读</button>
+              <TagChips v-if="isFavorited(c)" :ids="favTagIds[c.review.review_id]" />
+              <TagPicker
+                :selected="isFavorited(c) ? favTagIds[c.review.review_id] || [] : []"
+                :app="c.review._pkg || g.packageName"
+                @change="(ids) => onPickTags(c, ids)"
+              />
+              <button
+                class="fav-star-btn"
+                :class="{ active: isFavorited(c) }"
+                :title="isFavorited(c) ? '取消收藏' : '收藏这条评论'"
+                @click="toggleFavorite(c)"
+              >{{ isFavorited(c) ? "★" : "☆" }}</button>
               <span v-if="c.manual" class="status-tag status-manual">✋ 人工处理</span>
               <span v-if="c.unmatched && c.status === 'pending'" class="unmatched-tag">
                 生成异常 · 需手动处理
@@ -2657,6 +2728,20 @@ function useAiCandidate(task: AiDlgTask, cand: GenCandidate) {
 .read-btn:hover:not(:disabled) {
   background: #edf2f7;
   color: #4a5568;
+}
+.fav-star-btn {
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+  color: #cbd5e0;
+  flex-shrink: 0;
+}
+.fav-star-btn:hover,
+.fav-star-btn.active {
+  color: #d69e2e;
 }
 .read-btn:disabled {
   opacity: 0.4;

@@ -132,9 +132,6 @@ async fn run_inner(
         .map_err(|e| format!("写 bug 报告文件失败：{}", e))?;
     let bug_report_path_str = bug_report_path.to_string_lossy().to_string();
 
-    let claude_path = find_claude()
-        .ok_or("未找到 Claude CLI，请先安装：npm install -g @anthropic-ai/claude-code")?;
-
     // --add-dir 授权：bug 报告目录、每张 PRD 图片的父目录（去重）、skill 自身
     // 目录（防御性加上——沉淀模式要往 references/*.md 里写文件，那是 skill 自己
     // 的目录，不一定在默认可写范围内）。
@@ -216,6 +213,21 @@ references/risk-taxonomy.md（通用风险）和 references/apps/{}.md（专属�
 几条归通用/几条归专属、两份文件分别有什么变化）。\n",
         bug_report_path_str, app_name
     ));
+
+    let cfg = crate::model_config::load();
+    if cfg.cli_engine == "codex" {
+        let prompt = crate::cli::skill_prompt("prd-risk-profiler", &prompt)?;
+        let mut opts = crate::cli::Options::from_config(&cfg);
+        opts.writable_dirs = dirs.iter().cloned().collect();
+        opts.images = prd_image_paths.clone();
+        let output = crate::cli::run(&prompt, opts, &app, "prd-risk-log",
+            |pid| *app.state::<PrdRiskState>().child_pid.lock().unwrap() = pid,
+            || *app.state::<PrdRiskState>().running.lock().unwrap()).await?;
+        return Ok(output.text);
+    }
+
+    let claude_path = find_claude()
+        .ok_or("未找到 Claude CLI，请先安装：npm install -g @anthropic-ai/claude-code")?;
 
     emit_log(&app, &format!("$ claude {} '/prd-risk-profiler ...'", args.join(" ")), "info", false);
 
