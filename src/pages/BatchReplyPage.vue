@@ -286,12 +286,21 @@ function rebuildGroups() {
   groups.value = next;
 }
 
-// 各应用当前应展示的评论：口径与 Play Console 页完全一致（同一份共享数据 +
-// 同一个 matchesReplyState），差别只在这页把它们包成可编辑的候选卡片。
+function isWithinEffectiveRange(g: AppGroup, r: TaggedReview): boolean {
+  const { from, to } = tsRange(g.effectiveRange);
+  return r.user_comment_ts >= from && r.user_comment_ts <= to;
+}
+
+function hasPersistedDraft(reviewId: string): boolean {
+  return Object.prototype.hasOwnProperty.call(draftsMap, reviewId);
+}
+
+// 各应用当前应展示的评论：新评论沿用 Play Console 页的日期/状态/星级口径；
+// 已生成但未提交的草稿不再受会随日期滚动的日期窗口限制，否则「自上一个工作日」
+// 到第二天就会把昨天已生成的草稿藏起来。其它终结条件（已读、已回复）仍然生效。
 const visibleByPkg = computed(() => {
   const out: Record<string, TaggedReview[]> = {};
   for (const g of groups.value) {
-    const { from, to } = tsRange(g.effectiveRange);
     out[g.packageName] = getReviews(g.packageName).value.filter(
       (r) =>
         // 标了已读的不再进候选（与 Play Console 页共享同一张表，任一页标记两页同步）
@@ -299,8 +308,7 @@ const visibleByPkg = computed(() => {
         matchesReplyState(r, g.config.replyState) &&
         // 「回复后又更新」忽略星级（与 Play Console 页同口径）
         (g.config.replyState === "UPDATED" || g.config.stars.includes(r.star_rating)) &&
-        r.user_comment_ts >= from &&
-        r.user_comment_ts <= to
+        (isWithinEffectiveRange(g, r) || hasPersistedDraft(r.review_id))
     );
   }
   return out;
@@ -588,6 +596,8 @@ function buildSkillGroups(): {
     for (const c of g.candidates) {
       if (c.status === "done") continue;
       if (c.manual) continue; // 用户标记「人工处理」，不参与模板匹配填充
+      // 历史草稿为了核对/提交会跨日期窗口保留显示，但日期配置仍限制本轮新生成。
+      if (!isWithinEffectiveRange(g, c.review)) continue;
       if (c.options.length > 0 || c.unmatched) continue; // already matched/processed
       const r = c.review;
       reviews.push({

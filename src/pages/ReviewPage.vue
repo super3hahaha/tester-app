@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { lastWorkdayBefore, toIso, computeRange } from "../utils/batchReplyDates";
+import { lastWorkdayBefore, toIso } from "../utils/batchReplyDates";
 import { loadPlayConfig, type ReplyState } from "../utils/playConsoleConfig";
 import {
   type TaggedReview,
@@ -239,27 +239,17 @@ async function restoreBatch(): Promise<boolean> {
     any = true;
     const at = getFetchedAt(pkg);
     if (at && at > latest) latest = at;
-    const range = computeRange(cfg.datePreset, {
-      fromDate: cfg.customFromDate,
-      toDate: cfg.customToDate,
-    });
-    const from = range.fromDate
-      ? Math.floor(new Date(range.fromDate + "T00:00:00").getTime() / 1000)
-      : 0;
-    const to = range.toDate
-      ? Math.floor(new Date(range.toDate + "T23:59:59").getTime() / 1000)
-      : Number.MAX_SAFE_INTEGER;
     batchStarsByPkg.value[pkg] = [...cfg.stars];
-    for (const r of getReviews(pkg).value) {
-      if (r.user_comment_ts >= from && r.user_comment_ts <= to) all.push(r);
-    }
+    // 批量视图先装入该 app 的全部本地累积评论；日期统一由页面 fromDate/toDate
+    // 在 filtered 中实时处理，不能在这里按 Config 日期提前裁掉，否则「本地全部」无效。
+    all.push(...getReviews(pkg).value);
   }
   if (!any) return false;
   all.sort((a, b) => b.user_comment_ts - a.user_comment_ts);
   reviews.value = all;
   mode.value = "batch";
   fetchedAt.value = latest || null;
-  batchSummary.value = `已从本地快照恢复批量视图（${enabled.length} 个应用，按当前配置筛选）`;
+  batchSummary.value = `已从本地快照恢复批量视图（${enabled.length} 个应用）`;
   return true;
 }
 
@@ -378,8 +368,9 @@ async function handleFetch() {
   }
 }
 
-// 批量拉取：读 Config 里启用的应用，并行拉取，按各应用配置的**星级 + 日期**固定筛选后合并；
-// 回复状态不在这里固定，留给页面上方控件实时筛选（见 filtered）。
+// 批量拉取：读 Config 里启用的应用，并行刷新各 app 的共享缓存后合并全部本地评论。
+// Config 只决定 app 范围和各 app 星级；日期 / 回复状态 / 已读由页面控件在 filtered
+// 中实时处理，避免在这里提前裁掉数据导致「本地全部」和手填日期在批量模式下失效。
 async function handleBatchFetch() {
   if (loading.value || batchLoading.value) return;
   const config = loadPlayConfig();
@@ -400,7 +391,7 @@ async function handleBatchFetch() {
   const all: TaggedReview[] = [];
   const parts: string[] = [];
   let failed = 0;
-  let matchedTotal = 0; // 各应用 Config 星级+日期命中的总数（用于摘要「拉到」）
+  let localTotal = 0;
 
   await Promise.all(
     enabled.map(async ([pkg, cfg]) => {
@@ -408,28 +399,13 @@ async function handleBatchFetch() {
       try {
         // 拉取 + 并进共享缓存 + 落盘（Batch Reply 页读的是同一份数据）
         const list = await refreshFromApi(pkg, appName);
-        const range = computeRange(cfg.datePreset, {
-          fromDate: cfg.customFromDate,
-          toDate: cfg.customToDate,
-        });
-        const from = range.fromDate
-          ? Math.floor(new Date(range.fromDate + "T00:00:00").getTime() / 1000)
-          : 0;
-        const to = range.toDate
-          ? Math.floor(new Date(range.toDate + "T23:59:59").getTime() / 1000)
-          : Number.MAX_SAFE_INTEGER;
-        // 只按日期界定窗口，保留全部星级（供「回复后又更新」忽略星级时显示）；
-        // 各 app 的 Config 星级记到 map，展示时再过滤（见 filtered）。
+        // 各 app 的 Config 星级记到 map，展示时再过滤（见 filtered）。日期不在
+        // 这里裁剪：refreshFromApi 返回的是合并后的本地累积列表，整份交给显示层。
         batchStarsByPkg.value[pkg] = [...cfg.stars];
-        const dated = list.filter(
-          (r) => r.user_comment_ts >= from && r.user_comment_ts <= to
-        );
         // 放共享缓存里的对象引用（不是副本）：另一页回复后这里能立刻看到状态变化。
-        for (const r of dated) all.push(r);
-        // 摘要里的条数按 Config 星级算（即默认（非 UPDATED）会显示的数量）。
-        const matched = dated.filter((r) => cfg.stars.includes(r.star_rating)).length;
-        matchedTotal += matched;
-        parts.push(`${appName} ${matched} 条`);
+        all.push(...list);
+        localTotal += list.length;
+        parts.push(`${appName} 本地 ${list.length} 条`);
       } catch (e: any) {
         const msg = String(e);
         if (msg.startsWith("NEED_RELOGIN_SCOPE") || msg.startsWith("NEED_RELOGIN:")) {
@@ -444,7 +420,7 @@ async function handleBatchFetch() {
   all.sort((a, b) => b.user_comment_ts - a.user_comment_ts);
   reviews.value = all;
   mode.value = "batch";
-  batchSummary.value = `批量拉取 ${enabled.length} 个应用 · 拉到 ${matchedTotal} 条` +
+  batchSummary.value = `批量刷新 ${enabled.length} 个应用 · 本地汇总 ${localTotal} 条` +
     (failed > 0 ? `（${failed} 个失败）` : "") + ` · ${parts.join("、")}`;
   fetchedAt.value = Date.now();
   localStorage.setItem(scopedKey(LAST_VIEW_KEY), "batch");
@@ -484,6 +460,7 @@ const hiddenReadCount = computed(() => {
     if (!isRead(r.review_id)) return false;
     if (!matchesReplyState(r)) return false;
     if (mode.value === "batch") {
+      if (r.user_comment_ts < fromTs.value || r.user_comment_ts > toTs.value) return false;
       if (replyState.value === "UPDATED") return true;
       const cs = batchStarsByPkg.value[r._pkg];
       return !cs || cs.includes(r.star_rating);
@@ -514,12 +491,13 @@ function handleUndoRead() {
 }
 
 const filtered = computed(() => {
-  // 批量模式：日期已在拉取时按各应用 Config 固定；星级按各应用 Config 过滤（上方星级控件
-  // 不参与）；回复状态跟随页面控件实时筛选。「回复后又更新」忽略星级、显示所有星级。
+  // 批量模式：app 范围和星级来自各应用 Config（上方星级控件不参与）；日期、回复状态、
+  // 已读跟随页面控件实时筛选。「回复后又更新」忽略星级、显示所有星级。
   if (mode.value === "batch") {
     return reviews.value.filter((r) => {
       if (!passesReadFilter(r)) return false;
       if (!matchesReplyState(r)) return false;
+      if (r.user_comment_ts < fromTs.value || r.user_comment_ts > toTs.value) return false;
       if (replyState.value === "UPDATED") return true; // 忽略星级，显示所有星级
       const cs = batchStarsByPkg.value[r._pkg];
       return !cs || cs.includes(r.star_rating);
@@ -623,7 +601,7 @@ const collapsedFilterLabel = computed(() => {
   const parts: string[] = [];
   parts.push(selectedAppLabel.value || packageName.value || "未选应用");
   if (mode.value === "batch") {
-    parts.push("批量（星级/日期按各应用 Config）");
+    parts.push("批量（应用/星级按各应用 Config）");
   } else {
     parts.push(stars.value.length === 5 || stars.value.length === 0
       ? "全部星级"
@@ -637,7 +615,7 @@ const collapsedFilterLabel = computed(() => {
   };
   parts.push(stateText[replyState.value]);
   if (readOnly.value) parts.push("只看已读");
-  if (mode.value !== "batch" && fromDate.value && toDate.value) {
+  if (fromDate.value && toDate.value) {
     parts.push(`${fromDate.value.slice(5)} → ${toDate.value.slice(5)}`);
   }
   return parts.join(" · ");
@@ -1038,7 +1016,7 @@ const TPL_LANG_NAMES: Record<string, string> = {
   fa: "波斯语", fr: "法语", in: "印尼语", it: "意大利语", ja: "日语", ko: "韩语",
   ms: "马来语", nl: "荷兰语", pl: "波兰语", pt: "葡萄牙语", ro: "罗马尼亚语", ru: "俄语",
   th: "泰语", tr: "土耳其语", uk: "乌克兰语", vi: "越南语", "zh-rCN": "简体中文", "zh-rTW": "繁体中文",
-  bn: "孟加拉语", da: "丹麦语", el: "希腊语", fi: "芬兰语", hi: "印地语", hu: "匈牙利语",
+  bn: "孟加拉语", da: "丹麦语", el: "希腊语", fi: "芬兰语", hi: "印地语", hr: "克罗地亚语", hu: "匈牙利语",
   "kn-rIN": "卡纳达语", "ml-rIN": "马拉雅拉姆语", mr: "马拉地语", "pa-rIN": "旁遮普语",
   sk: "斯洛伐克语", sv: "瑞典语", "ta-rIN": "泰米尔语", "te-rIN": "泰卢固语", "ur-rIN": "乌尔都语",
 };
@@ -1467,7 +1445,7 @@ async function submitAnReply(task: AnTask) {
           class="batch-fetch-btn"
           :disabled="loading || batchLoading"
           @click="handleBatchFetch"
-          title="按 Config 子页（Play Console 拉取配置）启用的应用并行批量拉取，各应用按其配置的星级/状态/日期筛选"
+          title="按 Config 启用的应用并行刷新；星级按各应用 Config，回复状态/已读/日期按本页筛选"
         >
           {{ batchLoading ? "批量拉取中..." : "📦 批量拉取" }}
         </button>
@@ -1545,7 +1523,7 @@ async function submitAnReply(task: AnTask) {
               title="把起始日期拉到本地最早一条评论，查看累积保留下来的全部评论"
             >本地全部（自 {{ earliestLocalDate }}）</button>
           </div>
-          <span class="date-hint">API 只返回最近约 7 天，更早的是本地累积保留的（能看、能筛，回复是否还能提交取决于 Google 的窗口限制）</span>
+          <span class="date-hint">API 只返回最近约 7 天，更早的是本地累积保留的；单应用和批量模式都可在这里实时筛选</span>
         </div>
       </div>
       <div v-if="dateError" class="error">{{ dateError }}</div>
@@ -1584,7 +1562,7 @@ async function submitAnReply(task: AnTask) {
     <div v-if="mode === 'batch' && batchSummary" class="summary-row">
       <span class="summary-text">{{ batchSummary }} · 当前筛选显示 {{ filtered.length }} 条</span>
       <span v-if="hiddenReadCount" class="summary-app">· 已隐藏 {{ hiddenReadCount }} 条已读</span>
-      <span class="summary-app">· 星级/日期按各应用 Config；回复状态可在上方实时筛选</span>
+      <span class="summary-app">· 应用/星级按 Config；日期、回复状态、已读按上方实时筛选</span>
     </div>
     <div v-else-if="summary" class="summary-row">
       <span class="summary-text">{{ summary }}</span>

@@ -63,6 +63,7 @@ const LANGS: { code: string; name: string }[] = [
   { code: "el", name: "希腊" },
   { code: "fi", name: "芬兰" },
   { code: "hi", name: "印地" },
+  { code: "hr", name: "克罗地亚" },
   { code: "hu", name: "匈牙利" },
   { code: "kn-rIN", name: "卡纳达" },
   { code: "ml-rIN", name: "马拉雅拉姆" },
@@ -75,7 +76,7 @@ const LANGS: { code: string; name: string }[] = [
   { code: "ur-rIN", name: "乌尔都" },
 ];
 const ALL_CODES = LANGS.map((l) => l.code);
-// 默认勾选的语言（原始一组）；上面后补的 15 个默认不选，要用时在弹窗里手动勾。
+// 默认勾选的语言（原始一组）；上面后补的 16 个默认不选，要用时在弹窗里手动勾。
 const DEFAULT_CODES = [
   "ar", "cs", "de", "es", "fa", "fr", "in", "it", "ja", "ko", "ms",
   "nl", "pl", "pt", "ro", "ru", "th", "tr", "uk", "vi", "zh-rCN", "zh-rTW",

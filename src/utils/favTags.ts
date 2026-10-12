@@ -9,7 +9,8 @@
 //     其它页立刻同步（与 reviewReadMarks 同样的路子）。
 //   - 读写经 favoritesStorage 安全层，写失败返回 false，原因走 favTagsError。
 //   - 适用范围 `apps`：空/缺省 = 通用（所有 app 可用）；否则只在这些包名的评论/邮件上出现。
-//     旧标签没有这个字段 = 通用，不迁移。标签名仍全局唯一（跨 app 共用的就设通用）。
+//     旧标签没有这个字段 = 通用，不迁移。同名只在适用范围有交集时冲突：不同 app
+//     可以同名；通用标签与任何 app 都有交集，会与任何范围的同名标签冲突。
 
 import { ref } from "vue";
 import { loadMapSafe, saveMapSafe } from "./favoritesStorage";
@@ -80,11 +81,31 @@ function normName(s: string): string {
   return s.trim().toLowerCase();
 }
 
-/** 同名（trim + 不区分大小写）的标签，exceptId 用于改名时排除自己。 */
-export function findTagByName(name: string, exceptId = ""): FavTag | undefined {
+function normalizeApps(apps: string[]): string[] {
+  return Array.from(new Set(apps.filter(Boolean)));
+}
+
+/** 空范围表示通用，因此与任何范围都有交集。 */
+function scopesOverlap(a: string[], b: string[]): boolean {
+  if (!a.length || !b.length) return true;
+  const bSet = new Set(b);
+  return a.some((pkg) => bSet.has(pkg));
+}
+
+/**
+ * 查找同名（trim + 不区分大小写）且适用范围有交集的标签。
+ * 不同 app 可以有同名标签；通用标签与所有 app 都有交集。
+ */
+export function findTagByName(name: string, apps: string[] = [], exceptId = ""): FavTag | undefined {
   ensureLoaded();
   const n = normName(name);
-  return Object.values(favTags.value).find((t) => t.id !== exceptId && normName(t.name) === n);
+  const scope = normalizeApps(apps);
+  return Object.values(favTags.value).find(
+    (t) =>
+      t.id !== exceptId &&
+      normName(t.name) === n &&
+      scopesOverlap(scope, normalizeApps(t.apps || [])),
+  );
 }
 
 /**
@@ -93,11 +114,12 @@ export function findTagByName(name: string, exceptId = ""): FavTag | undefined {
 export function addTag(name: string, apps: string[] = []): FavTag | null {
   ensureLoaded();
   const text = name.trim();
+  const scope = normalizeApps(apps);
   if (!text) {
     favTagsError.value = "标签名不能为空";
     return null;
   }
-  if (findTagByName(text)) {
+  if (findTagByName(text, scope)) {
     favTagsError.value = `已有同名标签「${text}」`;
     return null;
   }
@@ -108,7 +130,6 @@ export function addTag(name: string, apps: string[] = []): FavTag | null {
     color: TAG_PALETTE[count % TAG_PALETTE.length],
     createdAt: Date.now(),
   };
-  const scope = Array.from(new Set(apps.filter(Boolean)));
   if (scope.length) tag.apps = scope;
   const map = { ...favTags.value, [tag.id]: tag };
   if (!persist(map)) return null;
@@ -125,7 +146,7 @@ export function renameTag(id: string, name: string): boolean {
     favTagsError.value = "标签名不能为空";
     return false;
   }
-  if (findTagByName(text, id)) {
+  if (findTagByName(text, hit.apps || [], id)) {
     favTagsError.value = `已有同名标签「${text}」`;
     return false;
   }
@@ -151,7 +172,11 @@ export function setTagApps(id: string, apps: string[]): boolean {
   const hit = favTags.value[id];
   if (!hit) return false;
   const next: FavTag = { ...hit };
-  const scope = Array.from(new Set(apps.filter(Boolean)));
+  const scope = normalizeApps(apps);
+  if (findTagByName(hit.name, scope, id)) {
+    favTagsError.value = `当前适用范围已有同名标签「${hit.name}」`;
+    return false;
+  }
   if (scope.length) next.apps = scope;
   else delete next.apps;
   const map = { ...favTags.value, [id]: next };
