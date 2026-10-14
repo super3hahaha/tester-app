@@ -18,6 +18,7 @@ import { passesTagFilter, resolveTags, reloadTags, NO_TAG_FILTER } from "../util
 import TagPicker from "../components/TagPicker.vue";
 import TagChips from "../components/TagChips.vue";
 import TagFilterBar from "../components/TagFilterBar.vue";
+import { exportFavorites, reviewExportRows, type ExportMode } from "../utils/favoritesExport";
 
 const props = defineProps<{ activeOption?: string }>();
 
@@ -53,6 +54,30 @@ const filteredFavorites = computed(() =>
 
 // ── 标签筛选：叠加在 app tab 之上（先按 app，再按标签，命中任意一个即显示）──
 const selectedTags = ref<string[]>([]);
+const exporting = ref(false);
+const exportMessage = ref("");
+const exportWebUrl = ref("");
+async function onExport(mode: ExportMode) {
+  if (exporting.value) return;
+  exporting.value = true;
+  exportMessage.value = "";
+  exportWebUrl.value = "";
+  try {
+    const rows = reviewExportRows(tagFilteredFavorites.value, reviewConsoleUrl);
+    const appName = activeTab.value === "all" ? "全部应用" : (appTabs.value.find((t) => t.pkg === activeTab.value)?.label || activeTab.value);
+    const names = resolveTags(selectedTags.value.filter((id) => id !== NO_TAG_FILTER)).map((t) => t.name);
+    if (selectedTags.value.includes(NO_TAG_FILTER)) names.push("无标签");
+    const title = `${appName}_${names.length ? names.join("、") : "全部标签"}_收藏评论`;
+    const result = await exportFavorites("review", rows, mode, title);
+    if (!result) return;
+    exportMessage.value = `已导出 ${result.count} 条收藏评论${result.truncatedCells ? `（${result.truncatedCells} 个过长单元格已截断）` : ""}`;
+    exportWebUrl.value = result.webUrl || "";
+  } catch (e) {
+    exportMessage.value = `导出失败：${String(e)}`;
+  } finally {
+    exporting.value = false;
+  }
+}
 const tagFilteredFavorites = computed(() =>
   filteredFavorites.value.filter((r) => passesTagFilter(r.tags, selectedTags.value))
 );
@@ -535,6 +560,12 @@ async function handleSubmitReply(task: AiTask) {
       </div>
 
       <TagFilterBar v-model="selectedTags" :counts="tagCounts" :app="activeTab === 'all' ? '' : activeTab" />
+      <div class="export-bar">
+        <span>当前筛选 {{ tagFilteredFavorites.length }} 条</span>
+        <button :disabled="exporting || !tagFilteredFavorites.length" @click="onExport('excel')">导出 Excel</button>
+        <button :disabled="exporting || !tagFilteredFavorites.length" @click="onExport('sheets')">导出 Google 表格</button>
+      </div>
+      <div v-if="exportMessage" class="export-feedback">{{ exportMessage }} <a v-if="exportWebUrl" href="#" @click.prevent="openUrl(exportWebUrl)">打开在线表格</a></div>
 
       <div v-if="filteredFavorites.length === 0" class="empty-state">
         该应用下暂无收藏评论。
@@ -785,6 +816,11 @@ async function handleSubmitReply(task: AiTask) {
 </template>
 
 <style scoped>
+.export-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 12px; color: #64748b; flex-wrap: wrap; }
+.export-bar button { padding: 6px 12px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; color: #334155; cursor: pointer; }
+.export-bar button:disabled { opacity: .5; cursor: not-allowed; }
+.export-feedback { margin-bottom: 10px; font-size: 12px; color: #475569; }
+.export-feedback a { color: #4f46e5; margin-left: 6px; }
 .fav-page {
   height: 100%;
   display: flex;

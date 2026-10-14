@@ -17,6 +17,7 @@ import { mailSourceApps, reloadMailSourceApps } from "../utils/appRegistry";
 import TagPicker from "../components/TagPicker.vue";
 import TagChips from "../components/TagChips.vue";
 import TagFilterBar from "../components/TagFilterBar.vue";
+import { compactMailSheetName, exportFavorites, mailExportRows, type ExportMode } from "../utils/favoritesExport";
 
 const props = defineProps<{ activeOption?: string }>();
 
@@ -53,6 +54,35 @@ const filteredFavorites = computed(() =>
 
 // ── 标签筛选：叠加在邮件源 tab 之上（先按源，再按标签，命中任意一个即显示）──
 const selectedTags = ref<string[]>([]);
+const exporting = ref(false);
+const exportMessage = ref("");
+const exportWebUrl = ref("");
+async function onExport(mode: ExportMode) {
+  if (exporting.value) return;
+  exporting.value = true;
+  exportMessage.value = "";
+  exportWebUrl.value = "";
+  try {
+    const rows = mailExportRows(tagFilteredFavorites.value);
+    const source = activeTab.value === "all"
+      ? "全部邮件源"
+      : (sourceTabs.value.find((t) => t.key === activeTab.value)?.label || activeTab.value);
+    const associatedApp = activeTab.value === "all" ? "" : (mailSourceApps.value[activeTab.value] || "");
+    const sourceInfo = associatedApp ? `${source}（${associatedApp}）` : source;
+    const tagNames = resolveTags(selectedTags.value.filter((id) => id !== NO_TAG_FILTER)).map((t) => t.name);
+    if (selectedTags.value.includes(NO_TAG_FILTER)) tagNames.push("无标签");
+    const tagSummary = tagNames.length ? tagNames.join("、") : "全部标签";
+    const title = `${sourceInfo}_${tagSummary}_收藏邮件`;
+    const result = await exportFavorites("mail", rows, mode, title, compactMailSheetName(sourceInfo, tagSummary));
+    if (!result) return;
+    exportMessage.value = `已导出 ${result.count} 封收藏邮件${result.truncatedCells ? `（${result.truncatedCells} 个过长单元格已截断）` : ""}`;
+    exportWebUrl.value = result.webUrl || "";
+  } catch (e) {
+    exportMessage.value = `导出失败：${String(e)}`;
+  } finally {
+    exporting.value = false;
+  }
+}
 const tagFilteredFavorites = computed(() =>
   filteredFavorites.value.filter((m) => passesTagFilter(m.tags, selectedTags.value))
 );
@@ -478,6 +508,12 @@ async function copyAndJumpAi(task: AiMailTask) {
       </div>
 
       <TagFilterBar v-model="selectedTags" :counts="tagCounts" :app="filterApp" />
+      <div class="export-bar">
+        <span>当前筛选 {{ tagFilteredFavorites.length }} 封</span>
+        <button :disabled="exporting || !tagFilteredFavorites.length" @click="onExport('excel')">导出 Excel</button>
+        <button :disabled="exporting || !tagFilteredFavorites.length" @click="onExport('sheets')">导出 Google 表格</button>
+      </div>
+      <div v-if="exportMessage" class="export-feedback">{{ exportMessage }} <a v-if="exportWebUrl" href="#" @click.prevent="openUrl(exportWebUrl)">打开在线表格</a></div>
 
       <div v-if="filteredFavorites.length === 0" class="empty-state">
         该邮件源下暂无收藏邮件。
@@ -728,6 +764,11 @@ async function copyAndJumpAi(task: AiMailTask) {
 </template>
 
 <style scoped>
+.export-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 12px; color: #64748b; flex-wrap: wrap; }
+.export-bar button { padding: 6px 12px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; color: #334155; cursor: pointer; }
+.export-bar button:disabled { opacity: .5; cursor: not-allowed; }
+.export-feedback { margin-bottom: 10px; font-size: 12px; color: #475569; }
+.export-feedback a { color: #4f46e5; margin-left: 6px; }
 .fav-page {
   height: 100%;
   display: flex;

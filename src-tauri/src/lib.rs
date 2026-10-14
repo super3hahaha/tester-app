@@ -5,6 +5,7 @@ mod claude;
 mod cli;
 mod compare;
 mod feedback;
+mod favorites_export;
 mod json_repair;
 mod knowledge_base;
 mod manifest;
@@ -69,6 +70,7 @@ pub fn run() {
             sheets::find_latest_export,
             sheets::upload_xlsx_to_drive,
             sheets::upload_xlsx_bytes_to_drive,
+            favorites_export::export_favorites_table,
             claude::run_claude_task,
             claude::send_claude_input,
             claude::get_claude_status,

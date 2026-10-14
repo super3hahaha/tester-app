@@ -650,8 +650,8 @@ pub fn find_latest_export(since_ms: Option<u64>) -> Result<Option<ExportInfo>, S
 #[derive(Serialize)]
 pub struct UploadResult {
     drive_id: String,
-    web_url: String,
-    converted: bool,
+    pub(crate) web_url: String,
+    pub(crate) converted: bool,
 }
 
 async fn find_or_create_folder(token: &str, name: &str) -> Result<String, String> {
