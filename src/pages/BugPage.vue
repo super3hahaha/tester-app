@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import PrdImagePicker from "../components/PrdImagePicker.vue";
 
 // 通过 MantisBT REST API（Base URL + 个人 API Token）拉某个项目的 bug 列表，
 // 按关键字/版本号筛选后点开看详情，勾选后可一键调用 prd-risk-profiler skill
@@ -264,13 +265,16 @@ const loadingSlides = ref(false);
 const slidesError = ref("");
 const riskSlideId = ref<string | null>(null);
 
-// HTML 需求文档（本地导入）。与 Slides 并列、可共存：任选其一或同时给，都算
-// 「有 PRD」。HTML 不在这里解析，交给 skill 的 extract_html.py。
+// HTML、本地图片与 Slides 并列、可共存：任一来源非空都算「有 PRD」。HTML
+// 交给 skill 的 extract_html.py；本地图片和 Slides 导出的页面图共用 prdImagePaths。
 const riskHtmlPath = ref<string | null>(null);
 const riskHtmlFileName = computed(() =>
   riskHtmlPath.value ? riskHtmlPath.value.split(/[/\\]/).pop() || riskHtmlPath.value : ""
 );
-const hasRiskPrdSource = computed(() => !!riskSlideId.value || !!riskHtmlPath.value);
+const riskImagePaths = ref<string[]>([]);
+const hasRiskPrdSource = computed(
+  () => !!riskSlideId.value || !!riskHtmlPath.value || riskImagePaths.value.length > 0
+);
 
 async function pickRiskHtmlFile() {
   try {
@@ -325,6 +329,7 @@ function openRiskModal() {
   riskResultText.value = "";
   riskSlideId.value = null;
   riskHtmlPath.value = null;
+  riskImagePaths.value = [];
   const project = projects.value.find((p) => p.id === selectedProjectId.value);
   riskAppName.value = project?.name || "";
   // filterText 命中当前版本 chip 就带过去当默认版本号，否则留空手填
@@ -394,8 +399,8 @@ async function startRiskGeneration() {
     return;
   }
   const slide = slidesFiles.value.find((f) => f.id === riskSlideId.value);
-  if (!slide && !riskHtmlPath.value) {
-    riskError.value = "请先选一份 PRD（Slides 或 HTML 需求文档）";
+  if (!slide && !riskHtmlPath.value && riskImagePaths.value.length === 0) {
+    riskError.value = "请先选择一份 PRD（Slides、HTML 需求文档或图片）";
     return;
   }
 
@@ -428,14 +433,15 @@ async function startRiskGeneration() {
       return;
     }
 
-    let imagePaths: string[] = [];
+    let imagePaths = [...riskImagePaths.value];
     if (slide) {
       riskPreparingMsg.value = "正在导出 PRD 页面为图片…";
-      imagePaths = await invoke<string[]>("export_slides_pdf", {
+      const slideImagePaths = await invoke<string[]>("export_slides_pdf", {
         presentationId: slide.id,
         name: slide.name,
         pages: [],
       });
+      imagePaths = [...slideImagePaths, ...imagePaths];
     }
 
     riskPreparing.value = false;
@@ -919,9 +925,9 @@ function formatForCopy(d: IssueDetail): string {
 
         <template v-if="riskPhase === 'config'">
           <p class="modal-hint">
-            已选 {{ selectedCount }} 条 bug 作为本轮沉淀依据；给一份 PRD（Slides 全篇导出、不选页码，
-            或导入 HTML 需求文档），skill 会更新它自己的知识库（通用层 risk-taxonomy.md + 专属层
-            apps/&lt;APP名&gt;.md，不存在就新建）。
+            已选 {{ selectedCount }} 条 bug 作为本轮沉淀依据；给一份 PRD（Slides 全篇导出、不选页码、
+            导入 HTML 需求文档或选择本地图片），skill 会更新它自己的知识库（通用层
+            risk-taxonomy.md + 专属层 apps/&lt;APP名&gt;.md，不存在就新建）。
           </p>
           <div class="form-row">
             <label class="form-label">APP 名称</label>
@@ -962,6 +968,7 @@ function formatForCopy(d: IssueDetail): string {
               <button v-if="riskHtmlPath" class="link-btn danger-link" @click="clearRiskHtmlFile">清除</button>
             </div>
           </div>
+          <PrdImagePicker v-model="riskImagePaths" @error="riskError = $event" />
           <div v-if="riskError" class="banner banner-error">{{ riskError }}</div>
         </template>
 

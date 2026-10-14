@@ -144,7 +144,7 @@ async fn run_inner(
     validate_segment(&version, "版本号")?;
     let html_path = html_path.filter(|s| !s.trim().is_empty());
     if prd_image_paths.is_empty() && html_path.is_none() {
-        return Err("没有 PRD（没选 Slides、也没导入 HTML 需求文档）".into());
+        return Err("没有 PRD（没选 Slides/图片，也没导入 HTML 需求文档）".into());
     }
 
     let ts = SystemTime::now()
@@ -197,7 +197,7 @@ async fn run_inner(
         app_name, version
     );
     if !prd_image_paths.is_empty() {
-        prompt.push_str("PRD（按页截图，逐张 Read 查看）：\n");
+        prompt.push_str("PRD（Slides 按页截图或本地导入图片，逐张 Read 查看）：\n");
         for p in &prd_image_paths {
             prompt.push_str(&format!("- {}\n", p));
         }

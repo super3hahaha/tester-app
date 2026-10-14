@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { marked } from "marked";
+import PrdImagePicker from "../components/PrdImagePicker.vue";
 
 // 补充测试点：只给一份新 PRD（不需要 bug 报告），调用 prd-risk-profiler skill 的
 // 「复用模式」——读该 APP 已有知识库产出《风险分析报告》+《补充测试点》清单。
@@ -114,13 +115,17 @@ const genPreparingMsg = ref("");
 const genLogs = ref<{ text: string; kind: string }[]>([]);
 let unlistenSupplementLog: (() => void) | null = null;
 
-// HTML 需求文档（本地导入）。与 Slides 并列、可共存：任选其一或同时给，都算
-// 「有 PRD」。HTML 不在这里解析，交给 skill 的 extract_html.py。
+// HTML 需求文档、本地图片与 Slides 并列、可共存：任一来源非空都算「有 PRD」。
+// HTML 不在这里解析，交给 skill 的 extract_html.py；本地图片和 Slides 导出的页面
+// 图片合并后复用后端已有的 prdImagePaths 入参。
 const htmlPath = ref<string | null>(null);
 const htmlFileName = computed(() =>
   htmlPath.value ? htmlPath.value.split(/[/\\]/).pop() || htmlPath.value : ""
 );
-const hasPrdSource = computed(() => !!selectedSlideId.value || !!htmlPath.value);
+const localImagePaths = ref<string[]>([]);
+const hasPrdSource = computed(
+  () => !!selectedSlideId.value || !!htmlPath.value || localImagePaths.value.length > 0
+);
 
 async function pickHtmlFile() {
   try {
@@ -175,8 +180,8 @@ async function startGenerate() {
     return;
   }
   const slide = slidesFiles.value.find((f) => f.id === selectedSlideId.value);
-  if (!slide && !htmlPath.value) {
-    genError.value = "请先选一份 PRD（Slides 或 HTML 需求文档）";
+  if (!slide && !htmlPath.value && localImagePaths.value.length === 0) {
+    genError.value = "请先选择一份 PRD（Slides、HTML 需求文档或图片）";
     return;
   }
 
@@ -195,14 +200,15 @@ async function startGenerate() {
   }
 
   try {
-    let imagePaths: string[] = [];
+    let imagePaths = [...localImagePaths.value];
     if (slide) {
       genPreparingMsg.value = "正在导出 PRD 页面为图片…";
-      imagePaths = await invoke<string[]>("export_slides_pdf", {
+      const slideImagePaths = await invoke<string[]>("export_slides_pdf", {
         presentationId: slide.id,
         name: slide.name,
         pages: [],
       });
+      imagePaths = [...slideImagePaths, ...imagePaths];
       genPreparingMsg.value = "";
     }
 
@@ -548,6 +554,12 @@ onUnmounted(() => {
             </button>
           </div>
         </div>
+
+        <PrdImagePicker
+          v-model="localImagePaths"
+          :disabled="genPhase === 'running'"
+          @error="genError = $event"
+        />
 
         <div v-if="genPhase === 'running'" class="running-block">
           <div v-if="genPreparingMsg" class="preparing-hint">{{ genPreparingMsg }}</div>
