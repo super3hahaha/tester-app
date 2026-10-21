@@ -314,3 +314,6 @@ GmailPage / FavoriteMailsPage 的卡片第一行 `.mi-row1` 是 `overflow: hidde
 - stdin 大输入和 stderr 大输出要并发 drain；仅等待 child 再读管道会死锁。最终输出文件名需每次唯一，否则多功能并行生成可能互串。
 - `~/.claude/skills` 只是本 App 的共享 skill 存储位置，Codex 不需要安装 Claude CLI；缺 skill 则去设置更新。skill 的相对资源路径必须绑定其目录。
 - skill 模式有沙箱：只授予本次任务目录。脚本如果需要在别处安装依赖会明确失败，不能把它当作成功产物。
+## Chrome 资料列表依赖读取其他应用的数据目录
+
+`list_chrome_profiles` 从 `~/Library/Application Support/Google/Chrome/Local State` 读 `profile.info_cache`。macOS 隐私权限拒绝该路径时会返回 `Operation not permitted`，旧前端把错误吞掉，浏览器下拉框只剩「系统默认浏览器」。Gmail 与 App Script 页现在优先引导用户到「系统设置 → 隐私与安全性 → 文件与文件夹」为 tester-app 开启“应用程序数据”访问权限，并提供重新读取；暂不授权时，可在目标 Chrome 窗口打开 `chrome://version`，把「个人资料路径」末段（如 `Profile 1`）手动填入，仍可用 `--profile-directory` 打开对应资料。不要仅凭选项为空判断 Chrome 里没有其他账号。

@@ -25,6 +25,8 @@ const DEFAULT_URL = "https://script.google.com/home?hl=zh-cn";
 
 const projects = ref<AppScriptProject[]>([]);
 const chromeProfiles = ref<ChromeProfile[]>([]);
+const chromeProfileError = ref("");
+const chromeProfileNeedsPermission = ref(false);
 const errorMsg = ref("");
 
 // 添加表单
@@ -51,8 +53,12 @@ onMounted(() => {
 async function loadChromeProfiles() {
   try {
     chromeProfiles.value = await invoke<ChromeProfile[]>("list_chrome_profiles");
-  } catch {
+    chromeProfileError.value = chromeProfiles.value.length ? "" : "未发现 Chrome 个人资料。";
+    chromeProfileNeedsPermission.value = false;
+  } catch (e) {
     chromeProfiles.value = [];
+    chromeProfileError.value = `无法读取 Chrome 个人资料：${String(e)}`;
+    chromeProfileNeedsPermission.value = String(e).includes("Operation not permitted");
   }
 }
 
@@ -76,7 +82,7 @@ function addProject() {
   projects.value.push({
     id: genId(),
     label,
-    profileDir: newProfile.value || undefined,
+    profileDir: newProfile.value.trim() || undefined,
     url,
   });
   cancelAdd();
@@ -121,6 +127,18 @@ async function openProject(p: AppScriptProject) {
     </header>
 
     <div v-if="errorMsg" class="banner banner-error">{{ errorMsg }}</div>
+    <p v-if="chromeProfileNeedsPermission" class="profile-error" :title="chromeProfileError">
+      macOS 已阻止读取 Chrome 个人资料。请前往「系统设置 → 隐私与安全性 → 文件与文件夹」，找到
+      tester-app 并开启“应用程序数据”访问权限；然后彻底退出并重新打开 tester-app。
+      <button type="button" class="profile-retry" @click="loadChromeProfiles">重新读取</button>
+      <small class="profile-fallback">
+        暂不授权也可以：在目标 Chrome 窗口打开 chrome://version，将“个人资料路径”的最后一段填入浏览器输入框。
+      </small>
+    </p>
+    <p v-else-if="chromeProfileError" class="profile-error" :title="chromeProfileError">
+      {{ chromeProfileError }} 可在目标 Chrome 窗口打开 chrome://version，将“个人资料路径”的最后一段填入浏览器输入框。
+      <button type="button" class="profile-retry" @click="loadChromeProfiles">重新读取</button>
+    </p>
 
     <section class="list-card" v-if="projects.length > 0">
       <article v-for="p in projects" :key="p.id" class="project-item">
@@ -131,12 +149,13 @@ async function openProject(p: AppScriptProject) {
         </div>
         <div class="pi-row sub">
           <label class="mini-label">浏览器</label>
-          <select v-model="p.profileDir" class="src-select" title="用哪个 Chrome 个人资料打开">
+          <select v-if="chromeProfiles.length" v-model="p.profileDir" class="src-select" title="用哪个 Chrome 个人资料打开">
             <option :value="undefined">系统默认浏览器</option>
             <option v-for="cp in chromeProfiles" :key="cp.dir" :value="cp.dir">
               Chrome · {{ cp.name }}
             </option>
           </select>
+          <input v-else v-model="p.profileDir" class="src-select" placeholder="Chrome 资料目录名，如 Profile 1；留空使用默认浏览器" />
         </div>
         <div class="pi-row sub">
           <label class="mini-label">链接</label>
@@ -158,12 +177,13 @@ async function openProject(p: AppScriptProject) {
       </div>
       <div class="form-row">
         <label class="form-label">浏览器</label>
-        <select v-model="newProfile" class="src-select" title="用哪个 Chrome 个人资料打开">
+        <select v-if="chromeProfiles.length" v-model="newProfile" class="src-select" title="用哪个 Chrome 个人资料打开">
           <option value="">系统默认浏览器</option>
           <option v-for="cp in chromeProfiles" :key="cp.dir" :value="cp.dir">
             Chrome · {{ cp.name }}
           </option>
         </select>
+        <input v-else v-model="newProfile" class="src-select" placeholder="Chrome 资料目录名，如 Profile 1；留空使用默认浏览器" />
       </div>
       <div class="form-row">
         <label class="form-label">链接</label>
@@ -288,6 +308,21 @@ async function openProject(p: AppScriptProject) {
 }
 .src-select:focus {
   border-color: #667eea;
+}
+.profile-error {
+  color: #a33b32;
+  font-size: 12px;
+}
+.profile-retry {
+  border: 0;
+  background: transparent;
+  color: #4b64c0;
+  cursor: pointer;
+}
+.profile-fallback {
+  display: block;
+  margin-top: 4px;
+  color: #777;
 }
 .text-input,
 .label-input {

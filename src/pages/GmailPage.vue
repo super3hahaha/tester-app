@@ -171,6 +171,8 @@ function tplTextForLang(t: TemplateView | undefined, lang: string): string {
 
 // 本机 Chrome 的 profile 列表（显示名 ↔ 目录名）
 const chromeProfiles = ref<ChromeProfile[]>([]);
+const chromeProfileError = ref("");
+const chromeProfileNeedsPermission = ref(false);
 
 const currentSource = computed(
   () => sources.value.find((s) => s.key === selectedId.value) || null
@@ -213,8 +215,12 @@ onMounted(() => {
 async function loadChromeProfiles() {
   try {
     chromeProfiles.value = await invoke<ChromeProfile[]>("list_chrome_profiles");
-  } catch {
+    chromeProfileError.value = chromeProfiles.value.length ? "" : "未发现 Chrome 个人资料。";
+    chromeProfileNeedsPermission.value = false;
+  } catch (e) {
     chromeProfiles.value = [];
+    chromeProfileError.value = `无法读取 Chrome 个人资料：${String(e)}`;
+    chromeProfileNeedsPermission.value = String(e).includes("Operation not permitted");
   }
 }
 
@@ -253,7 +259,7 @@ function addSource() {
     return;
   }
   const label = newLabel.value.trim() || `表 ${id.slice(0, 6)}…`;
-  sources.value.push({ key, id, tab, label, profileDir: newProfile.value || undefined, templateProduct: newTemplateProduct.value || undefined });
+  sources.value.push({ key, id, tab, label, profileDir: newProfile.value.trim() || undefined, templateProduct: newTemplateProduct.value || undefined });
   cancelAdd();
   selectSource(key);
 }
@@ -882,7 +888,7 @@ async function copyAndJumpAi(task: AiMailTask) {
       <div class="form-row profile-row">
         <label class="form-label">浏览器</label>
         <select
-          v-if="!adding"
+          v-if="!adding && chromeProfiles.length"
           :value="currentSource?.profileDir || ''"
           @change="onProfileChange"
           class="src-select"
@@ -894,13 +900,40 @@ async function copyAndJumpAi(task: AiMailTask) {
             Chrome · {{ p.name }}
           </option>
         </select>
-        <select v-else v-model="newProfile" class="src-select" title="用哪个 Chrome 个人资料打开该账号的邮件">
+        <select v-else-if="adding && chromeProfiles.length" v-model="newProfile" class="src-select" title="用哪个 Chrome 个人资料打开该账号的邮件">
           <option value="">系统默认浏览器</option>
           <option v-for="p in chromeProfiles" :key="p.dir" :value="p.dir">
             Chrome · {{ p.name }}
           </option>
         </select>
-        <span class="profile-hint">
+        <input
+          v-else-if="!adding && currentSource"
+          :value="currentSource.profileDir || ''"
+          @input="currentSource.profileDir = ($event.target as HTMLInputElement).value"
+          class="src-select"
+          placeholder="Chrome 资料目录名，如 Profile 1；留空使用默认浏览器"
+          title="在目标 Chrome 窗口打开 chrome://version，复制个人资料路径的最后一段"
+        />
+        <input
+          v-else
+          v-model="newProfile"
+          class="src-select"
+          placeholder="Chrome 资料目录名，如 Profile 1；留空使用默认浏览器"
+          title="在目标 Chrome 窗口打开 chrome://version，复制个人资料路径的最后一段"
+        />
+        <span v-if="chromeProfileNeedsPermission" class="profile-hint profile-error" :title="chromeProfileError">
+          macOS 已阻止读取 Chrome 个人资料。请前往「系统设置 → 隐私与安全性 → 文件与文件夹」，找到
+          tester-app 并开启“应用程序数据”访问权限；然后彻底退出并重新打开 tester-app。
+          <button type="button" class="profile-retry" @click="loadChromeProfiles">重新读取</button>
+          <small class="profile-fallback">
+            暂不授权也可以：在目标 Chrome 窗口打开 chrome://version，将“个人资料路径”的最后一段填入左侧。
+          </small>
+        </span>
+        <span v-else-if="chromeProfileError" class="profile-hint profile-error" :title="chromeProfileError">
+          {{ chromeProfileError }} 可在目标 Chrome 窗口打开 chrome://version，将“个人资料路径”的最后一段填入左侧。
+          <button type="button" class="profile-retry" @click="loadChromeProfiles">重新读取</button>
+        </span>
+        <span v-else class="profile-hint">
           选登录了该 Gmail 账号的那个 Chrome 资料，「在 Gmail 中打开」就会跳到对的窗口
         </span>
       </div>
@@ -1263,6 +1296,21 @@ async function copyAndJumpAi(task: AiMailTask) {
 .profile-hint {
   font-size: 11px;
   color: #999;
+}
+.profile-error {
+  color: #a33b32;
+}
+.profile-retry {
+  border: 0;
+  background: transparent;
+  color: #4b64c0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.profile-fallback {
+  display: block;
+  margin-top: 3px;
+  color: #777;
 }
 .form-label {
   width: 64px;
