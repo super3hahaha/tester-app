@@ -12,6 +12,7 @@ mod manifest;
 mod mantis;
 mod model_config;
 mod notify;
+mod prd_app;
 mod prd_risk;
 mod prd_supplement;
 mod prompt_config;
@@ -161,6 +162,8 @@ pub fn run() {
             knowledge_base::kb_list_skill_risk_docs,
             knowledge_base::kb_read_skill_doc,
             knowledge_base::kb_save_skill_doc,
+            prd_app::list_prd_risk_app_mappings,
+            prd_app::save_prd_risk_app_mappings,
             prd_supplement::run_prd_supplement_reuse,
             prd_supplement::stop_prd_supplement_reuse,
             prd_supplement::list_prd_supplement_apps,

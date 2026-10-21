@@ -39,6 +39,15 @@ interface ParsedSupplement {
   intro: string;
   modules: SupplementModule[];
 }
+interface PrdRiskAppMapping {
+  app_name: string;
+  knowledge_app_name: string;
+}
+interface SkillRiskDoc {
+  id: string;
+  name: string;
+  path: string;
+}
 
 // ── 解析/序列化：补充测试点.md 是固定格式（# 标题 / > 说明 / **模块** / - [ ] 条目） ──
 function parseSupplementMd(md: string): ParsedSupplement {
@@ -103,6 +112,12 @@ const genExpanded = ref(true);
 const appName = ref("");
 const version = ref("");
 const productNameSuggestions = ref<string[]>([]);
+const riskAppMappings = ref<PrdRiskAppMapping[]>([]);
+const mappingDrafts = ref<PrdRiskAppMapping[]>([]);
+const knowledgeAppSuggestions = ref<string[]>([]);
+const mappingExpanded = ref(false);
+const mappingError = ref("");
+const mappingSaved = ref("");
 const slidesFiles = ref<DriveFile[]>([]);
 const loadingSlides = ref(false);
 const slidesError = ref("");
@@ -146,10 +161,73 @@ function clearHtmlFile() {
 
 async function loadProductNameSuggestions() {
   try {
-    const products = await invoke<Array<{ name: string }>>("list_template_products");
-    productNameSuggestions.value = products.map((p) => p.name).filter((n) => n !== "通用");
+    const products = await invoke<Array<{ product: string }>>("list_template_products");
+    productNameSuggestions.value = products.map((p) => p.product).filter((n) => n !== "通用");
   } catch {
     productNameSuggestions.value = [];
+  }
+}
+
+async function loadRiskAppMappings() {
+  try {
+    riskAppMappings.value = await invoke<PrdRiskAppMapping[]>("list_prd_risk_app_mappings");
+  } catch (e: any) {
+    mappingError.value = String(e);
+  }
+}
+
+async function loadKnowledgeAppSuggestions() {
+  try {
+    const docs = await invoke<SkillRiskDoc[]>("kb_list_skill_risk_docs");
+    knowledgeAppSuggestions.value = docs
+      .filter((doc) => doc.id.startsWith("app:"))
+      .map((doc) => doc.id.slice(4));
+  } catch {
+    knowledgeAppSuggestions.value = [];
+  }
+}
+
+const effectiveKnowledgeAppName = computed(() => {
+  const name = appName.value.trim();
+  if (!name) return "";
+  return (
+    riskAppMappings.value.find((mapping) => mapping.app_name.trim().toLowerCase() === name.toLowerCase())
+      ?.knowledge_app_name || name
+  );
+});
+
+async function toggleMappingManager() {
+  mappingExpanded.value = !mappingExpanded.value;
+  mappingError.value = "";
+  mappingSaved.value = "";
+  if (!mappingExpanded.value) return;
+  await Promise.all([loadRiskAppMappings(), loadKnowledgeAppSuggestions()]);
+  mappingDrafts.value = riskAppMappings.value.map((mapping) => ({ ...mapping }));
+}
+
+function addMappingRow() {
+  const current = appName.value.trim();
+  const exists = mappingDrafts.value.some(
+    (mapping) => mapping.app_name.trim().toLowerCase() === current.toLowerCase()
+  );
+  mappingDrafts.value.push({ app_name: current && !exists ? current : "", knowledge_app_name: "" });
+}
+
+function deleteMappingRow(index: number) {
+  mappingDrafts.value.splice(index, 1);
+  mappingSaved.value = "";
+}
+
+async function saveMappings() {
+  mappingError.value = "";
+  mappingSaved.value = "";
+  try {
+    await invoke("save_prd_risk_app_mappings", { mappings: mappingDrafts.value });
+    await loadRiskAppMappings();
+    mappingDrafts.value = riskAppMappings.value.map((mapping) => ({ ...mapping }));
+    mappingSaved.value = "已保存；补充测试点和风险沉淀都会使用这份映射";
+  } catch (e: any) {
+    mappingError.value = String(e);
   }
 }
 
@@ -457,7 +535,7 @@ watch(selectedGeneration, (id) => {
 });
 
 onMounted(async () => {
-  await Promise.all([refreshApps(), loadProductNameSuggestions(), loadSlidesFiles()]);
+  await Promise.all([refreshApps(), loadProductNameSuggestions(), loadSlidesFiles(), loadRiskAppMappings()]);
   if (apps.value.length > 0) {
     selectedApp.value = apps.value[0];
     genExpanded.value = false;
@@ -501,12 +579,52 @@ onUnmounted(() => {
             v-model="appName"
             class="text-input"
             list="supplement-app-name-suggestions"
-            placeholder="如 MP3Cutter（对应知识库文件名）"
+            placeholder="如 VTM"
             :disabled="genPhase === 'running'"
           />
+          <button class="link-btn mapping-manage-btn" :disabled="genPhase === 'running'" @click="toggleMappingManager">
+            {{ mappingExpanded ? "收起映射" : "管理知识库映射" }}
+          </button>
           <datalist id="supplement-app-name-suggestions">
             <option v-for="n in productNameSuggestions" :key="n" :value="n" />
           </datalist>
+        </div>
+        <div v-if="appName.trim()" class="mapping-current">
+          本次将读取：<code>references/apps/{{ effectiveKnowledgeAppName }}.md</code>
+          <span v-if="effectiveKnowledgeAppName === appName.trim()">（未配置映射，按 APP 名称查找）</span>
+        </div>
+
+        <div v-if="mappingExpanded" class="mapping-panel">
+          <div class="mapping-panel-title">APP 名称 → 风险知识库文件名</div>
+          <div class="mapping-panel-help">
+            文件名不用带 <code>.md</code>；目标文件暂时不存在也可以先配置，之后沉淀知识库时会复用同一映射。
+          </div>
+          <div v-for="(mapping, index) in mappingDrafts" :key="index" class="mapping-row">
+            <input
+              v-model="mapping.app_name"
+              class="text-input mapping-input"
+              list="supplement-app-name-suggestions"
+              placeholder="界面 APP 名，如 VTM"
+            />
+            <span class="mapping-arrow">→</span>
+            <input
+              v-model="mapping.knowledge_app_name"
+              class="text-input mapping-input"
+              list="risk-knowledge-app-suggestions"
+              placeholder="知识库文件名，如 Video to MP3 Android"
+            />
+            <button class="icon-btn mapping-delete" title="删除映射" @click="deleteMappingRow(index)">✕</button>
+          </div>
+          <datalist id="risk-knowledge-app-suggestions">
+            <option v-for="name in knowledgeAppSuggestions" :key="name" :value="name" />
+          </datalist>
+          <div v-if="mappingDrafts.length === 0" class="mapping-empty">暂无映射；未配置的 APP 会按同名知识库文件查找</div>
+          <div v-if="mappingError" class="banner banner-error mapping-message">{{ mappingError }}</div>
+          <div v-if="mappingSaved" class="mapping-saved">{{ mappingSaved }}</div>
+          <div class="mapping-actions">
+            <button class="link-btn" @click="addMappingRow">+ 新增映射</button>
+            <button class="fetch-btn mapping-save" @click="saveMappings">保存映射</button>
+          </div>
         </div>
         <div class="form-row">
           <label class="form-label">版本号</label>
@@ -805,6 +923,78 @@ onUnmounted(() => {
 .text-input:disabled {
   background: #f5f5f5;
   color: #999;
+}
+.mapping-manage-btn {
+  flex-shrink: 0;
+}
+.mapping-current {
+  margin: -2px 0 10px 72px;
+  font-size: 11px;
+  color: #718096;
+}
+.mapping-current code,
+.mapping-panel-help code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #edf2f7;
+  color: #4a5568;
+}
+.mapping-panel {
+  margin: 0 0 12px 72px;
+  padding: 10px 12px;
+  border: 1px solid #dfe4ff;
+  border-radius: 8px;
+  background: #f8f9ff;
+}
+.mapping-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a5568;
+}
+.mapping-panel-help {
+  margin: 3px 0 9px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #718096;
+}
+.mapping-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.mapping-input {
+  min-width: 0;
+}
+.mapping-arrow {
+  flex-shrink: 0;
+  color: #a0aec0;
+}
+.mapping-delete {
+  flex-shrink: 0;
+  color: #c53030;
+}
+.mapping-empty {
+  padding: 8px 0;
+  font-size: 11px;
+  color: #a0aec0;
+}
+.mapping-message {
+  margin: 8px 0 0;
+}
+.mapping-saved {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #38a169;
+}
+.mapping-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 9px;
+}
+.mapping-save {
+  padding: 5px 12px;
 }
 
 .slides-picker-row {

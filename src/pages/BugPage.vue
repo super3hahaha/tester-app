@@ -935,7 +935,7 @@ function formatForCopy(d: IssueDetail): string {
               v-model="riskAppName"
               class="text-input"
               list="risk-app-name-suggestions"
-              placeholder="如 MP3Cutter（对应知识库文件名）"
+              placeholder="如 VTM（知识库映射在补充测试点页管理）"
             />
             <datalist id="risk-app-name-suggestions">
               <option v-for="n in productNameSuggestions" :key="n" :value="n" />

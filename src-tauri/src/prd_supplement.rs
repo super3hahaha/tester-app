@@ -139,6 +139,7 @@ async fn run_inner(
     app: AppHandle,
 ) -> Result<String, String> {
     let app_name = app_name.trim().to_string();
+    let knowledge_app_name = crate::prd_app::knowledge_app_name(&app_name);
     let version = version.trim().to_string();
     validate_segment(&app_name, "APP 名称")?;
     validate_segment(&version, "版本号")?;
@@ -194,8 +195,14 @@ async fn run_inner(
 
     let mut prompt = format!(
         "/prd-risk-profiler\nAPP名称：{}\n版本号：{}\n",
-        app_name, version
+        knowledge_app_name, version
     );
+    if knowledge_app_name != app_name {
+        prompt.push_str(&format!(
+            "APP界面简称：{}\n知识库专属文件（必须按此精确文件名读取）：references/apps/{}.md\n",
+            app_name, knowledge_app_name
+        ));
+    }
     if !prd_image_paths.is_empty() {
         prompt.push_str("PRD（Slides 按页截图或本地导入图片，逐张 Read 查看）：\n");
         for p in &prd_image_paths {

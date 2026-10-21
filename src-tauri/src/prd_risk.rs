@@ -182,10 +182,17 @@ async fn run_inner(
         version.trim().to_string()
     };
 
+    let knowledge_app_name = crate::prd_app::knowledge_app_name(&app_name);
     let mut prompt = format!(
         "/prd-risk-profiler\nAPP名称：{}\n版本号：{}\n",
-        app_name, version
+        knowledge_app_name, version
     );
+    if knowledge_app_name != app_name {
+        prompt.push_str(&format!(
+            "APP界面简称：{}\n知识库专属文件（必须按此精确文件名读写）：references/apps/{}.md\n",
+            app_name, knowledge_app_name
+        ));
+    }
     if !prd_image_paths.is_empty() {
         prompt.push_str("PRD（Slides 按页截图或本地导入图片，逐张 Read 查看）：\n");
         for p in &prd_image_paths {
@@ -211,7 +218,7 @@ python3 \"{}/scripts/extract_html.py\" --input \"{}\" --outdir \"{}\"（Windows 
 references/risk-taxonomy.md（通用风险）和 references/apps/{}.md（专属风险，\
 不存在就复制 _TEMPLATE.md 新建），最后给出本轮沉淀摘要（识别了几个变更、\
 几条归通用/几条归专属、两份文件分别有什么变化）。\n",
-        bug_report_path_str, app_name
+        bug_report_path_str, knowledge_app_name
     ));
 
     let cfg = crate::model_config::load();
